@@ -10,6 +10,9 @@
 	import { cardSize } from '$lib/stores/cardSize';
 	import { fontScale, type FontScale } from '$lib/stores/fontScale';
 	import { systemFont } from '$lib/stores/systemFont';
+	import { onMount } from 'svelte';
+	import { VIEWS, canHide, type ViewId } from '$lib/views/views';
+	import { hiddenViews, loadHiddenViews, saveViewVisible } from '$lib/views/store';
 
 	const fontSteps: FontScale[] = [12, 13, 14, 15];
 	const fontLabels: Record<FontScale, string> = { 12: 'Extra Small', 13: 'Small', 14: 'Regular', 15: 'Large' };
@@ -21,6 +24,21 @@
 	const hApproval = $derived($accessibleColors ? 302 : 285); // violet → purple
 	const hFailed = $derived($accessibleColors ? 257 : 25);    // rose → slate
 	const cFailed = $derived($accessibleColors ? 0.01 : 0.05); // low chroma for slate
+
+	let viewsError = $state('');
+
+	onMount(() => {
+		loadHiddenViews();
+	});
+
+	async function toggleView(id: ViewId, visible: boolean) {
+		viewsError = '';
+		try {
+			await saveViewVisible(id, visible);
+		} catch {
+			viewsError = 'Could not save visible views.';
+		}
+	}
 </script>
 
 <div class="space-y-8">
@@ -302,6 +320,37 @@
 				</p>
 			</div>
 		</div>
+	</div>
+
+	<!-- Visible views: which views appear in the titlebar navigation -->
+	<div class="{$glassTheme ? 'glass-section' : 'rounded-xl border border-surface-700 bg-surface-800'} p-6">
+		<h3 class="mb-1 text-laya-heading font-semibold text-surface-50">Visible views</h3>
+		<p class="mb-5 text-laya-base text-surface-400">Choose which views appear in the navigation. Hidden views stay reachable by URL, and at least one view stays visible.</p>
+
+		<div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+			{#each VIEWS as view (view.id)}
+				{@const visible = !$hiddenViews.includes(view.id)}
+				{@const locked = visible && !canHide($hiddenViews, view.id)}
+				<label
+					class="flex items-center gap-2 rounded-lg border border-surface-700 bg-surface-900/50 px-3 py-2 text-laya-base text-surface-200 {locked ? 'opacity-60' : 'cursor-pointer'}"
+					title={locked ? 'At least one view must stay visible' : ''}
+				>
+					<input
+						type="checkbox"
+						class="accent-laya-orange"
+						checked={visible}
+						disabled={locked}
+						onchange={(e) => toggleView(view.id, e.currentTarget.checked)}
+					/>
+					{view.label}
+				</label>
+			{/each}
+		</div>
+
+		<p class="mt-3 text-laya-secondary text-surface-500">Omni's background summaries are turned off while Omni is hidden. Coherence and Corpus only cost something when used.</p>
+		{#if viewsError}
+			<p class="mt-2 text-laya-secondary text-red-400">{viewsError}</p>
+		{/if}
 	</div>
 
 </div>

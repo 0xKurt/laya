@@ -468,6 +468,7 @@ export interface Settings {
 		event_threshold: number;
 	};
 	n8n?: N8nSettings;
+	views?: { hidden: string[] };
 	feed_preferences?: FeedPreferences;
 	pipeline?: PipelineSettings;
 	setup_complete?: boolean;

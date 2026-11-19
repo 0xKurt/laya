@@ -49,6 +49,8 @@
 	import Titlebar from '$lib/components/Titlebar.svelte';
 	import { startPeriodicCheck, stopPeriodicCheck } from '$lib/stores/updater';
 	import { onMount } from 'svelte';
+	import { visibleViews, isHrefHidden } from '$lib/views/views';
+	import { hiddenViews, loadHiddenViews } from '$lib/views/store';
 
 	function formatDateLabel(dateStr: string): string {
 		const today = localToday();
@@ -92,6 +94,8 @@
 	let { children } = $props();
 	let isSetupRoute = $derived(page.url.pathname.startsWith('/setup'));
 	let isFeedRoute = $derived(page.url.pathname === '/feed' || page.url.pathname === '/');
+	let navViews = $derived(visibleViews($hiddenViews));
+	const isViewActive = (href: string) => (href === '/feed' ? isFeedRoute : page.url.pathname.startsWith(href));
 	// Responsive titlebar: two-stage collapse using collision detection.
 	// Stage 1: nav links collapse to hamburger when they overlap the center date panel.
 	// Stage 2: date panel collapses to a calendar button when it overlaps the right controls.
@@ -263,6 +267,7 @@
 		// Load spaces, feed filters, and budget status once engine is available
 		loadSpaces();
 		loadFeedFilters();
+		loadHiddenViews();
 		loadBudgetStatus();
 		loadAgentBudgetStatus();
 		loadAuditFailureSummary();
@@ -467,6 +472,7 @@
 		function handleCoherenceShortcut(e: KeyboardEvent) {
 			if (e.key === 's' && (e.metaKey || e.ctrlKey) && !e.altKey) {
 				e.preventDefault();
+				if (isHrefHidden($hiddenViews, '/coherence')) return;
 				goto('/coherence').then(() => {
 					requestAnimationFrame(() => triggerSearchFocus());
 				});
@@ -478,6 +484,7 @@
 		function handlePulseShortcut(e: KeyboardEvent) {
 			if (e.key === 'p' && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
 				e.preventDefault();
+				if (isHrefHidden($hiddenViews, '/feed')) return;
 				goto('/feed');
 			}
 		}
@@ -487,6 +494,7 @@
 		function handleOmniShortcut(e: KeyboardEvent) {
 			if (e.key === 'o' && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
 				e.preventDefault();
+				if (isHrefHidden($hiddenViews, '/omni')) return;
 				goto('/omni');
 			}
 		}
@@ -581,110 +589,30 @@
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<div class="fixed inset-0 z-[9998]" onclick={() => (navMenuOpen = false)} onkeydown={() => {}}></div>
 					<nav class="absolute left-0 top-full z-[9999] mt-1 flex flex-col rounded-lg border border-surface-700 bg-surface-800 py-1 shadow-lg">
-						<a
-							href="/feed"
-							class="whitespace-nowrap px-4 py-1.5 text-xs font-medium transition-colors
-								{isFeedRoute
-									? 'bg-laya-orange/10 text-laya-orange'
-									: 'text-surface-400 hover:text-surface-200 hover:bg-surface-700'}"
-						>Pulse</a>
-						<a
-							href="/board"
-							class="whitespace-nowrap px-4 py-1.5 text-xs font-medium transition-colors
-								{page.url.pathname.startsWith('/board')
-									? 'bg-laya-orange/10 text-laya-orange'
-									: 'text-surface-400 hover:text-surface-200 hover:bg-surface-700'}"
-						>Board</a>
-						<a
-							href="/work"
-							class="whitespace-nowrap px-4 py-1.5 text-xs font-medium transition-colors
-								{page.url.pathname.startsWith('/work')
-									? 'bg-laya-orange/10 text-laya-orange'
-									: 'text-surface-400 hover:text-surface-200 hover:bg-surface-700'}"
-						>My work</a>
-						<a
-							href="/terminal"
-							class="whitespace-nowrap px-4 py-1.5 text-xs font-medium transition-colors
-								{page.url.pathname.startsWith('/terminal')
-									? 'bg-laya-orange/10 text-laya-orange'
-									: 'text-surface-400 hover:text-surface-200 hover:bg-surface-700'}"
-						>Claude</a>
-						<a
-							href="/omni"
-							class="whitespace-nowrap px-4 py-1.5 text-xs font-medium transition-colors
-								{page.url.pathname.startsWith('/omni')
-									? 'bg-laya-orange/10 text-laya-orange'
-									: 'text-surface-400 hover:text-surface-200 hover:bg-surface-700'}"
-						>Omni</a>
-						<a
-							href="/coherence"
-							class="whitespace-nowrap px-4 py-1.5 text-xs font-medium transition-colors
-								{page.url.pathname.startsWith('/coherence')
-									? 'bg-laya-orange/10 text-laya-orange'
-									: 'text-surface-400 hover:text-surface-200 hover:bg-surface-700'}"
-						>Coherence</a>
-						<a
-							href="/corpus"
-							class="whitespace-nowrap px-4 py-1.5 text-xs font-medium transition-colors
-								{page.url.pathname.startsWith('/corpus')
-									? 'bg-laya-orange/10 text-laya-orange'
-									: 'text-surface-400 hover:text-surface-200 hover:bg-surface-700'}"
-						>Corpus</a>
+						{#each navViews as view (view.id)}
+							<a
+								href={view.href}
+								class="whitespace-nowrap px-4 py-1.5 text-xs font-medium transition-colors
+									{isViewActive(view.href)
+										? 'bg-laya-orange/10 text-laya-orange'
+										: 'text-surface-400 hover:text-surface-200 hover:bg-surface-700'}"
+							>{view.label}</a>
+						{/each}
 					</nav>
 				{/if}
 			</div>
 		{:else}
 			<!-- Inline nav for normal widths -->
 			<nav data-titlebar-nav class="flex items-center gap-0.5">
-				<a
-					href="/feed"
-					class="rounded-md px-2.5 py-1 text-xs font-medium transition-colors
-						{isFeedRoute
-							? 'bg-laya-orange/10 text-laya-orange'
-							: 'text-surface-400 hover:text-surface-200 titlebar-hover'}"
-				>Pulse</a>
-				<a
-					href="/board"
-					class="rounded-md px-2.5 py-1 text-xs font-medium transition-colors
-						{page.url.pathname.startsWith('/board')
-							? 'bg-laya-orange/10 text-laya-orange'
-							: 'text-surface-400 hover:text-surface-200 titlebar-hover'}"
-				>Board</a>
-				<a
-					href="/work"
-					class="rounded-md px-2.5 py-1 text-xs font-medium transition-colors
-						{page.url.pathname.startsWith('/work')
-							? 'bg-laya-orange/10 text-laya-orange'
-							: 'text-surface-400 hover:text-surface-200 titlebar-hover'}"
-				>My work</a>
-				<a
-					href="/terminal"
-					class="rounded-md px-2.5 py-1 text-xs font-medium transition-colors
-						{page.url.pathname.startsWith('/terminal')
-							? 'bg-laya-orange/10 text-laya-orange'
-							: 'text-surface-400 hover:text-surface-200 titlebar-hover'}"
-				>Claude</a>
-				<a
-					href="/omni"
-					class="rounded-md px-2.5 py-1 text-xs font-medium transition-colors
-						{page.url.pathname.startsWith('/omni')
-							? 'bg-laya-orange/10 text-laya-orange'
-							: 'text-surface-400 hover:text-surface-200 titlebar-hover'}"
-				>Omni</a>
-				<a
-					href="/coherence"
-					class="rounded-md px-2.5 py-1 text-xs font-medium transition-colors
-						{page.url.pathname.startsWith('/coherence')
-							? 'bg-laya-orange/10 text-laya-orange'
-							: 'text-surface-400 hover:text-surface-200 titlebar-hover'}"
-				>Coherence</a>
-				<a
-					href="/corpus"
-					class="rounded-md px-2.5 py-1 text-xs font-medium transition-colors
-						{page.url.pathname.startsWith('/corpus')
-							? 'bg-laya-orange/10 text-laya-orange'
-							: 'text-surface-400 hover:text-surface-200 titlebar-hover'}"
-				>Corpus</a>
+				{#each navViews as view (view.id)}
+					<a
+						href={view.href}
+						class="rounded-md px-2.5 py-1 text-xs font-medium transition-colors
+							{isViewActive(view.href)
+								? 'bg-laya-orange/10 text-laya-orange'
+								: 'text-surface-400 hover:text-surface-200 titlebar-hover'}"
+					>{view.label}</a>
+				{/each}
 			</nav>
 		{/if}
 	{/snippet}
