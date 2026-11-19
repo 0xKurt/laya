@@ -30,6 +30,7 @@ from laya.api.classification_api import router as classification_router
 from laya.api.connections_api import router as connections_router
 from laya.api.context_rules_api import router as context_rules_router
 from laya.api.egress_api import router as egress_router
+from laya.api.collector_api import router as collector_router
 from laya.api.chat_api import router as chat_router
 from laya.api.dashboard_api import router as dashboard_router
 from laya.api.diagnostics_api import router as diagnostics_router
@@ -332,6 +333,10 @@ async def lifespan(app: FastAPI):
     # Start briefing scheduler
     start_scheduler()
 
+    # Start the MCP collector (no-op until mcp_collector.enabled is set)
+    from laya.collectors.mcp_collector import start_collector
+    start_collector()
+
     # Startup budget month-rollover check (fallback for missed rollovers)
     try:
         from laya.pipeline.budget import (
@@ -425,6 +430,8 @@ async def lifespan(app: FastAPI):
     stop_omni_processor()
     await stop_consumer()
     stop_scheduler()
+    from laya.collectors.mcp_collector import stop_collector
+    stop_collector()
     await session_manager.cleanup_on_shutdown()
 
     from laya.mcp.http_server import streamable_sessions as mcp_sessions
@@ -529,6 +536,7 @@ app.include_router(classification_router, dependencies=auth_deps)
 app.include_router(connections_router, dependencies=auth_deps)
 app.include_router(context_rules_router, dependencies=auth_deps)
 app.include_router(egress_router, dependencies=auth_deps)
+app.include_router(collector_router, dependencies=auth_deps)
 app.include_router(chat_router, dependencies=auth_deps)
 app.include_router(dashboard_router, dependencies=auth_deps)
 app.include_router(diagnostics_router, dependencies=auth_deps)
