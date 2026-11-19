@@ -895,7 +895,12 @@ export const engineApi = {
 	// Agent inference backend — usage-limit budget (window-based, auto-resume)
 	getAgentBudget: () => request<AgentBudgetStatus>('/agent-budget'),
 
-	updateAgentBudget: (config: { enabled: boolean; agents: Record<string, AgentBudgetConfigInput> }) =>
+	updateAgentBudget: (config: {
+		enabled: boolean;
+		agents: Record<string, AgentBudgetConfigInput>;
+		daily_call_limit?: number;
+		pause_at_utilization?: Record<string, number>;
+	}) =>
 		request<{ status: string } & AgentBudgetStatus>('/agent-budget', {
 			method: 'PUT',
 			body: JSON.stringify(config)

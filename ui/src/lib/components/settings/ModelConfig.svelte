@@ -9,7 +9,7 @@
 	import { reducedMotion } from '$lib/stores/reducedMotion';
 	import type { ProviderModels, CustomProvider, CustomProviderTestResult, DiscoveredModel, PipelineSettings, BudgetConfig, MonthlyCostEntry, AgentBackend, AgentBudgetStatus } from '$lib/api/types';
 	import { parseBackendDate } from '$lib/utils/datetime';
-	import { budgetPaused, loadBudgetStatus, loadAgentBudgetStatus, fmtTokens } from '$lib/stores/budget';
+	import { budgetPaused, loadBudgetStatus, loadAgentBudgetStatus, fmtTokens, agentPauseHeadline } from '$lib/stores/budget';
 	import { portal } from '$lib/actions/portal';
 	import { CODING_AGENTS } from '$lib/config';
 	import ModelSelect from './ModelSelect.svelte';
@@ -86,6 +86,11 @@
 	let agentBudgetEnabled = $state(false);
 	let agentBudgetAgents = $state<Record<string, { window_token_limit: number | null; window_hours: number; pause_at_percent: number }>>({});
 	let agentBudgetStatus = $state<AgentBudgetStatus | null>(null);
+	// Hard cap on agent calls per local day (0 = off); applies even with the window limits off.
+	let agentDailyCallLimit = $state<number | null>(400);
+	// Utilization (percent of the agent's own window) at which its rate-limit warning pauses.
+	let agentWarnFiveHourPct = $state<number | null>(90);
+	let agentWarnSevenDayPct = $state<number | null>(80);
 	let savingAgentBudget = $state(false);
 	let resumingAgentBudget = $state(false);
 	let agentBudgetTimer: ReturnType<typeof setTimeout> | null = null;
@@ -113,6 +118,9 @@
 			const data = await engineApi.getAgentBudget();
 			agentBudgetStatus = data;
 			agentBudgetEnabled = data.enabled;
+			agentDailyCallLimit = data.daily_call_limit;
+			agentWarnFiveHourPct = Math.round((data.pause_at_utilization?.five_hour ?? 0.9) * 100);
+			agentWarnSevenDayPct = Math.round((data.pause_at_utilization?.seven_day ?? 0.8) * 100);
 			for (const a of data.agents) {
 				agentBudgetAgents[a.agent_id] = {
 					window_token_limit: a.window_token_limit || null,
@@ -138,7 +146,17 @@
 					};
 				}
 			}
-			await engineApi.updateAgentBudget({ enabled: agentBudgetEnabled, agents });
+			const pct = (v: number | null, fallback: number) =>
+				Math.min(100, Math.max(1, v == null || Number.isNaN(v) ? fallback : v)) / 100;
+			await engineApi.updateAgentBudget({
+				enabled: agentBudgetEnabled,
+				agents,
+				daily_call_limit: Math.max(0, Math.round(agentDailyCallLimit ?? 0)),
+				pause_at_utilization: {
+					five_hour: pct(agentWarnFiveHourPct, 90),
+					seven_day: pct(agentWarnSevenDayPct, 80),
+				},
+			});
 			await loadAgentBudget();
 			loadAgentBudgetStatus();
 		} catch (e) {
@@ -1013,14 +1031,20 @@
 				</div>
 
 				{#if agentBudgetStatus?.is_paused}
-					<div class="mb-4 flex items-center justify-between rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3">
-						<div class="flex items-center gap-2">
-							<svg class="h-4 w-4 text-red-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<div class="mb-4 flex items-center justify-between gap-3 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3">
+						<div class="flex items-start gap-2">
+							<svg class="mt-0.5 h-4 w-4 text-red-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
 							</svg>
-							<span class="text-laya-base text-red-300">
-								Usage limit reached — ingestion paused{#if agentBudgetStatus.paused_until} until {parseBackendDate(agentBudgetStatus.paused_until)?.toLocaleString()}{/if}
-							</span>
+							<div class="flex flex-col gap-0.5">
+								<span class="text-laya-base text-red-300">
+									{agentPauseHeadline(agentBudgetStatus.paused_reason)} — ingestion paused{#if agentBudgetStatus.paused_until} until {parseBackendDate(agentBudgetStatus.paused_until)?.toLocaleString()}{/if}
+								</span>
+								<span class="text-laya-micro text-red-300/80">
+									{#if agentBudgetStatus.paused_at}Since {parseBackendDate(agentBudgetStatus.paused_at)?.toLocaleString()}{/if}{#if agentBudgetStatus.paused_reason}{agentBudgetStatus.paused_at ? ' · ' : ''}{agentBudgetStatus.paused_reason}{/if}
+								</span>
+								<span class="text-laya-micro text-red-300/80">Queued events wait and are processed after the resume.</span>
+							</div>
 						</div>
 						<button
 							onclick={handleResumeAgent}
@@ -1033,6 +1057,20 @@
 				{/if}
 
 				<div class="space-y-4">
+					<div class="rounded-lg border border-surface-700 bg-surface-900/50 p-4">
+						<div class="grid grid-cols-3 items-end gap-3">
+							<label class="text-laya-micro text-surface-500">
+								Daily call limit
+								<input type="number" min="0" step="50"
+									bind:value={agentDailyCallLimit} oninput={debounceSaveAgentBudget}
+									class="mt-1 w-full rounded-md border border-surface-600 bg-surface-700 px-2 py-1.5 text-laya-base text-surface-200" />
+							</label>
+							<span class="col-span-2 pb-2 text-laya-micro text-surface-500">
+								{#if agentBudgetStatus}Today: {agentBudgetStatus.daily_calls}{#if agentBudgetStatus.daily_call_limit > 0} / {agentBudgetStatus.daily_call_limit}{/if} agent calls{/if}
+							</span>
+						</div>
+						<p class="mt-2 text-laya-micro text-surface-500">A hard cap on agent calls per day (0 = off), applied even with the limits below off. When reached, ingestion pauses until midnight.</p>
+					</div>
 					<div class="flex items-center gap-3">
 						<button
 							aria-label="Toggle agent usage limits"
@@ -1054,7 +1092,7 @@
 										<span class="text-laya-base text-surface-200">{AGENT_LABELS[b.agent_id] || b.agent_id}</span>
 										{#if st?.rate_limit?.status}
 											<span class="text-laya-micro text-surface-500">
-												live limit: {st.rate_limit.status}{#if st.rate_limit.resets_at} · resets {new Date(st.rate_limit.resets_at * 1000).toLocaleTimeString()}{/if}
+												live limit: {st.rate_limit.status}{#if st.rate_limit.utilization != null} · {Math.round(st.rate_limit.utilization * 100)}% of {st.rate_limit.rate_limit_type === 'seven_day' ? 'weekly' : st.rate_limit.rate_limit_type === 'five_hour' ? '5-hour' : (st.rate_limit.rate_limit_type ?? 'its')} window{/if}{#if st.rate_limit.resets_at} · resets {new Date(st.rate_limit.resets_at * 1000).toLocaleString()}{/if}
 											</span>
 										{/if}
 									</div>
@@ -1095,7 +1133,24 @@
 								</div>
 							{/if}
 						{/each}
-						<p class="text-laya-micro text-surface-500">Tip: set the token budget to match your plan’s window (e.g. Claude Code’s 5-hour window). Claude Code also reports its live limit above and resumes exactly at its reset.</p>
+						<div class="rounded-lg border border-surface-700 bg-surface-900/50 p-4">
+							<div class="grid grid-cols-3 gap-3">
+								<label class="text-laya-micro text-surface-500">
+									Pause on 5-hour warning at %
+									<input type="number" min="1" max="100"
+										bind:value={agentWarnFiveHourPct} oninput={debounceSaveAgentBudget}
+										class="mt-1 w-full rounded-md border border-surface-600 bg-surface-700 px-2 py-1.5 text-laya-base text-surface-200" />
+								</label>
+								<label class="text-laya-micro text-surface-500">
+									Pause on weekly warning at %
+									<input type="number" min="1" max="100"
+										bind:value={agentWarnSevenDayPct} oninput={debounceSaveAgentBudget}
+										class="mt-1 w-full rounded-md border border-surface-600 bg-surface-700 px-2 py-1.5 text-laya-base text-surface-200" />
+								</label>
+							</div>
+							<p class="mt-2 text-laya-micro text-surface-500">Claude Code warns early about its own limits. A warning pauses ingestion only once that window is this full; a refusal always pauses until the agent's reset.</p>
+						</div>
+						<p class="text-laya-micro text-surface-500">Tip: set the token budget to match your plan’s window (e.g. Claude Code’s 5-hour window). A full token budget pauses ingestion for one window.</p>
 					{/if}
 				</div>
 			</div>

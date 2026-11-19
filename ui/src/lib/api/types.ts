@@ -348,6 +348,8 @@ export interface AgentRateLimit {
 	status: string | null;
 	resets_at: number | null;
 	rate_limit_type: string | null;
+	/** Fraction (0-1) of the native window used, when the agent reports it. */
+	utilization?: number | null;
 }
 
 /** Per-agent window usage + limit (from GET /agent-budget) */
@@ -366,7 +368,14 @@ export interface AgentBudgetAgentStatus {
 export interface AgentBudgetStatus {
 	enabled: boolean;
 	agents: AgentBudgetAgentStatus[];
+	/** Agent inference calls since local midnight. */
+	daily_calls: number;
+	/** Hard cap on agent calls per local day; 0 = off. Applies even when `enabled` is false. */
+	daily_call_limit: number;
+	/** Per native window type (five_hour, seven_day): utilization (0-1) at which a rate-limit warning pauses. */
+	pause_at_utilization: Record<string, number>;
 	is_paused: boolean;
+	paused_at: string | null;
 	paused_until: string | null;
 	paused_reason: string | null;
 	paused_workflow_count: number;

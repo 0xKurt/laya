@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import structlog
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from laya.pipeline.budget import (
     check_budget,
@@ -112,14 +112,37 @@ async def set_agent_budget(body: dict) -> dict:
     """Update agent-usage budget config.
 
     Body: {"enabled": true, "agents": {"claude_code": {"window_token_limit": 5000000,
-           "window_hours": 5, "pause_at_percent": 85}}}
+           "window_hours": 5, "pause_at_percent": 85}},
+           "daily_call_limit": 400, "pause_at_utilization": {"five_hour": 0.9, "seven_day": 0.8}}
+    daily_call_limit (0 = off) and pause_at_utilization (fractions 0-1 per native window
+    type) are optional; when left out they keep their stored values.
     """
     from laya.pipeline.agent_budget import evaluate_agent_budget, update_agent_budget_config
 
     enabled = bool(body.get("enabled", False))
     agents = body.get("agents")
-    config = update_agent_budget_config(enabled, agents)
-    log.info("agent_budget_config_updated", enabled=enabled, agents=list(config["agents"].keys()))
+    daily_call_limit = body.get("daily_call_limit")
+    if daily_call_limit is not None and (
+        isinstance(daily_call_limit, bool) or not isinstance(daily_call_limit, int) or daily_call_limit < 0
+    ):
+        raise HTTPException(status_code=422, detail="daily_call_limit must be a whole number >= 0")
+    thresholds = body.get("pause_at_utilization")
+    if thresholds is not None and not (
+        isinstance(thresholds, dict)
+        and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 1
+            for v in thresholds.values()
+        )
+    ):
+        raise HTTPException(
+            status_code=422, detail="pause_at_utilization values must be fractions between 0 and 1"
+        )
+    config = update_agent_budget_config(enabled, agents, daily_call_limit, thresholds)
+    log.info(
+        "agent_budget_config_updated", enabled=enabled, agents=list(config["agents"].keys()),
+        daily_call_limit=config["daily_call_limit"],
+        pause_at_utilization=config["pause_at_utilization"],
+    )
 
     # Run an immediate check so a just-lowered limit takes effect right away.
     if enabled:

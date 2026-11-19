@@ -14,7 +14,8 @@ import {
 	agentBudgetData,
 	agentUsageTop,
 	agentUsageLabel,
-	agentUsageRatio
+	agentUsageRatio,
+	agentPauseHeadline
 } from './budget';
 
 // The derived stores recompute from their source writable on every read, so
@@ -119,5 +120,17 @@ describe('agent usage derived stores', () => {
 			status([{ agent_id: 'a', window_token_limit: 1_000_000, tokens_used: 3_000_000, percent: 300 }])
 		);
 		expect(get(agentUsageRatio)).toBe(1);
+	});
+});
+
+describe('agentPauseHeadline', () => {
+	it('names the cause of the pause', () => {
+		expect(agentPauseHeadline('daily agent call limit reached (400/400)')).toBe('Daily agent call limit reached');
+		expect(agentPauseHeadline('claude_code: rate limit rejected')).toBe("The agent's own usage limit was reached");
+		expect(agentPauseHeadline('claude_code: 900000/1000000 tokens in 5.0h')).toBe('Agent token budget reached');
+	});
+	it('falls back to a generic headline', () => {
+		expect(agentPauseHeadline(null)).toBe('Agent usage limit reached');
+		expect(agentPauseHeadline('something else')).toBe('Agent usage limit reached');
 	});
 });

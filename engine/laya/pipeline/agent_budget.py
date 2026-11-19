@@ -15,12 +15,20 @@ monthly $ budget (``pipeline/budget.py``) but **window-based with auto-resume**:
 - When an agent crosses ``pause_at_percent`` of its window budget (or its native limit is
   hit), we pause ingestion (same n8n lever the $ budget uses) until the window resets, then
   the scheduler auto-resumes. This is the user-chosen "defer + auto-resume at reset".
+  A native ``allowed_warning`` pauses only once the window's utilization reaches
+  ``pause_at_utilization`` for its window type; a rejection always pauses.
+- A hard daily cap (``daily_call_limit``) on agent inference calls, applied whether or not
+  the window budgets are enabled. Reaching it refuses further calls and pauses ingestion
+  until local midnight.
+- While paused, the event queue claims nothing (``pipeline/queue.py``). An event whose
+  agent call the budget refuses goes back to the queue; resuming re-queues events that
+  died from such refusals.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import structlog
 
@@ -32,27 +40,60 @@ log = structlog.get_logger()
 
 DEFAULT_PAUSE_AT_PERCENT = 85
 DEFAULT_WINDOW_HOURS = 5.0
+DEFAULT_DAILY_CALL_LIMIT = 400
 
 # Native rate-limit statuses we consider "still OK to use".
 _OK_STATUSES = {"allowed", None, ""}
+
+# Claude Code reports "allowed_warning" early (e.g. at 61% of the weekly window, days
+# before its reset); pausing on it would stop ingestion while the user still has room.
+# A warning pauses only once the utilization of its window type reaches this fraction.
+DEFAULT_PAUSE_AT_UTILIZATION = {"five_hour": 0.9, "seven_day": 0.8}
+
+
+class AgentBudgetRefused(RuntimeError):
+    """An agent inference call the agent budget refused to run."""
+
+
+class AgentCallLimitReached(AgentBudgetRefused):
+    """The daily cap on agent inference calls is reached."""
 
 
 # ── config ───────────────────────────────────────────────────────────────
 
 
 def get_agent_budget_config() -> dict:
-    """Read agent-budget config from settings.json."""
+    """Read agent-budget config from settings.json, with this module's defaults."""
     s = load_settings().get("agent_budgets", {}) or {}
-    return {"enabled": bool(s.get("enabled", False)), "agents": s.get("agents", {}) or {}}
+    limit = s.get("daily_call_limit")
+    return {
+        "enabled": bool(s.get("enabled", False)),
+        "agents": s.get("agents", {}) or {},
+        "daily_call_limit": DEFAULT_DAILY_CALL_LIMIT if limit is None else max(0, int(limit)),
+        "pause_at_utilization": {
+            **DEFAULT_PAUSE_AT_UTILIZATION, **(s.get("pause_at_utilization") or {})
+        },
+    }
 
 
-def update_agent_budget_config(enabled: bool, agents: dict | None) -> dict:
-    """Persist agent-budget config to settings.json."""
+def update_agent_budget_config(
+    enabled: bool,
+    agents: dict | None,
+    daily_call_limit: int | None = None,
+    pause_at_utilization: dict | None = None,
+) -> dict:
+    """Persist agent-budget config to settings.json. None leaves a field unchanged."""
     s = load_settings()
     ab = s.get("agent_budgets", {}) or {}
     ab["enabled"] = bool(enabled)
     if agents is not None:
         ab["agents"] = agents
+    if daily_call_limit is not None:
+        ab["daily_call_limit"] = max(0, int(daily_call_limit))
+    if pause_at_utilization is not None:
+        ab["pause_at_utilization"] = {
+            k: min(1.0, max(0.0, float(v))) for k, v in pause_at_utilization.items()
+        }
     s["agent_budgets"] = ab
     save_settings(s)
     return get_agent_budget_config()
@@ -72,6 +113,12 @@ def _audit_window_start(window_hours: float) -> str:
 
 def _ts_in_hours(hours: float) -> str:
     return db_ts(_now_utc() + timedelta(hours=hours))
+
+
+def _local_midnight(days_ahead: int = 0) -> datetime:
+    """Local midnight (today, or ``days_ahead`` days later) as an aware datetime.
+    ``astimezone()`` reads a naive datetime as local time, DST included."""
+    return datetime.combine(date.today() + timedelta(days=days_ahead), time.min).astimezone()
 
 
 def _ts_from_unix(ts: int | None) -> str | None:
@@ -116,17 +163,43 @@ async def record_rate_limit(agent_id: str, info: dict) -> None:
 async def get_rate_limit_state(agent_id: str) -> dict | None:
     db = await get_db()
     rows = await db.execute_fetchall(
-        "SELECT status, resets_at, rate_limit_type FROM agent_rate_limit_state WHERE agent_id = ?",
+        "SELECT status, resets_at, rate_limit_type, raw_json FROM agent_rate_limit_state WHERE agent_id = ?",
         (agent_id,),
     )
     if not rows:
         return None
     r = rows[0]
+    try:
+        raw = json.loads(r["raw_json"] or "{}")
+    except (TypeError, ValueError):
+        raw = {}
     return {
         "status": r["status"],
         "resets_at": r["resets_at"],
         "rate_limit_type": r["rate_limit_type"],
+        "utilization": raw.get("utilization") if isinstance(raw, dict) else None,
     }
+
+
+def native_limit_reached(rl: dict | None, thresholds: dict) -> bool:
+    """Whether the CLI's own rate-limit signal should pause ingestion.
+
+    A rejection (or any status other than allowed / allowed_warning) pauses: the agent
+    cannot run. A warning pauses once its window's utilization reaches the threshold
+    for that window type, or when the utilization or threshold is unknown.
+    """
+    if not rl or rl.get("status") in _OK_STATUSES:
+        return False
+    if rl.get("status") != "allowed_warning":
+        return True
+    threshold = thresholds.get(rl.get("rate_limit_type") or "")
+    utilization = rl.get("utilization")
+    if threshold is None or utilization is None:
+        return True
+    try:
+        return float(utilization) >= float(threshold)
+    except (TypeError, ValueError):
+        return True
 
 
 # ── usage accounting ─────────────────────────────────────────────────────
@@ -145,6 +218,30 @@ async def get_agent_window_usage(agent_id: str, window_hours: float) -> dict:
     )
     row = rows[0] if rows else None
     return {"tokens": (row["toks"] if row else 0) or 0, "calls": (row["n"] if row else 0) or 0}
+
+
+async def get_agent_daily_calls() -> int:
+    """Agent inference calls (any agent, successful or not) since local midnight."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT COUNT(*) AS n FROM audit_log WHERE model_used LIKE 'agent/%' AND timestamp >= ?",
+        (db_ts(_local_midnight()),),
+    )
+    return (rows[0]["n"] if rows else 0) or 0
+
+
+async def enforce_daily_call_limit() -> None:
+    """Refuse an agent call once today's cap is reached, pausing ingestion until local
+    midnight. Raises AgentCallLimitReached; a cap of 0 turns the check off."""
+    limit = get_agent_budget_config().get("daily_call_limit", DEFAULT_DAILY_CALL_LIMIT)
+    if limit <= 0:
+        return
+    calls = await get_agent_daily_calls()
+    if calls < limit:
+        return
+    reason = f"daily agent call limit reached ({calls}/{limit})"
+    await pause_for_agent_budget(db_ts(_local_midnight(days_ahead=1)), reason)
+    raise AgentCallLimitReached(f"{reason}; agent calls resume at local midnight")
 
 
 # ── pause state ──────────────────────────────────────────────────────────
@@ -204,7 +301,11 @@ async def get_agent_budget_status() -> dict:
     return {
         "enabled": cfg["enabled"],
         "agents": agents_status,
+        "daily_calls": await get_agent_daily_calls(),
+        "daily_call_limit": cfg.get("daily_call_limit", DEFAULT_DAILY_CALL_LIMIT),
+        "pause_at_utilization": cfg.get("pause_at_utilization", DEFAULT_PAUSE_AT_UTILIZATION),
         "is_paused": state["paused_at"] is not None,
+        "paused_at": state["paused_at"],
         "paused_until": state["paused_until"],
         "paused_reason": state["paused_reason"],
         "paused_workflow_count": await get_paused_workflow_count() if state["paused_at"] else 0,
@@ -234,7 +335,7 @@ async def evaluate_agent_budget() -> None:
         rl = await get_rate_limit_state(agent_id)
 
         # Native signal first — when the CLI itself reports we're no longer allowed.
-        if rl and rl.get("status") not in _OK_STATUSES:
+        if native_limit_reached(rl, cfg.get("pause_at_utilization", DEFAULT_PAUSE_AT_UTILIZATION)):
             recovery_times.append(_ts_from_unix(rl.get("resets_at")) or _ts_in_hours(window_hours))
             reasons.append(f"{agent_id}: rate limit {rl['status']}")
             continue
@@ -243,12 +344,11 @@ async def evaluate_agent_budget() -> None:
         if limit > 0:
             usage = await get_agent_window_usage(agent_id, window_hours)
             if usage["tokens"] >= (pause_pct / 100.0) * limit:
-                # Prefer the native reset time when known; else a full window from now
-                # (by which point the rolling window has fully turned over).
-                recovery_times.append(
-                    _ts_from_unix(rl.get("resets_at")) if rl and rl.get("resets_at")
-                    else _ts_in_hours(window_hours)
-                )
+                # The rolling token window has fully turned over window_hours from now.
+                # The native reset belongs to the CLI's own window (often the weekly
+                # one) and would hold the pause for days over a budget that frees up
+                # within hours.
+                recovery_times.append(_ts_in_hours(window_hours))
                 reasons.append(f"{agent_id}: {usage['tokens']}/{limit} tokens in {window_hours}h")
 
     if recovery_times:
@@ -322,9 +422,33 @@ async def resume_from_agent_budget() -> dict:
         "UPDATE agent_budget_state SET paused_at = NULL, paused_until = NULL, paused_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = 1"
     )
     await db.commit()
-    log.info("agent_budget_resumed", resumed_count=len(resumed), errors=len(errors))
+    requeued = await requeue_budget_refused_events()
+    log.info(
+        "agent_budget_resumed", resumed_count=len(resumed), errors=len(errors),
+        requeued_events=requeued,
+    )
     await _broadcast_status(paused=False)
-    return {"resumed_count": len(resumed), "errors": errors}
+    return {"resumed_count": len(resumed), "errors": errors, "requeued_events": requeued}
+
+
+# The queue stores an event's error as "<ExceptionClass>: <message>".
+_REFUSAL_ERROR_PREFIXES = (f"{AgentBudgetRefused.__name__}:", f"{AgentCallLimitReached.__name__}:")
+
+
+async def requeue_budget_refused_events() -> int:
+    """Put events that died from a budget refusal back on the queue with a fresh retry
+    budget. They never failed on their own content, so they are not manual retries."""
+    db = await get_db()
+    conditions = " OR ".join("last_error LIKE ?" for _ in _REFUSAL_ERROR_PREFIXES)
+    cursor = await db.execute(
+        f"""UPDATE events
+               SET processing_status = 'queued', processing_attempts = 0,
+                   last_error = NULL, next_retry_at = NULL
+             WHERE processing_status = 'dead' AND ({conditions})""",
+        tuple(f"{p}%" for p in _REFUSAL_ERROR_PREFIXES),
+    )
+    await db.commit()
+    return cursor.rowcount or 0
 
 
 async def maybe_resume_agent_budget() -> None:

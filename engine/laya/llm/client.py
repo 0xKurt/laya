@@ -798,6 +798,8 @@ async def llm_call(
     from laya.llm import agent_backend
 
     if agent_backend.is_agent_model(model):
+        from laya.pipeline.agent_budget import AgentBudgetRefused
+
         agent_messages = _inject_current_datetime(messages)
         start = time.monotonic()
         try:
@@ -872,6 +874,10 @@ async def llm_call(
                 finish_reason=result.finish_reason,
             )
             return result
+        except AgentBudgetRefused:
+            # The call never ran, so there is no failed call to audit; the caller
+            # (the event queue) defers the work until the budget resumes.
+            raise
         except Exception as e:
             elapsed_ms = int((time.monotonic() - start) * 1000)
             log.error("llm_call_failed", role=role, model=model, backend="agent", error=str(e))

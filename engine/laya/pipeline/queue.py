@@ -20,6 +20,7 @@ from laya.db.sqlite import get_db
 from laya.db.timeutil import db_now, db_ts
 from laya.models.card import PROCESSING_PLACEHOLDER_SUMMARY
 from laya.models.event import LayaEvent
+from laya.pipeline.agent_budget import AgentBudgetRefused, is_agent_budget_paused
 
 log = structlog.get_logger()
 
@@ -264,6 +265,27 @@ async def _mark_failed(event_id: str, error: str) -> None:
 
 # ── event processing ─────────────────────────────────────────────────────
 
+async def _release_for_agent_budget(event_id: str, error: str) -> None:
+    """Return an event whose agent call the agent budget refused to the queue.
+
+    The refusal says nothing about the event, so the claim's attempt is given back
+    and no retry backoff applies. The queue claims nothing while the agent budget is
+    paused, so the event waits for the resume.
+    """
+    db = await get_db()
+    await db.execute(
+        """UPDATE events
+           SET processing_status = 'queued',
+               processing_attempts = MAX(processing_attempts - 1, 0),
+               last_error = ?,
+               next_retry_at = NULL
+           WHERE event_id = ?""",
+        (error, event_id),
+    )
+    await db.commit()
+    log.info("event_deferred_by_agent_budget", event_id=event_id, error=error)
+
+
 async def _load_event(event_id: str) -> LayaEvent | None:
     """Reconstruct a LayaEvent from the stored raw_json."""
     db = await get_db()
@@ -411,6 +433,9 @@ async def process_event(event_id: str) -> None:
         # BaseException catches both Exception and asyncio.CancelledError,
         # ensuring cancelled tasks don't orphan events in 'processing' state.
         error_msg = f"{type(e).__name__}: {e}"
+        if isinstance(e, AgentBudgetRefused):
+            await _release_for_agent_budget(event_id, error_msg)
+            return
         log.error("event_processing_failed", event_id=event_id, error=error_msg)
         try:
             await _mark_failed(event_id, error_msg)
@@ -828,6 +853,10 @@ async def _batch_route_events(event_ids: list[str]) -> None:
             _trip_batch_breaker(
                 "partial_batch_result", got=total_classified, expected=len(events_data)
             )
+    except AgentBudgetRefused as e:
+        # Not a batching problem: each event's own routing hits the same refusal
+        # and is put back on the queue until the budget resumes.
+        log.info("batch_route_deferred_by_agent_budget", error=str(e))
     except Exception as e:
         log.warning("batch_route_failed", error=str(e))
         _trip_batch_breaker("batch_route_error", error=str(e))
@@ -838,7 +867,14 @@ async def _batch_route_events(event_ids: list[str]) -> None:
 _STALE_CHECK_INTERVAL = 30  # seconds between stale event checks
 
 async def _fetch_ready_events(limit: int) -> list[str]:
-    """Fetch event_ids that are ready for processing."""
+    """Fetch event_ids that are ready for processing.
+
+    Nothing is ready while the agent budget is paused: pausing only stops the n8n
+    workflows, and events that already arrived (or arrive by other paths) would
+    otherwise keep spending the exhausted agent and fail.
+    """
+    if await is_agent_budget_paused():
+        return []
     db = await get_db()
     now = db_now()
     rows = await db.execute_fetchall(

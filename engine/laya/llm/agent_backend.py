@@ -566,6 +566,12 @@ async def agent_llm_call(
     if agent_id not in AGENT_TIERS:
         raise ValueError(f"Unknown agent backend: {agent_id!r}")
 
+    # Hard daily cap: raises AgentCallLimitReached (and pauses ingestion) once today's
+    # agent calls reach the limit.
+    from laya.pipeline.agent_budget import enforce_daily_call_limit
+
+    await enforce_daily_call_limit()
+
     binary = get_agent_binary(agent_id)
     native = AGENT_TIERS[agent_id] == "native"
     system_text, user_prompt = _split_messages(messages)

@@ -133,3 +133,17 @@ export function handleAgentBudgetWsMessage(msg: { type: string; paused?: boolean
 		loadAgentBudgetStatus();
 	}
 }
+
+/**
+ * Why agent ingestion is paused, as a headline for the UI. The engine's
+ * paused_reason joins one entry per cause with "; ": the daily call cap
+ * ("daily agent call limit reached (n/m)"), the agent's own rate limit
+ * ("<agent>: rate limit <status>") or a token budget ("<agent>: n/m tokens in Nh").
+ */
+export function agentPauseHeadline(reason: string | null | undefined): string {
+	if (!reason) return 'Agent usage limit reached';
+	if (reason.includes('daily agent call limit')) return 'Daily agent call limit reached';
+	if (reason.includes('rate limit')) return "The agent's own usage limit was reached";
+	if (reason.includes('tokens in')) return 'Agent token budget reached';
+	return 'Agent usage limit reached';
+}
