@@ -3,6 +3,7 @@
 <script lang="ts">
 	import type { ActionCard, WorkspaceEvent, WorkspaceSession, Repo } from '$lib/api/types';
 	import { engineApi } from '$lib/api/engine';
+	import SessionClaims from '$lib/components/feed/SessionClaims.svelte';
 	import { glassTheme } from '$lib/stores/glassTheme';
 	import { parseBackendDate } from '$lib/utils/datetime';
 	import { goto } from '$app/navigation';
@@ -350,6 +351,8 @@
 					<p class="text-xs text-surface-200 whitespace-pre-wrap max-h-48 overflow-y-auto">{card.staged_output.content}</p>
 				{/if}
 			</div>
+			<!-- What the agent reports as merged / green, checked with gh. -->
+			<SessionClaims {card} />
 		{/if}
 
 		<!-- Related entities -->

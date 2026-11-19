@@ -7,6 +7,9 @@ import type {
 	Settings,
 	ReposConfig,
 	ActionCard,
+	Effort,
+	SessionClaim,
+	SessionPrep,
 	SourceEvent,
 	CardsListResponse,
 	GroupedCardsResponse,
@@ -375,6 +378,15 @@ export const engineApi = {
 			method: 'POST'
 		}),
 	/** Board: active cards + done in the last 7 days, with tags, and the lane tag ids. */
+	updateEffort: (cardId: string, effort: { you_minutes: number; agent_minutes: number; basis?: string }) =>
+		request<{ card_id: string; effort: Effort }>(`/cards/${encodeURIComponent(cardId)}/effort`, {
+			method: 'PUT',
+			body: JSON.stringify(effort)
+		}),
+	prepareSession: (cardId: string) =>
+		request<SessionPrep>(`/cards/${encodeURIComponent(cardId)}/session-prep`, { method: 'POST' }),
+	getSessionClaims: (cardId: string) =>
+		request<{ card_id: string; claims: SessionClaim[] }>(`/cards/${encodeURIComponent(cardId)}/session-claims`),
 	getBoard: (spaceId?: string) =>
 		request<{ cards: ActionCard[]; lane_tags: { todo: number; in_progress: number } }>(
 			spaceId ? `/board?space_id=${encodeURIComponent(spaceId)}` : '/board'

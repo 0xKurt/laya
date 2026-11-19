@@ -12,6 +12,8 @@
 	import { lastMessage } from '$lib/stores/websocket';
 	import MarkdownRender from '$lib/components/MarkdownRender.svelte';
 	import ClassificationDialog from './ClassificationDialog.svelte';
+	import SessionPanel from './SessionPanel.svelte';
+	import SessionClaims from './SessionClaims.svelte';
 	import OriginalContentModal from './OriginalContentModal.svelte';
 	import PlatformBadge from '$lib/components/PlatformBadge.svelte';
 	import { glassTheme } from '$lib/stores/glassTheme';
@@ -57,6 +59,8 @@
 	let bookmarking = $state(false);
 	let unlinkingCard = $state(false);
 	let showRunAgentInput = $state(false);
+	// "Prepare session": a prompt + worktree commands for a session the user starts himself.
+	let sessionPrepOpen = $state(false);
 	let runAgentPrompt = $state('');
 	let startingAgent = $state(false);
 	let actorTruncated = $state(false);
@@ -826,6 +830,8 @@
 		<h2 class="mb-2 text-laya-heading font-semibold text-surface-50">{card.header}</h2>
 		<p class="mb-5 text-laya-base text-surface-300">{card.summary}</p>
 
+		<SessionPanel {card} bind:prepOpen={sessionPrepOpen} />
+
 		<!-- Tags -->
 		<div class="mb-5">
 			<div class="flex flex-wrap items-center gap-1.5">
@@ -907,6 +913,8 @@
 				{/if}
 			</div>
 		{/if}
+
+		<SessionClaims {card} />
 
 		<!-- Suggested actions -->
 		{#if card.suggested_actions && card.suggested_actions.length > 0}
@@ -1152,6 +1160,13 @@
 					Run Agent
 				</button>
 			{/if}
+			<button
+				class="flex items-center gap-1 rounded-md px-2 py-1 text-laya-secondary text-surface-400 transition-colors hover:bg-surface-700/50 hover:text-laya-orange"
+				title="A prompt and worktree commands for a session you start yourself"
+				onclick={() => (sessionPrepOpen = true)}
+			>
+				Prepare session
+			</button>
 			<!-- Move to space — last inline action (lowest priority; first to overflow) -->
 			{#if $spaces.length > 1}
 				<button
