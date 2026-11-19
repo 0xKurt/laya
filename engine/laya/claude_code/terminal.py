@@ -295,6 +295,25 @@ def build_args(binary: str, claude_session_id: str, resume: bool, mcp_config_pat
     return args
 
 
+# Variables a running Claude Code process sets for its own children (session
+# ids, sockets, the child-session marker). An engine started from inside a
+# Claude Code session inherits them; passed on, they make the terminal's claude
+# act as that session's child (e.g. it stops saving its transcript, so it could
+# not be resumed). The user's own Claude Code settings variables are kept.
+_PARENT_SESSION_MARKERS = (
+    "CLAUDECODE",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_PID",
+)
+
+
 def _spawn_env() -> dict[str, str]:
     from laya.config import _augmented_path
 
@@ -302,10 +321,8 @@ def _spawn_env() -> dict[str, str]:
     env["PATH"] = _augmented_path()
     env["TERM"] = "xterm-256color"
     env["COLORTERM"] = "truecolor"
-    # Set by a Claude Code process for its children. An engine started from a
-    # Claude Code session would pass it on, and claude then refuses to start as
-    # a nested session.
-    env.pop("CLAUDECODE", None)
+    for name in _PARENT_SESSION_MARKERS:
+        env.pop(name, None)
     return env
 
 

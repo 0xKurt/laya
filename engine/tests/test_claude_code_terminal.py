@@ -84,6 +84,15 @@ def test_build_args_adds_only_session_id_and_mcp_config():
     assert not set(FORBIDDEN_FLAGS) & set(args + resumed)
 
 
+def test_spawn_env_drops_parent_session_markers_only(monkeypatch):
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "1")
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    env = terminal._spawn_env()
+    assert "CLAUDECODE" not in env and "CLAUDE_CODE_CHILD_SESSION" not in env
+    assert env["CLAUDE_CODE_USE_BEDROCK"] == "1" and env["TERM"] == "xterm-256color"
+
+
 def test_default_cwd_is_an_existing_directory():
     assert os.path.isdir(terminal.default_cwd())
 
