@@ -12,7 +12,7 @@ from fastapi import APIRouter, Body, HTTPException
 from laya.claude_code import connect as connect_mod
 from laya.claude_code import egress as _egress  # noqa: F401  registers the send connection hooks
 from laya.claude_code import discover as discover_mod
-from laya.claude_code import service, store
+from laya.claude_code import my_work, service, store
 from laya.claude_code.discover import SEND_ROLES, Discovery, PlatformDiscovery
 
 router = APIRouter(prefix="/claude-code", tags=["claude-code"])
@@ -59,6 +59,12 @@ async def get_status() -> dict[str, Any]:
     # Listing tools costs no tokens; identities are read on discover/connect.
     found = discover_mod.cached() or await discover_mod.discover(with_identity=False)
     return await build_status(found)
+
+
+@router.get("/my-work")
+async def get_my_work(refresh: bool = False) -> dict[str, Any]:
+    """The user's open Linear issues and own open GitHub pull requests."""
+    return await my_work.get_my_work(refresh=refresh)
 
 
 @router.post("/discover")
