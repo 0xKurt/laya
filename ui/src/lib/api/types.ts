@@ -1965,3 +1965,44 @@ export interface ClaudeCodeSyncResult {
 	events: number;
 	error: string | null;
 }
+
+/** A running (or exited but still open) Claude terminal tab, `/claude-code/terminal/sessions`. */
+export interface ClaudeTerminalSession {
+	id: string;
+	name: string;
+	cwd: string;
+	claude_session_id: string;
+	created_at: string;
+	running: boolean;
+	exit_code: number | null;
+	pid: number | null;
+	/** Why the session runs without Laya's MCP server, when it does. */
+	note: string | null;
+}
+
+/** A closed Claude terminal session; `resumable` when Claude Code stored its conversation. */
+export interface ClaudeTerminalClosedSession {
+	id: string;
+	name: string;
+	cwd: string;
+	claude_session_id: string;
+	created_at: string;
+	last_active_at: string | null;
+	closed_at: string | null;
+	resumable: boolean;
+}
+
+export interface ClaudeTerminalList {
+	sessions: ClaudeTerminalSession[];
+	closed: ClaudeTerminalClosedSession[];
+	default_cwd: string;
+}
+
+export interface ClaudeTerminalCreate {
+	cwd?: string;
+	name?: string;
+	/** Id of a closed session to resume (`claude --resume`). */
+	resume?: string;
+	cols?: number;
+	rows?: number;
+}

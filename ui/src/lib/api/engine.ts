@@ -96,6 +96,11 @@ import type {
 	ClaudeCodeSyncResult
 } from './types';
 
+import type {
+	ClaudeTerminalCreate,
+	ClaudeTerminalList,
+	ClaudeTerminalSession
+} from './types';
 import { getEngineToken, getEngineUrl } from '$lib/config';
 
 const ENGINE_URL = getEngineUrl();
@@ -1372,5 +1377,37 @@ export const engineApi = {
 			method: 'POST',
 			body: JSON.stringify(body),
 			signal: AbortSignal.timeout(300_000)
+		}),
+	// Claude terminal (`/terminal`): plain `claude` sessions running in the engine.
+	listClaudeTerminals: () => request<ClaudeTerminalList>('/claude-code/terminal/sessions'),
+	createClaudeTerminal: (body: ClaudeTerminalCreate = {}) =>
+		request<ClaudeTerminalSession>('/claude-code/terminal/sessions', {
+			method: 'POST',
+			body: JSON.stringify(body)
+		}),
+	renameClaudeTerminal: (id: string, name: string) =>
+		request<ClaudeTerminalSession>(`/claude-code/terminal/sessions/${encodeURIComponent(id)}`, {
+			method: 'PATCH',
+			body: JSON.stringify({ name })
+		}),
+	closeClaudeTerminal: (id: string) =>
+		request<{ status: string; id: string }>(`/claude-code/terminal/sessions/${encodeURIComponent(id)}`, {
+			method: 'DELETE'
+		}),
+	resizeClaudeTerminal: (id: string, cols: number, rows: number) =>
+		request<ClaudeTerminalSession>(`/claude-code/terminal/${encodeURIComponent(id)}/resize`, {
+			method: 'POST',
+			body: JSON.stringify({ cols, rows })
+		}),
+	/** Inserts `text` at the session's prompt as one bracketed paste; Enter is never sent. */
+	sendClaudeTerminalInput: (id: string, text: string) =>
+		request<ClaudeTerminalSession>(`/claude-code/terminal/${encodeURIComponent(id)}/input`, {
+			method: 'POST',
+			body: JSON.stringify({ text })
 		})
 };
+
+/** WebSocket URL of a Claude terminal session's PTY stream. */
+export function claudeTerminalWsUrl(id: string): string {
+	return getEngineUrl().replace(/^http/, 'ws') + `/claude-code/terminal/${encodeURIComponent(id)}/pty`;
+}
