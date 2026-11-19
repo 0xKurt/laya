@@ -117,6 +117,16 @@ On connect the module inserts (replacing a row auto-registered for the same work
 
 ## Effort and session lane
 
-- Effort: the stager also returns `effort: {you_minutes, agent_minutes}` (Kurt's time: deciding, reviewing, talking; agent time: code, tests, write-ups a Claude session can do). It is stored in the card's `staged_output` and shown on the card; the Board shows the sum of Kurt's time per lane.
+- Effort: the stager also returns `effort: {you_minutes, agent_minutes, basis}` (Kurt's time: deciding, reviewing, talking; agent time: code, tests, write-ups a Claude session can do). It is stored in the card's `staged_output` and shown on the card; the Board shows the sum of Kurt's time per lane.
 - "Prepare session": a card action that produces a prompt in Kurt's style (what is wrong, for whom, where with links/addresses/Linear keys, what done looks like, "commit, open a PR, get it green"; merging waits for Kurt) plus a worktree command for the repository (`git -C <checkout> worktree add ../<repo>-<topic> -b <topic> origin/<default>`). Kurt copies it and starts the session himself.
 - A session's claim is a lead: a card shows "merged" / "PR green" only after `gh` confirms it.
+
+Implementation:
+
+| Part | Where |
+|---|---|
+| Effort | `sessions/effort.py`; prompt block `EFFORT_RULES` + schema property in `llm/prompts/stager.py`, sent only while settings `pipeline.effort_estimate` is on (default). Stored as `staged_output.effort = {you_minutes, agent_minutes, basis, set_by}` (`set_by` = `stager` or `user`); copied to `CardResponse.effort` on every payload, the slim list included. A workspace agent's result keeps it (`staged_output_keeping_effort`). |
+| Correction | `PUT /cards/{id}/effort` `{you_minutes, agent_minutes, basis?}`; broadcasts `card_updated` with `{effort}`. |
+| Prepare session | `POST /cards/{id}/session-prep` → `{prompt, topic, repo, worktree_path, commands, notes, llm_error}` (`sessions/prep.py`). One LLM call on the stager's model (override key `session_prep`); without it a template prompt from the card. Repository: GitHub entity id, event `github_repo`, a github.com URL on the card, or a `repos.json` entry the card names. Checkout: the `repos.json` path, else `<root>/<repo>` under settings `sessions.checkout_roots` (default `~/git/somnia`), else a clone command first. After the worktree command: `cp` of untracked env files and the install command of the checkout's lock file. |
+| Claims | `GET /cards/{id}/session-claims` (`sessions/verify.py`): merged / green / deployed claims in the card's text, grouped per PR, checked with `gh pr view --json state,statusCheckRollup`; each `confirmed`, `contradicted` or `unverified`. The UI (`SessionClaims.svelte`, card detail and workspace) shows only confirmed claims as facts. |
+
