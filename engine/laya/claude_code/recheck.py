@@ -47,6 +47,7 @@ from laya.models.event import LayaEvent
 log = structlog.get_logger()
 
 RECHECK_LIMIT = 5
+_STATE_DAYS = 7
 _STATE_PREFIX = "recheck:"
 _RECHECKABLE = ("slack", "gmail", "linear", "github")
 
@@ -74,6 +75,9 @@ async def due_entities(platform: str, after_hours: float, limit: int = RECHECK_L
     )
     checked = await store.get_state(platform, _STATE_PREFIX)
     recent = datetime.now(timezone.utc) - timedelta(hours=after_hours)
+    # Marks older than a week no longer matter: a card that old is due anyway.
+    expired = datetime.now(timezone.utc) - timedelta(days=_STATE_DAYS)
+    await store.delete_state(platform, [k for k, v in checked.items() if parse_ts(v) < expired])
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for r in rows:
