@@ -8,6 +8,7 @@
 	import type { ActionCard } from '$lib/api/types';
 	import { lastMessage } from '$lib/stores/websocket';
 	import { timeAgo } from '$lib/utils/datetime';
+	import { formatMinutes } from '$lib/sessions/session';
 	import { PRIORITY_COLORS, PRIORITY_LABELS, platformDotColor, platformKey, platformLabel } from '$lib/utils/cardVisuals';
 	import {
 		LANES,
@@ -19,6 +20,7 @@
 		planMove,
 		presentPlatforms,
 		withoutLaneTags,
+		youMinutesByLane,
 		type BoardFilters,
 		type DropTarget,
 		type Lane,
@@ -87,6 +89,7 @@
 	// Only the sources that have cards on the board get a chip.
 	const platforms = $derived(presentPlatforms(cards));
 	const columns = $derived(groupByLane(cards, filters));
+	const youMinutes = $derived(youMinutesByLane(columns));
 
 	async function load() {
 		try {
@@ -275,6 +278,9 @@
 					<header class="flex items-center gap-2 px-3 pb-2 pt-3">
 						<h2 class="text-laya-secondary font-semibold text-surface-200">{column.title}</h2>
 						<span class="text-laya-micro text-surface-500">{columns[column.id].length}</span>
+						{#if youMinutes[column.id] > 0}
+							<span class="text-laya-micro text-surface-400" title="Your estimated time for the cards in this lane">you ~{formatMinutes(youMinutes[column.id])}</span>
+						{/if}
 						{#if column.id === 'done'}
 							<span class="text-laya-micro text-surface-600">last 7 days</span>
 						{/if}

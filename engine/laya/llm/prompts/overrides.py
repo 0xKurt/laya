@@ -23,6 +23,8 @@ PROMPT_FILES: dict[str, str] = {
     "router": "router.md",
     "stager": "stager.md",
     "stager_card_status": "stager_card_status.md",
+    "stager_effort": "stager_effort.md",
+    "session_prep": "session_prep.md",
     "omni": "omni.md",
     "group_summary_initial": "group_summary_initial.md",
     "group_summary_rolling": "group_summary_rolling.md",

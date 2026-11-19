@@ -284,4 +284,11 @@ describe('reduceCardUpdated', () => {
 		expect(res.groups[0].cards[0].space_id).toBe('personal');
 		expect(res.effects).toEqual([]); // no re-section on a space change in all-spaces view
 	});
+
+	it('applies a corrected effort estimate to the card and the open detail panel', () => {
+		const effort = { you_minutes: 45, agent_minutes: 90, set_by: 'user' as const };
+		const res = reduceCardUpdated([group('e1', [card('a')])], card('a'), 'a', { effort }, NO_FILTERS);
+		expect(res.groups[0].cards[0].effort).toEqual(effort);
+		expect(res.selectedCard?.effort).toEqual(effort);
+	});
 });

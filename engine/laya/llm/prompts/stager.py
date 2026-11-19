@@ -634,12 +634,14 @@ def build_stager_messages(
     existing_tags: list[str] | None = None,
     strictness: str = "strict",
     card_status: bool = True,
+    effort: bool = False,
 ) -> list[dict[str, str]]:
     """Build the messages array for the Stager LLM call.
 
     `timeline` holds the earlier cards of the event's entity. `card_status`
     says whether the stager is asked to set the card's status. When it is
-    False, the status rules are left out of the system prompt.
+    False, the status rules are left out of the system prompt. `effort` adds
+    the effort rules; it must match the `effort` argument of the schema.
     """
     # Include event metadata so the LLM can use platform-specific IDs
     # (e.g., bb_comment_id for Bitbucket thread replies, gmail_thread_id for Gmail)
@@ -809,11 +811,45 @@ Produce a JSON action card matching the required schema."""
     system_content = get_prompt("stager", system_prompt)
     if card_status:
         system_content += "\n\n" + get_prompt("stager_card_status", CARD_STATUS_RULES)
+    if effort:
+        system_content += "\n\n" + get_prompt("stager_effort", EFFORT_RULES)
 
     return [
         {"role": "system", "content": system_content},
         {"role": "user", "content": user_message},
     ]
+
+
+# Appended to the system prompt only while effort estimates are switched on
+# (settings `pipeline.effort_estimate`), together with the `effort` schema
+# property. It has its own override key, like the card status rules.
+EFFORT_RULES = """\
+## Effort
+
+Estimate the work this card asks of the user, in two parts:
+- you_minutes: the user's own time: deciding, steering, reviewing, testing, talking.
+- agent_minutes: time a coding session can spend alone: code, tests, scripts, PR \
+follow-ups, inventories, write-ups, research. It does not count against the user.
+Split: work a session can do costs the user about a quarter of its hands-on time \
+(at least 15). Decisions, conversations, meetings and security reviews are all the \
+user's (agent 0). Reviewing someone else's PR: the session does a first pass, the \
+user spends about half the review time. A card that only informs: 0 and 0.
+basis: a few words naming what the estimate rests on."""
+
+
+def _effort_schema() -> dict[str, Any]:
+    """Schema of the `effort` object the stager returns when estimates are on."""
+    return {
+        "type": "object",
+        "description": "Estimated effort: the user's own minutes and a coding session's minutes",
+        "properties": {
+            "basis": {"type": "string"},
+            "you_minutes": {"type": "integer", "minimum": 0},
+            "agent_minutes": {"type": "integer", "minimum": 0},
+        },
+        "required": ["basis", "you_minutes", "agent_minutes"],
+        "additionalProperties": False,
+    }
 
 
 def _card_status_schema() -> dict[str, Any]:
@@ -852,14 +888,18 @@ def _card_status_schema() -> dict[str, Any]:
     }
 
 
-def get_stager_json_schema(card_status: bool = True) -> dict[str, Any]:
+def get_stager_json_schema(card_status: bool = True, effort: bool = False) -> dict[str, Any]:
     """Return the JSON schema for the stager output.
 
     With `card_status` True the schema also requires the `card_status` object.
     It is the last property, so the model writes the card before it judges the
-    status.
+    status. With `effort` True it requires the `effort` object, placed after
+    the card content.
     """
     schema = _base_stager_json_schema()
+    if effort:
+        schema["schema"]["properties"]["effort"] = _effort_schema()
+        schema["schema"]["required"].append("effort")
     if card_status:
         schema["schema"]["properties"]["card_status"] = _card_status_schema()
         schema["schema"]["required"].append("card_status")

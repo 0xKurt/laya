@@ -16,7 +16,7 @@
  * for *running* the returned effects; the reducer only *decides* them.
  */
 
-import type { ActionCard, CardGroup } from '$lib/api/types';
+import type { ActionCard, CardGroup, Effort } from '$lib/api/types';
 
 /** Priority severity rank — mirrors backend `_PRIORITY_ORDER` (cards_api.py).
  *  Lower = more severe. Used to recompute a group's top_priority. */
@@ -43,6 +43,8 @@ export interface CardUpdatePayload {
 	 */
 	status_reason?: string | null;
 	status_set_by?: 'laya' | 'user' | null;
+	/** The card's effort estimate after the user corrected it. */
+	effort?: Effort;
 }
 
 /** The slice of feed filter state the reducer needs. */
@@ -149,6 +151,7 @@ export function applyPayloadToCard(
 	if (payload.has_workspace !== undefined) next.has_workspace = payload.has_workspace;
 	if ('bookmarked_at' in payload) next.bookmarked_at = payload.bookmarked_at ?? undefined;
 	if (payload.space_id !== undefined) next.space_id = payload.space_id;
+	if (payload.effort) next.effort = payload.effort;
 	if ('status_reason' in payload) next.status_reason = payload.status_reason ?? undefined;
 	if ('status_set_by' in payload) next.status_set_by = payload.status_set_by ?? undefined;
 	return { card: next, wasAgent };

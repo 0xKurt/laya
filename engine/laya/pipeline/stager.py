@@ -31,6 +31,7 @@ from laya.models.event import LayaEvent
 from laya.pipeline.card_status import llm_card_status_enabled, work_item_state_before
 from laya.pipeline.context_presets import get_strictness
 from laya.pipeline.tags import select_prompt_tags
+from laya.sessions.effort import effort_estimate_enabled, parse_effort
 from laya.workers.base import WorkerResult
 
 log = structlog.get_logger()
@@ -121,6 +122,7 @@ async def run_stager(
     # and gives the stager the history it judges the card's status against).
     timeline = await _query_work_item_timeline(event)
     card_status = llm_card_status_enabled()
+    effort = effort_estimate_enabled()
 
     # 1c. Pick the existing tag names this event is most likely to need, so
     # the LLM reuses them. A failure here only costs the hint: the stager then
@@ -142,8 +144,9 @@ async def run_stager(
         existing_tags=existing_tags,
         strictness=_strictness,
         card_status=card_status,
+        effort=effort,
     )
-    schema = get_stager_json_schema(card_status=card_status)
+    schema = get_stager_json_schema(card_status=card_status, effort=effort)
 
     # Transport/LLM-call failures propagate so the durable queue retries the
     # event, exactly like run_router. Previously any exception here (e.g. a
@@ -312,6 +315,7 @@ def _parse_stager_response(
         staged_output=StagedOutput(
             type=staged.get("type", "summary"),
             content=staged.get("content", ""),
+            effort=parse_effort(data.get("effort")),
         ),
         suggested_actions=actions,
         privacy_tier=max(1, min(3, int(data.get("privacy_tier", 2)))),

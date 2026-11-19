@@ -520,10 +520,55 @@ export interface McpToken {
 	token: string;
 }
 
+/**
+ * Estimated effort of a card's work. `you_minutes` is the user's own time
+ * (deciding, reviewing, talking); `agent_minutes` is a coding session's time.
+ */
+export interface Effort {
+	you_minutes: number;
+	agent_minutes: number;
+	basis?: string;
+	/** 'stager' for the pipeline's estimate, 'user' once the user corrected it. */
+	set_by?: 'stager' | 'user';
+}
+
 /** Staged output attached to an action card */
 export interface StagedOutput {
 	type: 'draft_reply' | 'code_fix' | 'briefing' | 'summary' | 'agent_result' | 'agent_plan';
 	content: string;
+	effort?: Effort | null;
+}
+
+/** POST /cards/{id}/session-prep: a session prompt and its worktree commands. */
+export interface SessionPrep {
+	prompt: string;
+	topic: string;
+	repo: {
+		full_name: string | null;
+		name: string;
+		checkout: string | null;
+		default_branch: string;
+		found_by: 'repos_config' | 'checkout_root' | 'none';
+	} | null;
+	worktree_path: string | null;
+	commands: string[];
+	notes: string[];
+	llm_error: string | null;
+}
+
+export type ClaimKind = 'merged' | 'green' | 'deployed';
+export type ClaimResult = 'confirmed' | 'contradicted' | 'unverified';
+
+/** GET /cards/{id}/session-claims: claims about one pull request, checked with gh. */
+export interface SessionClaim {
+	repo: string | null;
+	number: number | null;
+	claims: ClaimKind[];
+	url: string | null;
+	state: 'OPEN' | 'MERGED' | 'CLOSED' | null;
+	checks: 'green' | 'failing' | 'pending' | 'none' | null;
+	results: Partial<Record<ClaimKind, ClaimResult>>;
+	error: string | null;
 }
 
 /** A suggested action the user can approve */
@@ -609,6 +654,8 @@ export interface ActionCard {
 	context_id?: string;
 	last_error?: string;
 	source_context?: string;
+	/** Copy of staged_output.effort; present on list payloads too. */
+	effort?: Effort | null;
 	tags?: TagAssignment[];
 }
 

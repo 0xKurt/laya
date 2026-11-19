@@ -11,6 +11,7 @@
 
 import type { ActionCard } from '$lib/api/types';
 import { platformKey } from '$lib/utils/cardVisuals';
+import { sumYouMinutes } from '$lib/sessions/session';
 
 export type Lane = 'backlog' | 'todo' | 'in_progress' | 'done';
 export type DropTarget = Lane | 'archive';
@@ -99,6 +100,19 @@ export function groupByLane(cards: ActionCard[], f: BoardFilters): Record<Lane, 
 	}
 	byLane.done.sort((a, b) => (b.resolved_at ?? b.updated_at ?? '').localeCompare(a.resolved_at ?? a.updated_at ?? '') || newest(a, b));
 	return byLane;
+}
+
+/**
+ * The user's own estimated minutes per lane (the "you" part of each card's
+ * effort; cards without an estimate count 0). Done shows what was spent.
+ */
+export function youMinutesByLane(byLane: Record<Lane, ActionCard[]>): Record<Lane, number> {
+	return {
+		backlog: sumYouMinutes(byLane.backlog),
+		todo: sumYouMinutes(byLane.todo),
+		in_progress: sumYouMinutes(byLane.in_progress),
+		done: sumYouMinutes(byLane.done)
+	};
 }
 
 // ── moves ──
