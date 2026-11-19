@@ -58,9 +58,47 @@
 		return card.event_timestamp ?? card.created_at ?? '';
 	}
 
+	// ── filters (client-side over the board's cards, remembered per device) ──
+	type Filters = { search: string; priorities: string[]; platforms: string[] };
+	const FILTERS_KEY = 'laya.board.filters';
+	const PRIORITIES = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+	function storedFilters(): Filters {
+		try {
+			const raw = JSON.parse(localStorage.getItem(FILTERS_KEY) ?? '{}');
+			return { search: '', priorities: raw.priorities ?? [], platforms: raw.platforms ?? [] };
+		} catch {
+			return { search: '', priorities: [], platforms: [] };
+		}
+	}
+	let filters = $state<Filters>(storedFilters());
+	$effect(() => {
+		try {
+			localStorage.setItem(FILTERS_KEY, JSON.stringify({ priorities: filters.priorities, platforms: filters.platforms }));
+		} catch {
+			// private storage unavailable: filters last for this session only
+		}
+	});
+	const filtering = $derived(!!filters.search.trim() || filters.priorities.length > 0 || filters.platforms.length > 0);
+
+	function toggle(list: string[], value: string): string[] {
+		return list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
+	}
+
+	function matches(card: ActionCard): boolean {
+		if (filters.priorities.length && !filters.priorities.includes(card.priority)) return false;
+		if (filters.platforms.length && !filters.platforms.includes(platformKey(card.entity_id ?? undefined))) return false;
+		const q = filters.search.trim().toLowerCase();
+		if (!q) return true;
+		return [card.header, card.summary, card.actor_name, card.source_context, card.source_ref]
+			.some((text) => text?.toLowerCase().includes(q));
+	}
+
+	// Only the sources that have cards on the board get a chip.
+	const platforms = $derived([...new Set(cards.map((c) => platformKey(c.entity_id ?? undefined)))].filter(Boolean).sort());
+
 	const columns = $derived.by(() => {
 		const byColumn: Record<Column, ActionCard[]> = { backlog: [], todo: [], in_progress: [], done: [] };
-		for (const card of cards) byColumn[columnOf(card)].push(card);
+		for (const card of cards) if (matches(card)) byColumn[columnOf(card)].push(card);
 		for (const id of ['backlog', 'todo', 'in_progress'] as const) {
 			byColumn[id].sort(
 				(a, b) =>
@@ -185,7 +223,45 @@
 			<div class="mx-4 mt-3 rounded-lg bg-rose-500/15 px-3 py-2 text-laya-secondary text-rose-300">{error}</div>
 		{/if}
 
-		<div class="flex items-center justify-end gap-1 px-4 pt-3">
+		<div class="flex flex-wrap items-center gap-1.5 px-4 pt-3">
+			<input
+				type="search"
+				placeholder="Search cards…"
+				bind:value={filters.search}
+				class="w-56 rounded-md border border-surface-700 bg-surface-900/60 px-2 py-1 text-laya-secondary text-surface-200 placeholder:text-surface-500 focus:border-laya-orange/60 focus:outline-none"
+			/>
+			<span class="ml-2 text-laya-micro text-surface-500">Priority</span>
+			{#each PRIORITIES as p (p)}
+				<button
+					type="button"
+					onclick={() => (filters.priorities = toggle(filters.priorities, p))}
+					class="rounded px-1.5 py-0.5 text-[10px] font-semibold transition-opacity
+						{PRIORITY_COLORS[p]} {filters.priorities.length && !filters.priorities.includes(p) ? 'opacity-35' : ''}
+						{filters.priorities.includes(p) ? 'ring-1 ring-laya-orange/70' : ''}"
+				>{PRIORITY_LABELS[p]}</button>
+			{/each}
+			{#if platforms.length > 1}
+				<span class="ml-2 text-laya-micro text-surface-500">Source</span>
+				{#each platforms as p (p)}
+					<button
+						type="button"
+						onclick={() => (filters.platforms = toggle(filters.platforms, p))}
+						class="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-laya-micro transition-colors
+							{filters.platforms.includes(p) ? 'bg-laya-orange/10 text-laya-orange' : 'text-surface-400 hover:bg-surface-800 hover:text-surface-200'}"
+					>
+						<span class="h-1.5 w-1.5 rounded-full" style="background:{platformDotColor(p)}"></span>
+						{platformLabel(p)}
+					</button>
+				{/each}
+			{/if}
+			{#if filtering}
+				<button
+					type="button"
+					onclick={() => (filters = { search: '', priorities: [], platforms: [] })}
+					class="ml-1 text-laya-micro text-surface-500 underline-offset-2 hover:text-surface-200 hover:underline"
+				>Clear</button>
+			{/if}
+			<span class="flex-1"></span>
 			{#each [['detailed', 'Detailed'], ['compact', 'Compact']] as [id, label] (id)}
 				<button
 					type="button"
@@ -287,7 +363,7 @@
 								{/if}
 							{:else}
 								<p class="px-2 py-6 text-center text-laya-micro text-surface-600">
-									{column.id === 'backlog' ? 'Nothing new' : 'Drop cards here'}
+									{filtering ? 'No matching cards' : column.id === 'backlog' ? 'Nothing new' : 'Drop cards here'}
 								</p>
 							{/each}
 						{/if}
