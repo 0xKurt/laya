@@ -576,7 +576,7 @@ async def mark_card_done(card_id: str) -> dict:
     if not rows:
         raise HTTPException(status_code=404, detail="Card not found")
 
-    doneable = {"pending", "ready", "awaiting_input"}
+    doneable = {"pending", "ready", "requires_approval", "awaiting_input"}
     if rows[0]["status"] not in doneable:
         raise HTTPException(
             status_code=409, detail=f"Card status '{rows[0]['status']}' cannot be marked done"

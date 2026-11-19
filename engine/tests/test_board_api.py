@@ -57,3 +57,17 @@ async def test_set_lane_rejects_unknown_lanes_and_cards(db):
     async with await _client() as client:
         assert (await client.put("/cards/c1/lane", json={"lane": "done"})).status_code == 422
         assert (await client.put("/cards/nope/lane", json={"lane": "todo"})).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_card_awaiting_draft_approval_can_be_dropped_on_done(db):
+    await insert_test_card(db, card_id="c1", event_id="e1", status="requires_approval")
+
+    async with await _client() as client:
+        assert (await client.post("/cards/c1/done")).status_code == 200
+        [card] = (await client.get("/board")).json()
+        assert card["status"] == "done"
+        # Dragging it back out of Done restores the status it had.
+        assert (await client.post("/cards/c1/reopen")).status_code == 200
+        [card] = (await client.get("/board")).json()
+        assert card["status"] == "requires_approval"
