@@ -770,6 +770,21 @@ async def process_chat_message_streaming(
                         # Content accumulates across iterations so the final
                         # persisted message contains all streamed text.
 
+                    elif event.type == "tool_status" and event.tool_calls:
+                        # An agent model ran the tool itself; only report it.
+                        for tc in event.tool_calls:
+                            yield {
+                                "type": "chat_stream_tool",
+                                "tool": tc.name,
+                                "status": event.tool_status,
+                            }
+                            if event.tool_status == "done":
+                                tool_calls_log.append({
+                                    "name": tc.name,
+                                    "arguments": tc.arguments,
+                                    "result_preview": event.content[:200],
+                                })
+
                     elif event.type == "done":
                         total_input_tokens += event.input_tokens
                         total_output_tokens += event.output_tokens
