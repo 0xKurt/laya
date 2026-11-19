@@ -798,6 +798,7 @@ async def llm_call(
     from laya.llm import agent_backend
 
     if agent_backend.is_agent_model(model):
+        model = agent_backend.apply_stage_default_model(role, model)
         agent_messages = _inject_current_datetime(messages)
         start = time.monotonic()
         try:

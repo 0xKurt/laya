@@ -15,12 +15,15 @@ monthly $ budget (``pipeline/budget.py``) but **window-based with auto-resume**:
 - When an agent crosses ``pause_at_percent`` of its window budget (or its native limit is
   hit), we pause ingestion (same n8n lever the $ budget uses) until the window resets, then
   the scheduler auto-resumes. This is the user-chosen "defer + auto-resume at reset".
+- A hard daily cap (``settings.agent_budgets.daily_call_limit``) on agent inference calls.
+  Reaching it refuses further calls and pauses ingestion the same way until local
+  midnight.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import structlog
 
@@ -32,6 +35,7 @@ log = structlog.get_logger()
 
 DEFAULT_PAUSE_AT_PERCENT = 85
 DEFAULT_WINDOW_HOURS = 5.0
+DEFAULT_DAILY_CALL_LIMIT = 400
 
 # Native rate-limit statuses we consider "still OK to use".
 _OK_STATUSES = {"allowed", None, ""}
@@ -43,7 +47,11 @@ _OK_STATUSES = {"allowed", None, ""}
 def get_agent_budget_config() -> dict:
     """Read agent-budget config from settings.json."""
     s = load_settings().get("agent_budgets", {}) or {}
-    return {"enabled": bool(s.get("enabled", False)), "agents": s.get("agents", {}) or {}}
+    return {
+        "enabled": bool(s.get("enabled", True)),
+        "agents": s.get("agents", {}) or {},
+        "daily_call_limit": int(s.get("daily_call_limit", DEFAULT_DAILY_CALL_LIMIT) or 0),
+    }
 
 
 def update_agent_budget_config(enabled: bool, agents: dict | None) -> dict:
@@ -72,6 +80,12 @@ def _audit_window_start(window_hours: float) -> str:
 
 def _ts_in_hours(hours: float) -> str:
     return db_ts(_now_utc() + timedelta(hours=hours))
+
+
+def _local_midnight(days_ahead: int = 0) -> datetime:
+    """Local midnight (today, or ``days_ahead`` days later) as an aware datetime.
+    A naive datetime's ``astimezone()`` reads it as local time, DST included."""
+    return datetime.combine(date.today() + timedelta(days=days_ahead), time.min).astimezone()
 
 
 def _ts_from_unix(ts: int | None) -> str | None:
@@ -147,6 +161,34 @@ async def get_agent_window_usage(agent_id: str, window_hours: float) -> dict:
     return {"tokens": (row["toks"] if row else 0) or 0, "calls": (row["n"] if row else 0) or 0}
 
 
+async def get_agent_daily_calls() -> int:
+    """Agent inference calls (any agent, success or not) since local midnight."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT COUNT(*) AS n FROM audit_log WHERE model_used LIKE 'agent/%' AND timestamp >= ?",
+        (db_ts(_local_midnight()),),
+    )
+    return (rows[0]["n"] if rows else 0) or 0
+
+
+class AgentCallLimitReached(RuntimeError):
+    """The daily cap on agent inference calls is reached."""
+
+
+async def enforce_daily_call_limit() -> None:
+    """Refuse an agent call once today's cap is reached, pausing ingestion until
+    local midnight. Raises AgentCallLimitReached; a cap of 0 disables it."""
+    limit = get_agent_budget_config()["daily_call_limit"]
+    if limit <= 0:
+        return
+    calls = await get_agent_daily_calls()
+    if calls < limit:
+        return
+    reason = f"daily agent call limit reached ({calls}/{limit})"
+    await pause_for_agent_budget(db_ts(_local_midnight(days_ahead=1)), reason)
+    raise AgentCallLimitReached(f"{reason}; agent calls resume at local midnight")
+
+
 # ── pause state ──────────────────────────────────────────────────────────
 
 
@@ -204,6 +246,8 @@ async def get_agent_budget_status() -> dict:
     return {
         "enabled": cfg["enabled"],
         "agents": agents_status,
+        "daily_calls": await get_agent_daily_calls(),
+        "daily_call_limit": cfg["daily_call_limit"],
         "is_paused": state["paused_at"] is not None,
         "paused_until": state["paused_until"],
         "paused_reason": state["paused_reason"],

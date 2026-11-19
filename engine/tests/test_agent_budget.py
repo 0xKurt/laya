@@ -59,7 +59,7 @@ async def test_window_usage_counts_only_recent_successful_agent_calls(db):
 @pytest.mark.asyncio
 async def test_status_reflects_config_and_usage(db):
     await _insert_audit(db, "agent/claude_code/m", 800_000, 200_000)  # 1.0M tokens
-    cfg = {"enabled": True, "agents": {"claude_code": {"window_token_limit": 5_000_000, "window_hours": 5, "pause_at_percent": 85}}}
+    cfg = {"enabled": True, "daily_call_limit": 400, "agents": {"claude_code": {"window_token_limit": 5_000_000, "window_hours": 5, "pause_at_percent": 85}}}
     with patch.object(ab, "get_agent_budget_config", return_value=cfg):
         status = await ab.get_agent_budget_status()
     assert status["enabled"] is True
@@ -68,6 +68,8 @@ async def test_status_reflects_config_and_usage(db):
     assert agent["window_token_limit"] == 5_000_000
     assert agent["percent"] == 20.0
     assert status["is_paused"] is False
+    assert status["daily_calls"] == 1
+    assert status["daily_call_limit"] == 400
 
 
 @pytest.mark.asyncio
@@ -112,3 +114,89 @@ async def test_maybe_resume_only_after_window_resets(db):
         await db.commit()
         await ab.maybe_resume_agent_budget()
         assert resumed["called"] is True
+
+
+# ── defaults + hard daily call cap ──
+
+
+def test_defaults_enable_budget_with_claude_code_cap(tmp_path, monkeypatch):
+    """A settings.json without agent_budgets gets the enabled default and caps."""
+    import json
+
+    from laya import config
+
+    f = tmp_path / "settings.json"
+    f.write_text(json.dumps({"coding_agent": "claude_code"}))
+    monkeypatch.setattr(config, "LAYA_CONFIG_FILE", f)
+    monkeypatch.setattr(config, "_settings_cache", None)
+    cfg = ab.get_agent_budget_config()
+    assert cfg["enabled"] is True
+    assert cfg["daily_call_limit"] == 400
+    assert cfg["agents"]["claude_code"]["window_token_limit"] == 2_000_000
+
+    # A file that has agent_budgets but no daily_call_limit still gets the cap.
+    f.write_text(json.dumps({"agent_budgets": {"enabled": False, "agents": {}}}))
+    cfg = ab.get_agent_budget_config()
+    assert cfg["daily_call_limit"] == 400
+
+
+def _cap_cfg(limit):
+    return {"enabled": False, "agents": {}, "daily_call_limit": limit}
+
+
+@pytest.mark.asyncio
+async def test_daily_calls_count_agent_calls_since_local_midnight(db):
+    await _insert_audit(db, "agent/claude_code/m", 1, 1)
+    await _insert_audit(db, "agent/pi_cli/q", 1, 1, success=0)              # failures count too
+    await _insert_audit(db, "anthropic/claude-haiku-4-5", 1, 1)              # not an agent
+    yesterday = (ab._local_midnight() - timedelta(minutes=1)).astimezone(timezone.utc)
+    await _insert_audit(db, "agent/claude_code/old", 1, 1, ts=yesterday.strftime("%Y-%m-%d %H:%M:%S"))
+    assert await ab.get_agent_daily_calls() == 2
+
+
+@pytest.mark.asyncio
+async def test_daily_cap_under_limit_allows_call(db):
+    await _insert_audit(db, "agent/claude_code/m", 1, 1)
+    with patch.object(ab, "get_agent_budget_config", return_value=_cap_cfg(2)), \
+         patch.object(ab, "pause_for_agent_budget") as pause:
+        await ab.enforce_daily_call_limit()
+    pause.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_daily_cap_reached_refuses_and_pauses_until_midnight(db):
+    await _insert_audit(db, "agent/claude_code/m", 1, 1)
+    await _insert_audit(db, "agent/claude_code/n", 2, 2)
+    paused = {}
+
+    async def _fake_pause(until, reason):
+        paused["until"] = until
+        paused["reason"] = reason
+
+    with patch.object(ab, "get_agent_budget_config", return_value=_cap_cfg(2)), \
+         patch.object(ab, "pause_for_agent_budget", side_effect=_fake_pause):
+        with pytest.raises(ab.AgentCallLimitReached):
+            await ab.enforce_daily_call_limit()
+
+    assert paused["until"] == ab._local_midnight(days_ahead=1).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    assert "2/2" in paused["reason"]
+
+
+@pytest.mark.asyncio
+async def test_daily_cap_zero_disables(db):
+    await _insert_audit(db, "agent/claude_code/m", 1, 1)
+    with patch.object(ab, "get_agent_budget_config", return_value=_cap_cfg(0)):
+        await ab.enforce_daily_call_limit()
+
+
+@pytest.mark.asyncio
+async def test_agent_llm_call_refused_when_cap_reached(db):
+    from laya.llm import agent_backend
+
+    await _insert_audit(db, "agent/claude_code/m", 1, 1)
+    with patch.object(ab, "get_agent_budget_config", return_value=_cap_cfg(1)), \
+         patch.object(ab, "pause_for_agent_budget"), \
+         patch.object(agent_backend, "_run_agent") as run:
+        with pytest.raises(ab.AgentCallLimitReached):
+            await agent_backend.agent_llm_call("agent/claude_code/claude-haiku-4-5", [{"role": "user", "content": "hi"}])
+    run.assert_not_called()
