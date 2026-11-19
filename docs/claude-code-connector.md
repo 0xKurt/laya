@@ -1,0 +1,121 @@
+# Claude Code connector
+
+Laya can collect Slack, Gmail, Linear, GitHub and Notion events through the user's **Claude Code CLI** instead of n8n: the MCP connectors the user's Claude Code login already has (claude.ai Slack/Gmail/Google Drive connectors, Linear and Notion MCP servers) and the `gh` CLI. No Slack app, OAuth client or n8n credential is needed. It can also send a Slack reply or a Gmail draft through the same connectors, only on the user's explicit click.
+
+This document is the contract between the parts of the integration. Code that implements a part must match it; change the document together with the code.
+
+## Design rules
+
+1. **No migrations, no new columns on upstream tables.** `db/migrate.py` applies only versions above the highest applied one, so a fork migration would make a later upstream one be skipped. The module creates its own tables at startup with `CREATE TABLE IF NOT EXISTS` (`claude_code/store.py`).
+2. **Use Laya's concepts.** Sources (`sources` rows), spaces, team identity (`team.json` `self`), entities (`event.entity_id`) and card status (`pipeline/card_status.py`, `entity_status_lock`), rules (`rules.json` via the rules API), tags (`tags` / `tag_assignments`, `is_system=1`), the agent budget (`pipeline/agent_budget.py`), audit (`log_to_audit`).
+3. **Few hooks in upstream code.** Everything else lives in `engine/laya/claude_code/` and in new UI files. The hooks are listed in "Hooks" below.
+4. **Reproducible.** Every setting is made through the setup wizard or Settings; defaults live in the module. No hand-edited files.
+5. **Read-only collecting, explicit sending.** A collector turn gets an allowlist of read tools only. A send turn gets exactly one send tool and runs only from `POST /egress/execute` triggered by a user click.
+
+## Engine module `engine/laya/claude_code/`
+
+| File | Responsibility |
+|---|---|
+| `store.py` | tables `claude_code_sources` and `claude_code_state` (see below); async helpers |
+| `discover.py` | locate the `claude` binary (`config.get_agent_binary("claude_code")`), list available MCP tools (one cheap `claude -p` listing turn, cached), map platform roles to real tool names, read the user's identity per platform; returns a structured `Discovery` with per-platform `available`, `tools`, `identity`, `problem` (human-readable reason when something is missing) |
+| `cli.py` | `run_collect(platform, prompt, schema, tools, model, timeout)` and `run_send(...)` on `agents/subprocess_helper.AgentProcess`; `--allowedTools` = the given tools, built-in tools disallowed; usage logged with `log_to_audit(step="claude_code_<platform>", model="agent/claude_code/<model>")` using cache reads weighted 0.1 |
+| `platforms/slack.py`, `gmail.py`, `linear.py`, `notion.py`, `github.py` | one collector each: `async collect(source, since) -> list[LayaEvent]` |
+| `links.py` | linked documents: extract Notion / Google Docs / GitHub links from an event, fetch read-only, summarise; appended to the event body (section "Linked documents") |
+| `recheck.py` | "still open?" re-check of open cards |
+| `service.py` | background loop, `start_service()` / `stop_service()` |
+| `connect.py` | connect / disconnect / configure a platform |
+| `egress.py` | `ClaudeCodeBackend(EgressBackend)` for sending |
+| `api.py` | REST endpoints below |
+
+### Tables (module-owned)
+
+```sql
+CREATE TABLE IF NOT EXISTS claude_code_sources (
+    platform     TEXT PRIMARY KEY,          -- slack | gmail | linear | github | notion
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    config       TEXT NOT NULL DEFAULT '{}', -- JSON, per-platform options (see Config)
+    tools        TEXT NOT NULL DEFAULT '{}', -- JSON, role -> discovered tool name
+    identity     TEXT NOT NULL DEFAULT '{}', -- JSON, e.g. {"slack_user_id": "U…", "email": "…"}
+    cursor       TEXT,                       -- ISO timestamp, start of the last successful sweep
+    last_run_at  TEXT, last_ok_at TEXT, last_error TEXT, last_count INTEGER,
+    connected_at TEXT
+);
+CREATE TABLE IF NOT EXISTS claude_code_state (
+    platform TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,  -- e.g. slack thread memory
+    PRIMARY KEY (platform, key)
+);
+```
+
+### Sources
+
+On connect the module inserts, **before the first sweep**, a `sources` row: `source_id = "src_claude_code_<platform>"`, `name = "<Label> (Claude Code)"`, `platform = <platform>`, `workflow_id = "claude_code:<platform>"`, `source_type = "claude_code"`, `space_id = "default"` (or the chosen space). Every collected event has `source.connection_id = "claude_code:<platform>"`, so `space_resolution` maps it to that row and the n8n pause loops (which only touch `source_type='ingestion'`) ignore it. A space pause (`PUT /spaces/{id}/paused`) pauses the module's sources in that space.
+
+### Event conventions
+
+| Platform | `subject.type` | `subject.id` (= the conversation) | `actor.platform_handle` / `actor.email` |
+|---|---|---|---|
+| slack | `thread` | DM / group DM: `<channel_id>`; thread: `<channel_id>:<thread_root_ts>`; root message: `<channel_id>:<ts>` | Slack user id (`U…`) |
+| gmail | `email_thread` | Gmail thread id | sender email |
+| gmail meeting item | `meeting` | `<thread_id>:item:<n>` | email `gemini-notes@google.com` |
+| linear | `ticket` | issue identifier (`TRAD-12`) | actor email |
+| github | `pull_request` / `ticket` | `<owner>/<repo>#<number>` | GitHub login |
+| notion | `page` | `<page_id>` or `<page_id>:<discussion_id>` | author email |
+
+- `event_id = "evt_" + uuid5(NAMESPACE_URL, "laya-claude-code:<platform>:<native id>")`. Overlapping sweeps re-deliver the same ids and `POST /events` drops duplicates.
+- One event per conversation and sweep. When the user wrote last, the event is the user's own message. Otherwise it carries all new messages after the user's last one.
+- `content.body` for Slack conversations: `Earlier in the conversation:` with up to `context_messages` previous messages, then `New:`. Each line is `[<Mon dd.mm HH:MM>] <Name|Me>: <text>`.
+- **Identity contract.** `connect.py` writes the user's handles into team.json `self.accounts` (Slack user id, GitHub login) and emails into `self.aliases`, through the team API. Collectors emit exactly those strings, so `run_ingest` yields `actor_relationship == "self"` for the user's own messages.
+- **Conclusions.** An event with `content.metadata.resolved_in_source = true` (Linear issue Done/Canceled, PR merged or closed, re-check found the item answered) concludes its conversation like the user's own reply. `raw_event_type` values the seeded rules match: `review_requested`, `state_change`, `ci_activity`.
+- `content.metadata` always has `claude_code: true` and the platform's own keys (`slack_channel_id`, `slack_channel_name`, `slack_channel_type`, `slack_thread_ts`, `gmail_thread_id`, `github_repo`, `github_reason`, `linear_status`, `notion_page_id`, `meeting`).
+
+### Config (per platform, `claude_code_sources.config`)
+
+| Platform | Keys (defaults) |
+|---|---|
+| all | `interval_minutes` 60, `active_hours` {start "08:00", end "19:00", days [0..4]}, `timezone` (system), `model` "haiku", `initial_lookback_hours` 12, `recheck_after_hours` 6 |
+| slack | `context_messages` 8, `thread_memory_days` 14, `only_relevant` true (DMs, mentions, own messages, threads the user wrote in) |
+| gmail | `exclude_senders` [notifications@linear.app, notifications@github.com, noreply@github.com, notify@mail.notion.com], `meeting_notes` true |
+| github | `orgs` [] (empty = all), `others_prs_only_on_mention` true |
+| linear, notion | none beyond "all" |
+
+### REST API (`api.py`, auth like every router)
+
+| Method | Path | Body / result |
+|---|---|---|
+| GET | `/claude-code/status` | `{cli: {found, path, version}, platforms: {<p>: {available, connected, enabled, identity, problem, last_run_at, last_ok_at, last_error, last_count, config, can_send}}, budget_paused: bool}` |
+| POST | `/claude-code/discover` | runs discovery again, returns status |
+| POST | `/claude-code/{platform}/connect` | `{space_id?}` → creates the source, identity and rules, returns the platform status |
+| DELETE | `/claude-code/{platform}` | disconnects: source row, module rows, the platform's seeded rules |
+| PUT | `/claude-code/{platform}/config` | the full config object for the platform |
+| POST | `/claude-code/{platform}/sync` | sweeps now, returns `{events, error}` |
+
+### Seeded rules (idempotent by name, through the rules API)
+
+- `Claude Code · GitHub: ignore review requests, state changes and CI`: drop when `source.platform equals github` and `source.raw_event_type in [review_requested, state_change, ci_activity]`.
+- `Claude Code · Ignore bot comments`: drop when `actor.platform_handle ends_with [bot]`.
+- `Claude Code · Linear: ignore review requests`: drop when `source.platform equals linear` and `source.raw_event_type equals review_requested`.
+
+## Hooks in upstream code
+
+| File | Hook |
+|---|---|
+| `main.py` | include `claude_code.api.router`; `start_service()` in lifespan, `stop_service()` on shutdown |
+| `pipeline/queue.py` | `_fetch_ready_events`: return nothing while the agent budget is paused. `process_event`: after ingest and space resolution, `if actor_relationship == "self" or event.content.metadata.get("resolved_in_source"): await apply_conclusion(event, actor_relationship); mark filtered; return` |
+| `pipeline/card_status.py` | `apply_conclusion(event)`: under `entity_status_lock(event.entity_id)` close the open cards (`ready`, `requires_approval`) of the entity with `status_set_by='laya'` and a reason with the event's URL, and record the conclusion so a card created later for an earlier event of the same entity is created `done` (`_later_conclusion_reason`) |
+| `egress/router.py` | `_resolve_backend`: a connection whose id starts with `claude_code:` → `ClaudeCodeBackend` |
+| `egress/health.py`, `egress/connections.py` (`test_connection`, `remove_connection`) | rows with ids starting `claude_code:` are delegated to the module |
+| UI | `IntegrationsConfig.svelte` injects a "via Claude Code" entry per platform (the SMTP injection pattern) using `/claude-code/status`; `ClaudeCodeSource.svelte` is the detail panel; the setup wizard's step 3 includes `SetupClaudeCode.svelte`; `RulesEditor.svelte` accepts a free field path |
+
+## Sending (Claude Code egress)
+
+`connect.py` creates, for platforms that can send (`slack`, `gmail`), an `egress_connections` row with `connection_id = "claude_code:<platform>"`, `n8n_credential_id` NULL, `status` from discovery, capabilities `["reply_to_thread","send_message"]` (Slack) / `["create_draft","reply"]` (Gmail). `ClaudeCodeBackend.execute` runs one `claude -p` turn with exactly the one send tool needed for the action (Slack: the reply/send tool; Gmail: create a **draft**, never send) and the payload from the card. It runs only through `POST /egress/execute`, which the UI calls on the user's click; chat cannot trigger it.
+
+## Board
+
+`/board` lanes come from Laya's own data: **In progress** = status `agent_running` / `awaiting_input` / `executing`, or system tag `lane:in-progress`; **To do** = system tag `lane:todo`; **Done** = status `done` (last 7 days); **Backlog** = every other active card. Dragging changes the card status (`/cards/{id}/done`, `/reopen`, `/archive`) and the lane tags (`/tags/assign`, `/tags/unassign`). The lane tags are created as system tags on first use.
+
+## Effort and session lane
+
+- Effort: the stager also returns `effort: {you_minutes, agent_minutes}` (Kurt's time: deciding, reviewing, talking; agent time: code, tests, write-ups a Claude session can do). It is stored in the card's `staged_output` and shown on the card; the Board shows the sum of Kurt's time per lane.
+- "Prepare session": a card action that produces a prompt in Kurt's style (what is wrong, for whom, where with links/addresses/Linear keys, what done looks like, "commit, open a PR, get it green"; merging waits for Kurt) plus a worktree command for the repository (`git -C <checkout> worktree add ../<repo>-<topic> -b <topic> origin/<default>`). Kurt copies it and starts the session himself.
+- A session's claim is a lead: a card shows "merged" / "PR green" only after `gh` confirms it.
