@@ -32,6 +32,11 @@ PROMPT_TAGS_TEXT_MATCH_MAX = 60
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
+# Names of the Board's lane tags start with this prefix (api/board_api.py).
+# They record where the user put a card on the board, so the stager is never
+# shown them and never assigns them.
+LANE_TAG_PREFIX = "lane:"
+
 
 async def select_prompt_tags(db, event: LayaEvent) -> list[str]:
     """Pick the existing tag names to show the stager for one event.
@@ -60,7 +65,11 @@ async def select_prompt_tags(db, event: LayaEvent) -> list[str]:
     When the tags table has at most PROMPT_TAGS_SHOW_ALL_MAX names, all of
     them are returned in alphabetical order and the sources are not queried.
     """
-    tag_rows = await db.execute_fetchall("SELECT name, is_system FROM tags ORDER BY name")
+    tag_rows = [
+        r
+        for r in await db.execute_fetchall("SELECT name, is_system FROM tags ORDER BY name")
+        if not r["name"].startswith(LANE_TAG_PREFIX)
+    ]
     all_names = [r["name"] for r in tag_rows]
     if len(all_names) <= PROMPT_TAGS_SHOW_ALL_MAX:
         return all_names
@@ -70,7 +79,7 @@ async def select_prompt_tags(db, event: LayaEvent) -> list[str]:
 
     def add(names) -> None:
         for name in names:
-            if name not in seen:
+            if name not in seen and not name.startswith(LANE_TAG_PREFIX):
                 seen.add(name)
                 selected.append(name)
 
@@ -154,7 +163,7 @@ async def persist_suggested_tags(card_id: str, tag_names: list[str]) -> list[str
 
     for raw_name in tag_names[:3]:
         name = raw_name.strip().lower()
-        if not name or len(name) > 50:
+        if not name or len(name) > 50 or name.startswith(LANE_TAG_PREFIX):
             continue
         if current_count >= TAG_SOFT_CAP:
             break
