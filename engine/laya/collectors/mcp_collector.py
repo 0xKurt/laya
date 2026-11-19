@@ -54,8 +54,8 @@ DEFAULT_COLLECTOR_SETTINGS: dict[str, Any] = {
     "active_hours": {"start": "08:00", "end": "19:00", "days": [0, 1, 2, 3, 4]},
     "timezone": "Europe/Berlin",
     "model": "haiku",
-    "timeout_seconds": 300,
-    "initial_lookback_hours": 24,
+    "timeout_seconds": 600,
+    "initial_lookback_hours": 12,
     "sources": {"slack": True, "gmail": True, "linear": True, "github": True},
     "identity": {
         "slack_user_id": "",
