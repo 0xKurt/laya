@@ -130,7 +130,7 @@
 	let toolsVia = $state<'n8n' | 'claude_code'>('n8n');
 	let claudeCodeIdentities = $state<Partial<Record<ClaudeCodePlatform, ClaudeCodeIdentity>>>({});
 	// Step 4: run Laya's stages on the Claude subscription too.
-	let useClaudeSubscription = $state(false);
+	let useClaudeSubscription = $state(true);
 
 	// Step 5: Team
 	let members = $state<Array<{ name: string; email: string; role: 'self' | 'manager' | 'teammate' | 'external' | 'bot'; accounts?: string[]; aliases?: string[] }>>([
