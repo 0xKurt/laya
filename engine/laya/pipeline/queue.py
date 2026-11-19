@@ -302,6 +302,7 @@ async def process_event(event_id: str) -> None:
     from laya.pipeline.ingest import run_ingest
     from laya.pipeline.router import run_router
     from laya.pipeline.rules import run_rules
+    from laya.pipeline.self_reply import SELF_EVENT_FILTER, close_answered_cards, is_self_event
     from laya.pipeline.space_resolution import resolve_space
     from laya.pipeline.stager import run_stager
     from laya.pipeline.emit import run_emit
@@ -327,6 +328,24 @@ async def process_event(event_id: str) -> None:
         space_id = await resolve_space(
             event.event_id, event.source.connection_id, event.source.platform
         )
+
+        # SELF REPLY — the user's own message answers the open cards of its
+        # conversation and produces no card itself. No LLM call.
+        if is_self_event(event, user_identity):
+            closed = await close_answered_cards(await get_db(), event)
+            await _mark_filtered(event_id)
+            await manager.broadcast(
+                {
+                    "type": "event_classified",
+                    "event_id": event.event_id,
+                    "payload": {
+                        "filtered": True,
+                        "filter_rule": SELF_EVENT_FILTER,
+                        "closed_card_ids": [c["card_id"] for c in closed],
+                    },
+                }
+            )
+            return
 
         # RULES ENGINE
         filtered, filter_rule = await run_rules(event)
@@ -777,13 +796,19 @@ async def _batch_route_events(event_ids: list[str]) -> None:
     """
     from laya.pipeline.ingest import run_ingest
     from laya.pipeline.router import run_batch_router
+    from laya.config import get_self_user
     from laya.pipeline.rules import run_rules
+    from laya.pipeline.self_reply import is_self_event
     from laya.pipeline.space_resolution import resolve_space
 
+    self_user = get_self_user()
     events_data = []
     for eid in event_ids:
         event = await _load_event(eid)
         if not event:
+            continue
+        # The user's own events never reach the router (see process_event).
+        if is_self_event(event, self_user):
             continue
         try:
             actor_relationship, _ = await run_ingest(event)
