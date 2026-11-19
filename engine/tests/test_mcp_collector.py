@@ -216,7 +216,11 @@ def test_slack_messages_after_own_reply_stay_open():
     ]
     own, rest = mc._slack_events(msgs, ME)
     assert own.content.metadata["is_self"] and own.content.body == "a1"
-    assert not rest.content.metadata["is_self"] and rest.content.body == "q2"
+    assert not rest.content.metadata["is_self"]
+    # The reply carries the conversation so far, the user's own answer included.
+    assert "Earlier in the conversation:" in rest.content.body
+    assert "Alice: q1" in rest.content.body and "Me: a1" in rest.content.body
+    assert rest.content.body.split("New:\n", 1)[1].endswith("Alice: q2")
     assert rest.timestamp > own.timestamp
 
 
@@ -254,7 +258,7 @@ def test_slack_prompt_reads_known_threads_and_no_broad_thread_search():
     prompt = mc._slack_prompt(ME, datetime(2026, 11, 19, tzinfo=timezone.utc), [("C1", "1794999999.000001")])
     assert "slack_read_thread" in prompt and "channel_id=C1 thread_ts=1794999999.000001" in prompt
     assert "is:thread" not in prompt
-    assert "slack_read_thread" not in mc._slack_prompt(ME, datetime(2026, 11, 19, tzinfo=timezone.utc), [])
+    assert "thread_ts=" not in mc._slack_prompt(ME, datetime(2026, 11, 19, tzinfo=timezone.utc), [])
 
 
 @pytest.mark.asyncio
@@ -320,3 +324,18 @@ def test_linear_done_issue_is_a_closing_event():
     ], set())
     assert done.content.metadata["is_self"] and done.content.metadata["resolved_in_source"]
     assert not open_.content.metadata["is_self"] and not open_.content.metadata["resolved_in_source"]
+
+
+def test_slack_context_messages_explain_a_reply_but_trigger_nothing():
+    msgs = [
+        _slack(channel_id="D1", channel_type="dm", ts="1795000000.0", user_id=ME, text="still at X?", is_context=True),
+        _slack(channel_id="D1", channel_type="dm", ts="1795000001.0", text="yeah, not sure for how long", is_context=False),
+    ]
+    [e] = mc._slack_events(msgs, ME)               # no self event from a context message
+    assert not e.content.metadata["is_self"]
+    assert "Me: still at X?" in e.content.body
+    assert e.content.body.split("New:\n", 1)[1].endswith("Alice: yeah, not sure for how long")
+
+
+def test_slack_context_only_conversation_produces_nothing():
+    assert mc._slack_events([_slack(channel_type="dm", channel_id="D1", is_context=True)], ME) == []

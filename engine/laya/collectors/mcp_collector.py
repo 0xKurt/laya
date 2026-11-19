@@ -149,6 +149,7 @@ async def _set_cursor(source: str, value: datetime) -> None:
 
 
 _SLACK_THREADS_KEY = "mcp_collector:slack_threads"
+_SLACK_CONTEXT_MESSAGES = 8  # earlier messages fetched so a reply makes sense on its own
 _SLACK_THREADS_TTL = timedelta(days=14)
 _SLACK_THREADS_READ = 15  # most recently active threads re-read per sweep
 
@@ -291,6 +292,7 @@ _SLACK_SCHEMA = {
                     "user_name": {"type": "string"},
                     "text": {"type": "string"},
                     "permalink": {"type": "string"},
+                    "is_context": {"type": "boolean"},
                 },
                 "required": ["channel_id", "channel_type", "ts", "user_id", "text", "permalink"],
             },
@@ -315,10 +317,16 @@ limit=20; follow the cursor up to 3 pages per query). Run exactly these queries:
 1. All direct and group DMs: channel_types="im,mpim", filters="".
 2. Messages that mention me: filters="<@{me}>".
 3. My own messages anywhere: filters="from:<@{me}>".{thread_step}
-Do not add messages from any other search. Deduplicate by channel_id + ts. For each
-message return channel_id, channel_name, channel_type (dm, group_dm, public or
+Do not add messages from any other search. Deduplicate by channel_id + ts.
+Context: for every DM, group DM or thread in which someone other than me posted one of
+the messages above, also read the up to {_SLACK_CONTEXT_MESSAGES} messages posted right
+before the earliest of them (DMs: mcp__claude_ai_Slack__slack_read_channel with
+latest set to that ts; threads: mcp__claude_ai_Slack__slack_read_thread, including the
+thread's first message) and return them with is_context=true. All other messages have
+is_context=false.
+For each message return channel_id, channel_name, channel_type (dm, group_dm, public or
 private), ts, thread_ts (the thread root ts, or null if not in a thread), user_id,
-user_name, the full message text and its permalink.
+user_name, the full message text, its permalink and is_context.
 Return {{"messages": []}} if there is nothing."""
 
 
@@ -357,8 +365,10 @@ def _slack_events(messages: list[dict], me: str) -> list[LayaEvent]:
         if m.get("channel_type") == "dm" and m.get("user_id") != me and m.get("user_name")
     }
     conversations: dict[str, list[dict]] = {}
+    earlier: dict[str, list[dict]] = {}
     for m in messages:
-        conversations.setdefault(_slack_conversation(m), []).append(m)
+        target = earlier if m.get("is_context") else conversations
+        target.setdefault(_slack_conversation(m), []).append(m)
 
     events = []
     for conversation, msgs in conversations.items():
@@ -368,21 +378,39 @@ def _slack_events(messages: list[dict], me: str) -> list[LayaEvent]:
             events.append(_slack_event(conversation, msgs[own[-1]:own[-1] + 1], me, dm_partner, is_self=True))
         unanswered = msgs[own[-1] + 1:] if own else msgs
         if unanswered:
-            events.append(_slack_event(conversation, unanswered, me, dm_partner, is_self=False))
+            # What came before (fetched context plus anything new up to the user's
+            # last message) goes into the body so the card is readable on its own.
+            before = sorted(earlier.get(conversation, []), key=lambda m: float(m["ts"]))
+            before += msgs[:own[-1] + 1] if own else []
+            events.append(_slack_event(conversation, unanswered, me, dm_partner, is_self=False, earlier=before))
     return events
 
 
+def _slack_line(m: dict, me: str) -> str:
+    who = "Me" if m.get("user_id") == me else (m.get("user_name") or m.get("user_id"))
+    when = _parse_ts(m["ts"]).astimezone(safe_zoneinfo("Europe/Berlin")).strftime("%a %d.%m %H:%M")
+    return f"[{when}] {who}: {m.get('text', '')}"
+
+
 def _slack_event(
-    conversation: str, msgs: list[dict], me: str, dm_partner: dict, *, is_self: bool
+    conversation: str, msgs: list[dict], me: str, dm_partner: dict, *, is_self: bool,
+    earlier: list[dict] | None = None,
 ) -> LayaEvent:
     first, last = msgs[0], msgs[-1]
     channel_type = last.get("channel_type", "public")
     name = (last.get("channel_name") or last["channel_id"]).lstrip("#")
     partner = dm_partner.get(last["channel_id"]) or (name if name != last["channel_id"] else "")
     title = f"DM with {partner or 'direct message'}" if channel_type == "dm" else f"#{name}"
-    body = last.get("text", "") if len(msgs) == 1 else "\n".join(
+    body = last.get("text", "") if len(msgs) == 1 and not earlier else "\n".join(
         f"{m.get('user_name') or m.get('user_id')}: {m.get('text', '')}" for m in msgs
     )
+    if earlier:
+        body = (
+            "Earlier in the conversation:\n"
+            + "\n".join(_slack_line(m, me) for m in earlier)
+            + "\n\nNew:\n"
+            + "\n".join(_slack_line(m, me) for m in msgs)
+        )
     thread_ts = last.get("thread_ts") or None
     return _make_event(
         platform="slack", native_id=f"{last['channel_id']}:{last['ts']}",
@@ -771,10 +799,13 @@ async def _collect_source(source: str, since: datetime, settings: dict) -> list[
         # Threads the user writes in become theirs; replies there count from now on.
         now = datetime.now(timezone.utc).isoformat()
         for m in messages:
-            if m.get("user_id") == me and m.get("channel_type") not in ("dm", "group_dm"):
+            if m.get("user_id") == me and not m.get("is_context") and m.get("channel_type") not in ("dm", "group_dm"):
                 known[_slack_conversation(m)] = now
         await _set_my_slack_threads(known)
-        return _slack_events([m for m in messages if _is_mine(m, me, set(known))], me)
+        new = [m for m in messages if not m.get("is_context") and _is_mine(m, me, set(known))]
+        kept = {_slack_conversation(m) for m in new}
+        context = [m for m in messages if m.get("is_context") and _slack_conversation(m) in kept]
+        return _slack_events(new + context, me)
     if source == "gmail":
         from laya.config import get_self_user
 
