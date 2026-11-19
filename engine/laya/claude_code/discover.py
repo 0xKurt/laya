@@ -52,6 +52,9 @@ ROLES: dict[str, dict[str, tuple[str, ...]]] = {
         "get_issue": ("get_issue",),
         "list_comments": ("list_comments",),
         "whoami": ("whoami",),
+        "list_issue_statuses": ("list_issue_statuses",),
+        "save_issue": ("save_issue",),
+        "save_comment": ("save_comment",),
     },
     "notion": {
         "search": ("notion-search",),
@@ -77,6 +80,11 @@ READ_ROLES: dict[str, tuple[str, ...]] = {
 }
 
 SEND_ROLES: dict[str, str] = {"slack": "send", "gmail": "draft"}
+
+# Roles that change data in the source. Only a My work action turn
+# (claude_code/work_actions.py), started by the user's click, may use one,
+# and always alone.
+WRITE_ROLES: dict[str, tuple[str, ...]] = {"linear": ("save_issue", "save_comment")}
 
 # Gemini meeting notes link a Google Doc; these roles come from a Drive server.
 _DRIVE_ROLES = {"drive_read": ("read_file_content",), "drive_meta": ("get_file_metadata",)}

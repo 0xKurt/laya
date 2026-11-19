@@ -57,16 +57,16 @@ def _lock(section: str) -> asyncio.Lock:
 
 # ── GitHub ───────────────────────────────────────────────────────────────
 
-PR_QUERY = """
-query($q: String!, $after: String) {
-  search(query: $q, type: ISSUE, first: %d, after: $after) {
-    issueCount
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      ... on PullRequest {
+# The fields read per pull request; shared with the single-PR refresh after
+# an action (work_actions.py).
+PR_FIELDS = """
         number title url isDraft createdAt updatedAt
-        baseRefName headRefName mergeable reviewDecision
-        repository { nameWithOwner }
+        baseRefName headRefName headRefOid mergeable mergeStateStatus reviewDecision
+        author { login }
+        repository {
+          nameWithOwner mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed
+          deleteBranchOnMerge
+        }
         reviewRequests { totalCount }
         latestReviews(first: 20) { nodes { state author { login } } }
         reviewThreads(first: 100) { nodes { isResolved } }
@@ -78,11 +78,19 @@ query($q: String!, $after: String) {
             ... on StatusContext { state }
           } }
         } } } }
-      }
+"""
+
+PR_QUERY = """
+query($q: String!, $after: String) {
+  search(query: $q, type: ISSUE, first: %d, after: $after) {
+    issueCount
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on PullRequest {%s      }
     }
   }
 }
-""" % PAGE_SIZE
+""" % (PAGE_SIZE, PR_FIELDS)
 
 _FAILED_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
 _CI_STATES = {
@@ -144,6 +152,16 @@ def checks_summary(rollup: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def merge_methods(repo: dict[str, Any]) -> list[str]:
+    """The merge methods the repository allows, in `gh pr merge` flag names."""
+    allowed = [
+        ("squash", repo.get("squashMergeAllowed")),
+        ("merge", repo.get("mergeCommitAllowed")),
+        ("rebase", repo.get("rebaseMergeAllowed")),
+    ]
+    return [name for name, ok in allowed if ok]
+
+
 def parse_pr(node: dict[str, Any]) -> dict[str, Any] | None:
     if not node or not node.get("number"):
         return None
@@ -155,8 +173,9 @@ def parse_pr(node: dict[str, Any]) -> dict[str, Any] | None:
     ]
     threads = (node.get("reviewThreads") or {}).get("nodes") or []
     mergeable = node.get("mergeable") or "UNKNOWN"
+    repo = node.get("repository") or {}
     return {
-        "repo": (node.get("repository") or {}).get("nameWithOwner") or "",
+        "repo": repo.get("nameWithOwner") or "",
         "number": node["number"],
         "title": node.get("title") or "",
         "url": node.get("url") or "",
@@ -175,6 +194,11 @@ def parse_pr(node: dict[str, Any]) -> dict[str, Any] | None:
         "unresolved_threads": sum(1 for t in threads if not t.get("isResolved")),
         "checks": checks_summary(rollup),
         "linear_key": linear_key(node.get("title"), node.get("headRefName")),
+        "author": ((node.get("author") or {}).get("login") or ""),
+        "head_sha": node.get("headRefOid") or "",
+        "merge_state": node.get("mergeStateStatus") or "UNKNOWN",
+        "merge_methods": merge_methods(repo),
+        "delete_branch_on_merge": bool(repo.get("deleteBranchOnMerge")),
     }
 
 
@@ -372,6 +396,39 @@ async def _load(section: str, refresh: bool) -> dict[str, Any]:
         await store.set_state(STATE_PLATFORM, section,
                               json.dumps({"items": items, "fetched_at": fetched_at}))
         return _section(section, items, connected=True, fetched_at=fetched_at)
+
+
+def item_key(section: str, item: dict[str, Any]) -> str:
+    """The identity of a cached row: `owner/repo#N` for a PR, the identifier for an issue."""
+    if section == "github":
+        return f"{item.get('repo', '')}#{item.get('number', '')}"
+    return str(item.get("identifier") or "")
+
+
+async def replace_cached_item(section: str, key: str, item: dict[str, Any] | None) -> None:
+    """Put one row's fresh data into the section's cache, or drop the row.
+
+    An action changes one issue or PR; replacing just that row keeps the rest
+    of the cache (and its age) while the view shows the row's new state at
+    once. `item=None` removes the row (a merged PR, a completed issue).
+    Nothing is written when the section has no cache yet.
+    """
+    async with _lock(section):
+        cache = await _cached(section)
+        if not cache:
+            return
+        rows = list(cache.get("items") or [])
+        index = next((i for i, r in enumerate(rows) if item_key(section, r) == key), None)
+        if item is None:
+            if index is None:
+                return
+            rows.pop(index)
+        elif index is None:
+            rows.append(item)
+        else:
+            rows[index] = item
+        cache["items"] = rows
+        await store.set_state(STATE_PLATFORM, section, json.dumps(cache))
 
 
 async def get_my_work(refresh: bool = False) -> dict[str, Any]:

@@ -254,3 +254,41 @@ async def run_gh(*args: str, timeout: float = 120.0) -> Any:
         raise ClaudeCodeError(f"gh {' '.join(args[:2])} failed: {err.decode(errors='replace')[:300]}")
     text = out.decode(errors="replace").strip()
     return json.loads(text) if text else None
+
+
+async def run_gh_write(*args: str, stdin: str | None = None, timeout: float = 180.0) -> str:
+    """Run a `gh` command that changes something and return its stdout text.
+
+    It runs in an empty temp dir: with `-R owner/repo` gh then acts on the
+    remote repository only and never touches a local checkout (e.g. the local
+    branch `gh pr merge --delete-branch` would otherwise delete). Prompts are
+    disabled so a missing value fails instead of waiting for input. `stdin`
+    feeds `--body-file -`, so text never passes through the argument list.
+    """
+    from laya.config import _augmented_path
+
+    tmpdir = tempfile.mkdtemp(prefix="laya-gh-")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "gh", *args,
+            stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            cwd=tmpdir,
+            env={**os.environ, "PATH": _augmented_path(), "GH_PROMPT_DISABLED": "1"},
+        )
+        out, err = await asyncio.wait_for(
+            proc.communicate(stdin.encode() if stdin is not None else None), timeout=timeout
+        )
+    except FileNotFoundError as e:
+        raise ClaudeCodeError("gh is not installed") from e
+    except asyncio.TimeoutError as e:
+        proc.kill()
+        raise ClaudeCodeError(
+            f"gh {' '.join(args[:2])} timed out; it may have completed, refresh to see"
+        ) from e
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    if proc.returncode != 0:
+        message = (err.decode(errors="replace").strip() or out.decode(errors="replace").strip())
+        raise ClaudeCodeError(f"gh {' '.join(args[:2])} failed: {message[:400]}")
+    return out.decode(errors="replace").strip()
