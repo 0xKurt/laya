@@ -26,6 +26,7 @@ from typing import Any
 
 import structlog
 
+from laya.claude_code import links  # noqa: F401  (registers the linked-documents enricher)
 from laya.claude_code import store
 from laya.claude_code.platforms import COLLECTORS
 from laya.claude_code.platforms.common import enrich, local_tz, parse_ts
