@@ -48,6 +48,7 @@ from laya.api.processing_rules_api import router as processing_rules_router
 from laya.api.rules_api import router as rules_router
 from laya.api.settings_api import router as settings_router
 from laya.api.spaces_api import router as spaces_router
+from laya.api.board_api import router as board_router
 from laya.api.tags_api import router as tags_router
 from laya.api.team import router as team_router
 from laya.api.trace_api import router as trace_router
@@ -523,6 +524,7 @@ auth_deps = [Depends(require_engine_auth)]
 
 app.include_router(actions_router, dependencies=auth_deps)
 app.include_router(audit_router, dependencies=auth_deps)
+app.include_router(board_router, dependencies=auth_deps)
 app.include_router(budget_router, dependencies=auth_deps)
 app.include_router(cards_router, dependencies=auth_deps)
 app.include_router(classification_router, dependencies=auth_deps)

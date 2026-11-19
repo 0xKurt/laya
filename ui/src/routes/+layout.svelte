@@ -589,6 +589,13 @@
 									: 'text-surface-400 hover:text-surface-200 hover:bg-surface-700'}"
 						>Pulse</a>
 						<a
+							href="/board"
+							class="whitespace-nowrap px-4 py-1.5 text-xs font-medium transition-colors
+								{page.url.pathname.startsWith('/board')
+									? 'bg-laya-orange/10 text-laya-orange'
+									: 'text-surface-400 hover:text-surface-200 hover:bg-surface-700'}"
+						>Board</a>
+						<a
 							href="/omni"
 							class="whitespace-nowrap px-4 py-1.5 text-xs font-medium transition-colors
 								{page.url.pathname.startsWith('/omni')
@@ -622,6 +629,13 @@
 							? 'bg-laya-orange/10 text-laya-orange'
 							: 'text-surface-400 hover:text-surface-200 titlebar-hover'}"
 				>Pulse</a>
+				<a
+					href="/board"
+					class="rounded-md px-2.5 py-1 text-xs font-medium transition-colors
+						{page.url.pathname.startsWith('/board')
+							? 'bg-laya-orange/10 text-laya-orange'
+							: 'text-surface-400 hover:text-surface-200 titlebar-hover'}"
+				>Board</a>
 				<a
 					href="/omni"
 					class="rounded-md px-2.5 py-1 text-xs font-medium transition-colors
