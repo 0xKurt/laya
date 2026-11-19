@@ -16,10 +16,11 @@ This document is the contract between the parts of the integration. Code that im
 
 | File | Responsibility |
 |---|---|
-| `store.py` | tables `claude_code_sources` and `claude_code_state` (see below); async helpers |
+| `store.py` | tables `claude_code_sources` and `claude_code_state` (see below); async helpers; the per-platform config defaults |
 | `discover.py` | locate the `claude` binary (`config.get_agent_binary("claude_code")`), list available MCP tools (one cheap `claude -p` listing turn, cached), map platform roles to real tool names, read the user's identity per platform; returns a structured `Discovery` with per-platform `available`, `tools`, `identity`, `problem` (human-readable reason when something is missing) |
 | `cli.py` | `run_collect(platform, prompt, schema, tools, model, timeout)` and `run_send(...)` on `agents/subprocess_helper.AgentProcess`; `--allowedTools` = the given tools, built-in tools disallowed; usage logged with `log_to_audit(step="claude_code_<platform>", model="agent/claude_code/<model>")` using cache reads weighted 0.1 |
 | `platforms/slack.py`, `gmail.py`, `linear.py`, `notion.py`, `github.py` | one collector each: `async collect(source, since) -> list[LayaEvent]` |
+| `platforms/common.py` | shared event helpers (`make_event`, stable ids, `split_conversation`) and the enrich step: `register_enricher(fn)` adds a step that runs over every sweep's events before they are posted (`links.py` registers here) |
 | `links.py` | linked documents: extract Notion / Google Docs / GitHub links from an event, fetch read-only, summarise; appended to the event body (section "Linked documents") |
 | `recheck.py` | "still open?" re-check of open cards |
 | `service.py` | background loop, `start_service()` / `stop_service()` |
@@ -48,7 +49,7 @@ CREATE TABLE IF NOT EXISTS claude_code_state (
 
 ### Sources
 
-On connect the module inserts, **before the first sweep**, a `sources` row: `source_id = "src_claude_code_<platform>"`, `name = "<Label> (Claude Code)"`, `platform = <platform>`, `workflow_id = "claude_code:<platform>"`, `source_type = "claude_code"`, `space_id = "default"` (or the chosen space). Every collected event has `source.connection_id = "claude_code:<platform>"`, so `space_resolution` maps it to that row and the n8n pause loops (which only touch `source_type='ingestion'`) ignore it. A space pause (`PUT /spaces/{id}/paused`) pauses the module's sources in that space.
+On connect the module inserts (replacing a row auto-registered for the same workflow id), **before the first sweep**, a `sources` row: `source_id = "src_claude_code_<platform>"`, `name = "<Label> (Claude Code)"`, `platform = <platform>`, `workflow_id = "claude_code:<platform>"`, `source_type = "claude_code"`, `space_id = "default"` (or the chosen space). Every collected event has `source.connection_id = "claude_code:<platform>"`, so `space_resolution` maps it to that row and the n8n pause loops (which only touch `source_type='ingestion'`) ignore it. A space pause (`PUT /spaces/{id}/paused`) pauses the module's sources in that space.
 
 ### Event conventions
 
@@ -62,10 +63,10 @@ On connect the module inserts, **before the first sweep**, a `sources` row: `sou
 | notion | `page` | `<page_id>` or `<page_id>:<discussion_id>` | author email |
 
 - `event_id = "evt_" + uuid5(NAMESPACE_URL, "laya-claude-code:<platform>:<native id>")`. Overlapping sweeps re-deliver the same ids and `POST /events` drops duplicates.
-- One event per conversation and sweep. When the user wrote last, the event is the user's own message. Otherwise it carries all new messages after the user's last one.
+- At most two events per conversation and sweep: the user's latest own message (it concludes what came before it), and one event carrying all new messages after it. When the user wrote last, only the user's message is emitted. Both are needed when the user answered and someone wrote again in the same sweep: without the user's event the cards of earlier sweeps would stay open.
 - `content.body` for Slack conversations: `Earlier in the conversation:` with up to `context_messages` previous messages, then `New:`. Each line is `[<Mon dd.mm HH:MM>] <Name|Me>: <text>`.
 - **Identity contract.** `connect.py` writes the user's handles into team.json `self.accounts` (Slack user id, GitHub login) and emails into `self.aliases`, through the team API. Collectors emit exactly those strings, so `run_ingest` yields `actor_relationship == "self"` for the user's own messages.
-- **Conclusions.** An event with `content.metadata.resolved_in_source = true` (Linear issue Done/Canceled, PR merged or closed, re-check found the item answered) concludes its conversation like the user's own reply. `raw_event_type` values the seeded rules match: `review_requested`, `state_change`, `ci_activity`.
+- **Conclusions.** An event with `content.metadata.resolved_in_source = true` (Linear issue Done/Canceled, PR merged or closed, re-check found the item answered; `raw_event_type` `issue_status_changed`, `pr_merged`, `pr_closed`, `recheck_resolved`) concludes its conversation like the user's own reply. `raw_event_type` values the seeded rules match: `review_requested`, `state_change`, `ci_activity`.
 - `content.metadata` always has `claude_code: true` and the platform's own keys (`slack_channel_id`, `slack_channel_name`, `slack_channel_type`, `slack_thread_ts`, `gmail_thread_id`, `github_repo`, `github_reason`, `linear_status`, `notion_page_id`, `meeting`).
 
 ### Config (per platform, `claude_code_sources.config`)
@@ -100,15 +101,15 @@ On connect the module inserts, **before the first sweep**, a `sources` row: `sou
 | File | Hook |
 |---|---|
 | `main.py` | include `claude_code.api.router`; `start_service()` in lifespan, `stop_service()` on shutdown |
-| `pipeline/queue.py` | `_fetch_ready_events`: return nothing while the agent budget is paused. `process_event`: after ingest and space resolution, `if actor_relationship == "self" or event.content.metadata.get("resolved_in_source"): await apply_conclusion(event, actor_relationship); mark filtered; return` |
-| `pipeline/card_status.py` | `apply_conclusion(event)`: under `entity_status_lock(event.entity_id)` close the open cards (`ready`, `requires_approval`) of the entity with `status_set_by='laya'` and a reason with the event's URL, and record the conclusion so a card created later for an earlier event of the same entity is created `done` (`_later_conclusion_reason`) |
+| `pipeline/queue.py` | `_fetch_ready_events`: return nothing while the agent budget is paused. `process_event`: after ingest and space resolution, `if actor_relationship == "self" or event.content.metadata.get("resolved_in_source"): await apply_conclusion(event, actor_relationship); mark filtered; return` (before the rules, so a conclusion is never dropped by a rule). `_batch_route_events` skips the same events. |
+| `pipeline/card_status.py` | `apply_conclusion(event)`: under `entity_status_lock(event.entity_id)` close the open cards (`ready`, `requires_approval`) of the entity whose event is at or before this one (`close_earlier_cards` with a `statuses` argument; the stager path keeps `ready` only), with `status_set_by='laya'` and a reason with the event's URL, and record the conclusion so a card created later for an earlier event of the same entity is created `done` (`_later_conclusion_reason`). The conclusion is recorded on the event's own row: `events.filter_rule` holds the reason (`You replied in this conversation…` / `Resolved in the source…`), so no new column or table is needed; `decide_card_status` applies it to late `ready` and `requires_approval` cards |
 | `egress/router.py` | `_resolve_backend`: a connection whose id starts with `claude_code:` → `ClaudeCodeBackend` |
 | `egress/health.py`, `egress/connections.py` (`test_connection`, `remove_connection`) | rows with ids starting `claude_code:` are delegated to the module |
 | UI | `IntegrationsConfig.svelte` injects a "via Claude Code" entry per platform (the SMTP injection pattern) using `/claude-code/status`; `ClaudeCodeSource.svelte` is the detail panel; the setup wizard's step 3 includes `SetupClaudeCode.svelte`; `RulesEditor.svelte` accepts a free field path |
 
 ## Sending (Claude Code egress)
 
-`connect.py` creates, for platforms that can send (`slack`, `gmail`), an `egress_connections` row with `connection_id = "claude_code:<platform>"`, `n8n_credential_id` NULL, `status` from discovery, capabilities `["reply_to_thread","send_message"]` (Slack) / `["create_draft","reply"]` (Gmail). `ClaudeCodeBackend.execute` runs one `claude -p` turn with exactly the one send tool needed for the action (Slack: the reply/send tool; Gmail: create a **draft**, never send) and the payload from the card. It runs only through `POST /egress/execute`, which the UI calls on the user's click; chat cannot trigger it.
+`connect.py` creates (through a hook `egress.py` registers in `connect.CONNECT_HOOKS`, removed through `DISCONNECT_HOOKS`), for platforms that can send (`slack`, `gmail`), an `egress_connections` row with `connection_id = "claude_code:<platform>"`, `n8n_credential_id` NULL, `status` from discovery, capabilities `["reply_to_thread","send_message"]` (Slack) / `["create_draft","reply"]` (Gmail). `ClaudeCodeBackend.execute` runs one `claude -p` turn with exactly the one send tool needed for the action (Slack: the reply/send tool; Gmail: create a **draft**, never send) and the payload from the card. It runs only through `POST /egress/execute`, which the UI calls on the user's click; chat cannot trigger it.
 
 ## Board
 

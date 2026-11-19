@@ -350,6 +350,25 @@ async def process_event(event_id: str) -> None:
             event.event_id, event.source.connection_id, event.source.platform
         )
 
+        # CONCLUSION — the user's own message, or an item resolved in its
+        # source, closes the open cards of its entity and makes no card.
+        from laya.pipeline.card_status import apply_conclusion, conclusion_reason, is_conclusion
+        if is_conclusion(event, actor_relationship):
+            closed = await apply_conclusion(event, actor_relationship)
+            await _mark_filtered(event_id)
+            await manager.broadcast(
+                {
+                    "type": "event_classified",
+                    "event_id": event.event_id,
+                    "payload": {
+                        "filtered": True,
+                        "filter_rule": conclusion_reason(event),
+                        "closed_card_ids": [c["card_id"] for c in closed],
+                    },
+                }
+            )
+            return
+
         # RULES ENGINE
         filtered, filter_rule = await run_rules(event)
         if filtered:
@@ -812,6 +831,10 @@ async def _batch_route_events(event_ids: list[str]) -> None:
             continue
         try:
             actor_relationship, _ = await run_ingest(event)
+            # Conclusions never reach the router (see process_event).
+            from laya.pipeline.card_status import is_conclusion
+            if is_conclusion(event, actor_relationship):
+                continue
             space_id = await resolve_space(
                 eid, event.source.connection_id, event.source.platform
             )
