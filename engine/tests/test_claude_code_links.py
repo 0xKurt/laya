@@ -180,3 +180,14 @@ def test_linked_documents_default_on_for_collecting_platforms():
         assert store.default_config(platform)["linked_documents"] is True
     assert "linked_documents" not in store.default_config("github")
     assert links.linked_documents in common.ENRICHERS
+
+
+def test_extract_links_app_notion_com():
+    text = "<https://app.notion.com/p/acme/Venue-Program-41db7df18a6b8174a1e6fb38a7c6dcba?source=copy_link|x>"
+    [link] = links.extract_links(text)
+    assert link["kind"] == "notion" and link["id"] == "41db7df18a6b8174a1e6fb38a7c6dcba"
+
+
+def test_github_excerpt_skips_markdown_noise():
+    text = "<!-- tpl -->\n## What\nLists 9 perps.\n\n| a | b |\n|---|---|\n```\ncode\n```\nDone."
+    assert links._excerpt(text) == "What Lists 9 perps. code Done."

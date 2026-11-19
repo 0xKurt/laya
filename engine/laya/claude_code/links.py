@@ -51,9 +51,9 @@ SECTION = "Linked documents:"
 # A link ends at whitespace or at the delimiters Slack (`<url|label>`) and
 # Markdown (`[label](url)`) put around it.
 _URL_END = r"[^\s<>|()\[\]\"']"
-_NOTION = re.compile(rf"https?://(?:www\.)?notion\.(?:so|site)/{_URL_END}*?([0-9a-f]{{32}})(?![0-9a-f])", re.I)
+_NOTION = re.compile(rf"https?://(?:www\.|app\.)?notion\.(?:so|site|com)/{_URL_END}*?([0-9a-f]{{32}})(?![0-9a-f])", re.I)
 _NOTION_DASHED = re.compile(
-    rf"https?://(?:www\.)?notion\.(?:so|site)/{_URL_END}*?"
+    rf"https?://(?:www\.|app\.)?notion\.(?:so|site|com)/{_URL_END}*?"
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", re.I,
 )
 _GOOGLE = re.compile(
@@ -132,7 +132,16 @@ async def remember(key: str, title: str, summary: str) -> dict[str, Any]:
 
 
 def _excerpt(text: str, limit: int = EXCERPT_CHARS) -> str:
-    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip() and not ln.strip().startswith("<!--")]
+    """The prose start of a Markdown description: without comments, tables,
+    code fences and heading markers."""
+    lines = []
+    for ln in (text or "").splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith(("<!--", "|", "```")):
+            continue
+        ln = ln.lstrip("#").strip()
+        if ln:
+            lines.append(ln)
     joined = " ".join(lines)
     return joined if len(joined) <= limit else joined[: limit - 1].rstrip() + "…"
 
