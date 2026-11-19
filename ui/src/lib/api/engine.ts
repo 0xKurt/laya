@@ -374,6 +374,11 @@ export const engineApi = {
 		request<{ status: string; card_id: string }>(`/cards/${cardId}/archive`, {
 			method: 'POST'
 		}),
+	/** Board: active cards + done in the last 7 days, with tags, and the lane tag ids. */
+	getBoard: (spaceId?: string) =>
+		request<{ cards: ActionCard[]; lane_tags: { todo: number; in_progress: number } }>(
+			spaceId ? `/board?space_id=${encodeURIComponent(spaceId)}` : '/board'
+		),
 	reopenCard: (cardId: string) =>
 		request<{ status: string; card_id: string }>(`/cards/${cardId}/reopen`, {
 			method: 'POST'
