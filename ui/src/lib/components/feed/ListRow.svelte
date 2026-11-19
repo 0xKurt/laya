@@ -350,7 +350,7 @@
 	</span>
 
 	<!-- Time — fixed width -->
-	<span class="col-time w-[52px] shrink-0 text-right text-laya-micro text-surface-500 whitespace-nowrap">{timeAgo(card.created_at)}</span>
+	<span class="col-time w-[52px] shrink-0 text-right text-laya-micro text-surface-500 whitespace-nowrap">{timeAgo(card.event_timestamp ?? card.created_at)}</span>
 	</div>
 </div>
 </div>

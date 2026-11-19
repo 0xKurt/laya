@@ -309,3 +309,14 @@ async def test_github_keeps_own_prs_and_mentions_but_not_others_reviews():
     with patch.object(mc, "_gh_json", side_effect=fake_gh):
         events = await mc._collect_github(datetime(2026, 11, 19, tzinfo=timezone.utc), settings)
     assert sorted(e.subject.id for e in events) == ["somnia-chain/x#1", "somnia-chain/x#3", "somnia-chain/x#5"]
+
+
+def test_linear_done_issue_is_a_closing_event():
+    base = {"created_at": "2026-11-19T10:00:00Z", "kind": "status_changed", "issue_title": "x",
+            "issue_url": "https://linear/x", "text": "moved"}
+    done, open_ = mc._linear_events([
+        {**base, "id": "1", "issue_identifier": "L1-642", "issue_status": "Done"},
+        {**base, "id": "2", "issue_identifier": "L1-643", "issue_status": "In Progress"},
+    ], set())
+    assert done.content.metadata["is_self"] and done.content.metadata["resolved_in_source"]
+    assert not open_.content.metadata["is_self"] and not open_.content.metadata["resolved_in_source"]

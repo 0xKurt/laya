@@ -37,6 +37,9 @@ log = structlog.get_logger()
 _ANSWERABLE_STATUSES = ("ready", "requires_approval")
 
 SELF_REPLY_REASON = "You replied in this conversation"
+# A collector marks an event resolved when the source itself closed the item
+# (a Linear issue moved to Done); it closes cards the same way a reply does.
+RESOLVED_IN_SOURCE_REASON = "Resolved in the source"
 
 # filter_rule broadcast for the user's own event, which is marked filtered.
 SELF_EVENT_FILTER = "Your own message"
@@ -107,7 +110,10 @@ async def close_answered_cards(db, event: LayaEvent) -> list[dict]:
          *_ANSWERABLE_STATUSES, SET_BY_USER),
     )
 
-    reason = SELF_REPLY_REASON
+    reason = (
+        RESOLVED_IN_SOURCE_REASON if event.content.metadata.get("resolved_in_source")
+        else SELF_REPLY_REASON
+    )
     if event.subject.url:
         reason = f"{reason}: {event.subject.url}"
 

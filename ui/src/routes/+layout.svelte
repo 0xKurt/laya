@@ -88,6 +88,26 @@
 	});
 	const anyModalOpen = $derived($compose.isOpen || $agentDialog.isOpen || $summaryModalOpen);
 
+	// External links open in the default browser, never inside the app's webview.
+	// A Slack permalink loaded in the webview tries to hand off to the Slack app and
+	// breaks; in the browser that hand-off works.
+	$effect(() => {
+		const onClick = async (e: MouseEvent) => {
+			const anchor = (e.target as HTMLElement | null)?.closest?.('a[href]') as HTMLAnchorElement | null;
+			if (!anchor || !/^https?:/i.test(anchor.href)) return;
+			if (new URL(anchor.href).origin === window.location.origin) return;
+			e.preventDefault();
+			try {
+				const { open } = await import('@tauri-apps/plugin-shell');
+				await open(anchor.href);
+			} catch {
+				window.open(anchor.href, '_blank', 'noopener,noreferrer');
+			}
+		};
+		document.addEventListener('click', onClick, true);
+		return () => document.removeEventListener('click', onClick, true);
+	});
+
 	let { children } = $props();
 	let isSetupRoute = $derived(page.url.pathname.startsWith('/setup'));
 	let isFeedRoute = $derived(page.url.pathname === '/feed' || page.url.pathname === '/');

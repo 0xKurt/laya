@@ -394,6 +394,7 @@ def _slack_event(
         subject_url=first.get("permalink"), body=body,
         metadata={
             "slack_channel": name,
+            "slack_channel_name": name if channel_type not in ("dm", "group_dm") else None,
             "slack_channel_id": last["channel_id"],
             "slack_channel_type": "dm" if channel_type in ("dm", "group_dm") else channel_type,
             # Same convention as the n8n workflow: a root message is its own thread.
@@ -549,6 +550,7 @@ def _linear_prompt(since: datetime) -> str:
 Return {{"items": []}} if there is nothing."""
 
 
+_LINEAR_RESOLVED = {"done", "canceled", "cancelled", "duplicate"}
 _REVIEW_REQUEST = re.compile(r"requested\b.*\breview", re.IGNORECASE)
 
 
@@ -560,6 +562,7 @@ def _linear_events(items: list[dict], my_emails: set[str]) -> list[LayaEvent]:
         if not it.get("issue_identifier") or _REVIEW_REQUEST.search(it.get("text") or ""):
             continue
         actor_email = (it.get("actor_email") or "").lower()
+        resolved = (it.get("issue_status") or "").strip().lower() in _LINEAR_RESOLVED
         events.append(_make_event(
             platform="linear", native_id=it["id"], timestamp=_parse_ts(it["created_at"]),
             raw_event_type=f"issue_{it['kind']}", actor_name=it.get("actor_name", ""),
@@ -569,7 +572,9 @@ def _linear_events(items: list[dict], my_emails: set[str]) -> list[LayaEvent]:
             subject_url=it.get("issue_url"), body=it.get("text", ""),
             metadata={
                 "linear_status": it.get("issue_status"),
-                "is_self": actor_email in my_emails,
+                # A finished issue needs nothing more from the user: close its cards.
+                "is_self": actor_email in my_emails or resolved,
+                "resolved_in_source": resolved,
             },
         ))
     return events

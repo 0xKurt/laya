@@ -549,6 +549,8 @@ export interface ActionCard {
 	card_id: string;
 	event_id: string;
 	created_at?: string;
+	/** When it happened in the source (last message of the conversation). */
+	event_timestamp?: string;
 	priority: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 	persona: 'ENGINEER' | 'COMMS' | 'OPS' | 'SALES' | 'HR' | 'FINANCE';
 	category: string;

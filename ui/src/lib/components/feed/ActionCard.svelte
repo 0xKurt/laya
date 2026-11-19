@@ -326,9 +326,11 @@
 			<span
 				bind:this={timeEl}
 				class="absolute inset-0 flex items-center text-laya-secondary text-surface-400/75 opacity-100 transition-opacity duration-[180ms] ease-out group-hover/card:opacity-0 group-hover/card:pointer-events-none"
-				onmouseenter={() => timeEl && showTooltip(timeEl, fullDate(card.created_at))}
+				onmouseenter={() => timeEl && showTooltip(timeEl, card.event_timestamp
+					? `Last activity ${fullDate(card.event_timestamp)} · card ${fullDate(card.created_at)}`
+					: fullDate(card.created_at))}
 				onmouseleave={hideTooltip}
-			>{timeAgo(card.created_at)}</span>
+			>{timeAgo(card.event_timestamp ?? card.created_at)}</span>
 			<!-- Action icons revealed on hover -->
 			<div class="absolute inset-0 flex items-center gap-1 opacity-0 pointer-events-none transition-opacity duration-[180ms] ease-out group-hover/card:opacity-100 group-hover/card:pointer-events-auto focus-within:opacity-100 focus-within:pointer-events-auto">
 			{#if card.status === 'ready'}
