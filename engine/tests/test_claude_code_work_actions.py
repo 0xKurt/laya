@@ -405,6 +405,7 @@ async def test_comment_goes_through_stdin_and_refreshes_row(db):
 ])
 async def test_github_preconditions_refuse_before_writing(db, action, params, read, match, status):
     await store.upsert_source("github")
+    read = dict(read)  # the parametrize dict is shared; don't mutate it
     viewer = read.pop("viewer", "kurt")
     write = AsyncMock()
     with patch.object(cli, "run_gh", AsyncMock(return_value=_gh_read(viewer=viewer, **read))), \
