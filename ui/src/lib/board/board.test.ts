@@ -12,7 +12,8 @@ import {
 	matchesFilters,
 	planMove,
 	presentPlatforms,
-	withoutLaneTags
+	withoutLaneTags,
+	youMinutesByLane
 } from './board';
 
 const TODO: TagAssignment = { tag_id: 11, tag_name: 'lane:todo', is_system: true, assigned_by: 'user' };
@@ -143,5 +144,20 @@ describe('applyMove / withoutLaneTags', () => {
 	});
 	it('hides lane tags from the card display', () => {
 		expect(withoutLaneTags(card({ tags: [TODO, BUG] })).tags).toEqual([BUG]);
+	});
+});
+
+describe('youMinutesByLane', () => {
+	it('sums the user part of each card estimate per lane', () => {
+		const lanes = groupByLane(
+			[
+				card({ card_id: 'a', effort: { you_minutes: 30, agent_minutes: 120 } }),
+				card({ card_id: 'b', effort: { you_minutes: 15, agent_minutes: 0 } }),
+				card({ card_id: 'c', tags: [TODO], effort: { you_minutes: 60, agent_minutes: 30 } }),
+				card({ card_id: 'd', tags: [TODO] })
+			],
+			EMPTY_FILTERS
+		);
+		expect(youMinutesByLane(lanes)).toEqual({ backlog: 45, todo: 60, in_progress: 0, done: 0 });
 	});
 });

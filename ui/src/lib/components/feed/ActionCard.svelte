@@ -15,6 +15,7 @@
 	import StatusDot from './StatusDot.svelte';
 	import PlatformIcon from '$lib/components/settings/PlatformIcon.svelte';
 	import { platformDotColor, platformKey, actorInitials, actorAvatarColor, PRIORITY_LABELS, PRIORITY_COLORS } from '$lib/utils/cardVisuals';
+	import { effortOf, formatEffort } from '$lib/sessions/session';
 
 	let { card, onselect, ondelete, onlink, selectedCardId = '', hasSelection = false, lastViewedCardId = '' }: { card: ActionCard; onselect: (card: ActionCard) => void; ondelete?: (cardId: string) => void; onlink?: (card: ActionCard) => void; selectedCardId?: string; hasSelection?: boolean; lastViewedCardId?: string } = $props();
 
@@ -697,6 +698,12 @@
 				<span class="text-[10px] text-surface-500">+{card.tags.length - 3}</span>
 			{/if}
 		</div>
+	{/if}
+
+	<!-- Effort: the user's own time and a coding session's time. -->
+	{#if effortOf(card)}
+		{@const effort = effortOf(card)!}
+		<p class="mt-1.5 text-laya-micro text-surface-500" title={effort.basis ?? ''}>{formatEffort(effort)}</p>
 	{/if}
 
 	<!-- Row 5a: Space identifier — own row in relaxed mode only. Compact inlines it into the footer. -->
