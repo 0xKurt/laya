@@ -1,6 +1,7 @@
 // Copyright 2026 Aayush Chawla
 // SPDX-License-Identifier: Apache-2.0
 
+import type { MyWork } from '$lib/work/work';
 import type {
 	TeamConfig,
 	RulesConfig,
@@ -1351,5 +1352,8 @@ export const engineApi = {
 		request<ClaudeCodeSyncResult>(`/claude-code/${platform}/sync`, {
 			method: 'POST',
 			signal: AbortSignal.timeout(900_000)
-		})
+		}),
+	// The Linear half runs a `claude -p` turn when its cache is stale.
+	getMyWork: (refresh = false) =>
+		request<MyWork>(`/claude-code/my-work?refresh=${refresh}`, { signal: AbortSignal.timeout(600_000) })
 };
