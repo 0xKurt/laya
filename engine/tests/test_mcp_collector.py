@@ -187,3 +187,52 @@ async def test_sweep_skips_when_budget_paused(db):
         status = await mc.run_sweep(["slack"])
     assert status["slack"]["ok"] is False
     collect.assert_not_called()
+
+
+def test_slack_burst_in_a_dm_is_one_event():
+    msgs = [_slack(channel_id="D1", channel_type="dm", ts=f"179500000{i}.0", text=f"m{i}",
+                   permalink=f"https://x/p{i}") for i in range(3)]
+    [e] = mc._slack_events(msgs, ME)
+    assert e.content.body == "Alice: m0\nAlice: m1\nAlice: m2"
+    assert e.subject.url == "https://x/p0"          # where the user picks up
+    assert e.timestamp == mc._parse_ts("1795000002.0")
+    assert e.content.metadata["slack_message_count"] == 3
+
+
+def test_slack_conversation_ending_with_own_reply_is_only_a_self_event():
+    msgs = [
+        _slack(channel_id="D1", channel_type="dm", ts="1795000000.0"),
+        _slack(channel_id="D1", channel_type="dm", ts="1795000001.0", user_id=ME),
+    ]
+    [e] = mc._slack_events(msgs, ME)
+    assert e.content.metadata["is_self"] is True
+
+
+def test_slack_messages_after_own_reply_stay_open():
+    msgs = [
+        _slack(channel_id="D1", channel_type="dm", ts="1795000000.0", text="q1"),
+        _slack(channel_id="D1", channel_type="dm", ts="1795000001.0", user_id=ME, text="a1"),
+        _slack(channel_id="D1", channel_type="dm", ts="1795000002.0", text="q2"),
+    ]
+    own, rest = mc._slack_events(msgs, ME)
+    assert own.content.metadata["is_self"] and own.content.body == "a1"
+    assert not rest.content.metadata["is_self"] and rest.content.body == "q2"
+    assert rest.timestamp > own.timestamp
+
+
+def test_slack_channel_title_has_one_hash():
+    [e] = mc._slack_events([_slack(channel_name="#eng")], ME)
+    assert e.subject.title == "#eng"
+
+
+def test_gmail_repeated_alerts_in_a_thread_are_one_event():
+    msgs = [
+        {"message_id": f"m{i}", "thread_id": "t1", "date": f"2026-11-19T09:0{i}:00Z",
+         "from_name": "Rootly", "from_email": "on-call@rootly.com", "subject": "Alert",
+         "body": f"fired {i}", "url": f"https://mail/{i}", "kind": "email"}
+        for i in range(3)
+    ]
+    [e] = mc._gmail_events(msgs, {"me@example.com"})
+    assert e.content.metadata["gmail_message_count"] == 3
+    assert "fired 0" in e.content.body and "fired 2" in e.content.body
+    assert e.event_id == mc._event_id("gmail", "m2")

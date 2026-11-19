@@ -282,44 +282,73 @@ null if not in a thread), user_id, user_name, the full message text and its perm
 Return {{"messages": []}} if there is nothing."""
 
 
+def _slack_conversation(m: dict) -> str:
+    """DMs are one conversation per channel; elsewhere one per thread (a root is its own)."""
+    if m.get("channel_type") in ("dm", "group_dm"):
+        return m["channel_id"]
+    return f"{m['channel_id']}:{m.get('thread_ts') or m['ts']}"
+
+
 def _slack_events(messages: list[dict], me: str) -> list[LayaEvent]:
+    """One event per conversation and sweep, not per message.
+
+    The user's latest message becomes a self event (it closes the cards it answers).
+    The messages after it, if any, become one event that carries all of them, so a
+    burst of five DMs is one card and one router/stager pass instead of five.
+    """
     # A DM is titled after the other person, also on the user's own messages in it.
     dm_partner = {
         m["channel_id"]: m.get("user_name")
         for m in messages
         if m.get("channel_type") == "dm" and m.get("user_id") != me and m.get("user_name")
     }
-    events = []
+    conversations: dict[str, list[dict]] = {}
     for m in messages:
-        channel_type = m.get("channel_type", "public")
-        is_self = m.get("user_id") == me
-        thread_ts = m.get("thread_ts") or None
-        conversation = (
-            f"{m['channel_id']}:{thread_ts}" if thread_ts
-            else m["channel_id"] if channel_type in ("dm", "group_dm")
-            else f"{m['channel_id']}:{m['ts']}"
-        )
-        name = m.get("channel_name") or m["channel_id"]
-        partner = dm_partner.get(m["channel_id"]) or (name if name != m["channel_id"] else "")
-        title = f"DM with {partner or 'direct message'}" if channel_type == "dm" else f"#{name}"
-        events.append(_make_event(
-            platform="slack", native_id=f"{m['channel_id']}:{m['ts']}",
-            timestamp=_parse_ts(m["ts"]),
-            raw_event_type="thread_reply" if thread_ts else "message_received",
-            actor_name=m.get("user_name", ""), actor_email="", actor_handle=m.get("user_id"),
-            subject_type="thread", subject_id=conversation, subject_title=title,
-            subject_url=m.get("permalink"), body=m.get("text", ""),
-            metadata={
-                "slack_channel": name,
-                "slack_channel_id": m["channel_id"],
-                "slack_channel_type": "dm" if channel_type in ("dm", "group_dm") else channel_type,
-                # Same convention as the n8n workflow: a root message is its own thread.
-                "slack_thread_ts": thread_ts or m["ts"],
-                "slack_is_mention": f"<@{me}>" in (m.get("text") or ""),
-                "is_self": is_self,
-            },
-        ))
+        conversations.setdefault(_slack_conversation(m), []).append(m)
+
+    events = []
+    for conversation, msgs in conversations.items():
+        msgs.sort(key=lambda m: float(m["ts"]))
+        own = [i for i, m in enumerate(msgs) if m.get("user_id") == me]
+        if own:
+            events.append(_slack_event(conversation, msgs[own[-1]:own[-1] + 1], me, dm_partner, is_self=True))
+        unanswered = msgs[own[-1] + 1:] if own else msgs
+        if unanswered:
+            events.append(_slack_event(conversation, unanswered, me, dm_partner, is_self=False))
     return events
+
+
+def _slack_event(
+    conversation: str, msgs: list[dict], me: str, dm_partner: dict, *, is_self: bool
+) -> LayaEvent:
+    first, last = msgs[0], msgs[-1]
+    channel_type = last.get("channel_type", "public")
+    name = (last.get("channel_name") or last["channel_id"]).lstrip("#")
+    partner = dm_partner.get(last["channel_id"]) or (name if name != last["channel_id"] else "")
+    title = f"DM with {partner or 'direct message'}" if channel_type == "dm" else f"#{name}"
+    body = last.get("text", "") if len(msgs) == 1 else "\n".join(
+        f"{m.get('user_name') or m.get('user_id')}: {m.get('text', '')}" for m in msgs
+    )
+    thread_ts = last.get("thread_ts") or None
+    return _make_event(
+        platform="slack", native_id=f"{last['channel_id']}:{last['ts']}",
+        timestamp=_parse_ts(last["ts"]),
+        raw_event_type="thread_reply" if thread_ts else "message_received",
+        actor_name=last.get("user_name", ""), actor_email="", actor_handle=last.get("user_id"),
+        subject_type="thread", subject_id=conversation, subject_title=title,
+        # The first unanswered message is where the user picks up the conversation.
+        subject_url=first.get("permalink"), body=body,
+        metadata={
+            "slack_channel": name,
+            "slack_channel_id": last["channel_id"],
+            "slack_channel_type": "dm" if channel_type in ("dm", "group_dm") else channel_type,
+            # Same convention as the n8n workflow: a root message is its own thread.
+            "slack_thread_ts": thread_ts or last["ts"],
+            "slack_is_mention": any(f"<@{me}>" in (m.get("text") or "") for m in msgs),
+            "slack_message_count": len(msgs),
+            "is_self": is_self,
+        },
+    )
 
 
 # ── Gmail ────────────────────────────────────────────────────────────────
@@ -372,27 +401,48 @@ Return {{"messages": []}} if there is nothing."""
 
 
 def _gmail_events(messages: list[dict], my_emails: set[str]) -> list[LayaEvent]:
-    events = []
+    """One event per thread and sweep, split at the user's latest mail like Slack."""
+    threads: dict[str, list[dict]] = {}
     for m in messages:
-        sender = (m.get("from_email") or "").lower()
-        is_notes = m.get("kind") == "meeting_notes"
-        events.append(_make_event(
-            platform="gmail", native_id=m["message_id"], timestamp=_parse_ts(m["date"]),
-            raw_event_type="meeting_notes" if is_notes else "new_email",
-            actor_name=m.get("from_name", ""), actor_email=sender, actor_handle=None,
-            subject_type="meeting" if is_notes else "email_thread",
-            subject_id=m["thread_id"], subject_title=m.get("subject", ""),
-            subject_url=m.get("url"), body=m.get("body", ""),
-            metadata={
-                "gmail_thread_id": m["thread_id"],
-                "gmail_labels": m.get("labels", []),
-                "gmail_from": sender,
-                "gmail_to": m.get("to", []),
-                "gmail_cc": m.get("cc", []),
-                "is_self": sender in my_emails,
-            },
-        ))
+        threads.setdefault(m["thread_id"], []).append(m)
+
+    events = []
+    for msgs in threads.values():
+        msgs.sort(key=lambda m: _parse_ts(m["date"]))
+        own = [i for i, m in enumerate(msgs) if (m.get("from_email") or "").lower() in my_emails]
+        if own:
+            events.append(_gmail_event(msgs[own[-1]:own[-1] + 1], is_self=True))
+        unanswered = msgs[own[-1] + 1:] if own else msgs
+        if unanswered:
+            events.append(_gmail_event(unanswered, is_self=False))
     return events
+
+
+def _gmail_event(msgs: list[dict], *, is_self: bool) -> LayaEvent:
+    first, last = msgs[0], msgs[-1]
+    sender = (last.get("from_email") or "").lower()
+    is_notes = last.get("kind") == "meeting_notes"
+    body = last.get("body", "") if len(msgs) == 1 else "\n\n".join(
+        f"From {m.get('from_name') or m.get('from_email')} ({m['date']}):\n{m.get('body', '')}"
+        for m in msgs
+    )
+    return _make_event(
+        platform="gmail", native_id=last["message_id"], timestamp=_parse_ts(last["date"]),
+        raw_event_type="meeting_notes" if is_notes else "new_email",
+        actor_name=last.get("from_name", ""), actor_email=sender, actor_handle=None,
+        subject_type="meeting" if is_notes else "email_thread",
+        subject_id=last["thread_id"], subject_title=last.get("subject", ""),
+        subject_url=first.get("url"), body=body,
+        metadata={
+            "gmail_thread_id": last["thread_id"],
+            "gmail_labels": last.get("labels", []),
+            "gmail_from": sender,
+            "gmail_to": last.get("to", []),
+            "gmail_cc": last.get("cc", []),
+            "gmail_message_count": len(msgs),
+            "is_self": is_self,
+        },
+    )
 
 
 # ── Linear ───────────────────────────────────────────────────────────────
