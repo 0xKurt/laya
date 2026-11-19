@@ -49,7 +49,7 @@ SOURCES = ("slack", "gmail", "linear", "github")
 
 DEFAULT_COLLECTOR_SETTINGS: dict[str, Any] = {
     "enabled": False,
-    "interval_minutes": 20,
+    "interval_minutes": 30,
     # Sweeps run only inside these hours (local time) on these weekdays (0 = Monday).
     "active_hours": {"start": "08:00", "end": "19:00", "days": [0, 1, 2, 3, 4]},
     "timezone": "Europe/Berlin",
@@ -146,6 +146,7 @@ async def _claude_collect(
 ) -> dict:
     """Run one headless Claude Code turn that may only use `ALLOWED_TOOLS[source]`."""
     from laya.agents.subprocess_helper import AgentProcess
+    from laya.llm.agent_backend import weighted_input_tokens
     from laya.llm.client import log_to_audit
 
     binary = get_agent_binary("claude_code")
@@ -180,11 +181,7 @@ async def _claude_collect(
 
     data = json.loads("\n".join(lines))
     usage = data.get("usage") or {}
-    input_tokens = (
-        (usage.get("input_tokens") or 0)
-        + (usage.get("cache_read_input_tokens") or 0)
-        + (usage.get("cache_creation_input_tokens") or 0)
-    )
+    input_tokens = weighted_input_tokens(usage)
     ok = not data.get("is_error") and data.get("structured_output") is not None
     # Logged as an agent model so the agent usage budget counts the collector too.
     await log_to_audit(

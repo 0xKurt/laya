@@ -57,9 +57,10 @@ DEFAULT_SETTINGS = {
     # {window_token_limit, window_hours, pause_at_percent}. Runtime pause state lives in DB.
     #
     # On by default so a busy inbox cannot drain a subscription unattended. The
-    # claude_code budget is 2M tokens per 5h window, pausing at 85% (1.7M). Tokens
-    # include cache reads, and one stage call measures ~20-30K, so this allows roughly
-    # 60-85 calls per window: a modest share of a Max window.
+    # claude_code budget is 4M tokens per 5h window, pausing at 85% (3.4M). Cache reads
+    # count at a tenth (agent_backend.CACHE_READ_WEIGHT). Measured on 2026-11-19: a stage
+    # call ~12K, an MCP collector sweep of one source ~25K; a working day of ~12 events
+    # an hour plus a sweep every 30 minutes stays near 2.5M per window.
     #
     # daily_call_limit is a hard cap on agent inference calls (all agents) per local
     # day, applied even when enabled is false; 0 turns it off. Reaching it refuses
@@ -69,7 +70,7 @@ DEFAULT_SETTINGS = {
         "daily_call_limit": 400,
         "agents": {
             "claude_code": {
-                "window_token_limit": 2_000_000,
+                "window_token_limit": 4_000_000,
                 "window_hours": 5,
                 "pause_at_percent": 85,
             },

@@ -132,7 +132,7 @@ def test_defaults_enable_budget_with_claude_code_cap(tmp_path, monkeypatch):
     cfg = ab.get_agent_budget_config()
     assert cfg["enabled"] is True
     assert cfg["daily_call_limit"] == 400
-    assert cfg["agents"]["claude_code"]["window_token_limit"] == 2_000_000
+    assert cfg["agents"]["claude_code"]["window_token_limit"] == 4_000_000
 
     # A file that has agent_budgets but no daily_call_limit still gets the cap.
     f.write_text(json.dumps({"agent_budgets": {"enabled": False, "agents": {}}}))
@@ -200,3 +200,11 @@ async def test_agent_llm_call_refused_when_cap_reached(db):
         with pytest.raises(ab.AgentCallLimitReached):
             await agent_backend.agent_llm_call("agent/claude_code/claude-haiku-4-5", [{"role": "user", "content": "hi"}])
     run.assert_not_called()
+
+
+def test_cache_reads_count_at_a_tenth():
+    from laya.llm.agent_backend import weighted_input_tokens
+
+    usage = {"input_tokens": 10, "cache_creation_input_tokens": 1_000, "cache_read_input_tokens": 100_000}
+    assert weighted_input_tokens(usage) == 11_010
+    assert weighted_input_tokens({}) == 0

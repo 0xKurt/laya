@@ -350,6 +350,21 @@ def _build_args(
     raise ValueError(f"Unknown agent backend: {agent_id}")
 
 
+# Cache reads cost a tenth of fresh input (API pricing, and roughly how they weigh on
+# subscription usage limits). Counting them in full made every call look ~100K tokens,
+# because each `claude -p` re-reads the whole cached system prompt and tool list.
+CACHE_READ_WEIGHT = 0.1
+
+
+def weighted_input_tokens(usage: dict) -> int:
+    """Input tokens of a Claude Code `result` usage block, cache reads weighted."""
+    return int(
+        int(usage.get("input_tokens") or 0)
+        + int(usage.get("cache_creation_input_tokens") or 0)
+        + int(usage.get("cache_read_input_tokens") or 0) * CACHE_READ_WEIGHT
+    )
+
+
 def _parse_output(agent_id: str, lines: list[str], native_schema: bool) -> dict[str, Any]:
     """Parse an agent's stdout into a normalized dict.
 
@@ -389,11 +404,7 @@ def _parse_output(agent_id: str, lines: list[str], native_schema: bool) -> dict[
             json.dumps(out["parsed"]) if out["parsed"] is not None else ""
         )
         usage = data.get("usage") or {}
-        out["input_tokens"] = (
-            int(usage.get("input_tokens", 0))
-            + int(usage.get("cache_creation_input_tokens", 0))
-            + int(usage.get("cache_read_input_tokens", 0))
-        )
+        out["input_tokens"] = weighted_input_tokens(usage)
         out["output_tokens"] = int(usage.get("output_tokens", 0))
         out["cost_usd"] = data.get("total_cost_usd")
         model_usage = data.get("modelUsage") or {}
