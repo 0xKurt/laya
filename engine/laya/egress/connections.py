@@ -140,6 +140,12 @@ async def create_connection(
 
 async def remove_connection(connection_id: str) -> None:
     """Remove a platform connection — clean up keychain, n8n, and SQLite."""
+    if connection_id.startswith("claude_code:"):
+        from laya.claude_code.egress import remove_connection as remove_claude_code
+
+        await remove_claude_code(connection_id)
+        return
+
     # Virtual executor-source connections — remove the source row
     if connection_id.startswith("exec_"):
         source_id = connection_id.removeprefix("exec_")
@@ -262,6 +268,11 @@ async def list_all_connections() -> list[Connection]:
 
 async def test_connection(connection_id: str) -> tuple[bool, str | None]:
     """Test if a connection's credentials are still valid."""
+    if connection_id.startswith("claude_code:"):
+        from laya.claude_code.egress import test_connection as test_claude_code
+
+        return await test_claude_code(connection_id)
+
     db = await get_db()
     rows = await db.execute_fetchall(
         "SELECT platform FROM egress_connections WHERE connection_id = ?",

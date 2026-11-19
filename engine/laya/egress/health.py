@@ -91,8 +91,13 @@ async def _run_health_checks() -> None:
         platform = row["platform"]
         old_status = row["status"]
 
+        # Claude Code send connections: the module knows their status.
+        if connection_id.startswith("claude_code:"):
+            from laya.claude_code.egress import connection_status
+
+            new_status, error_msg = await connection_status(platform)
         # Check OAuth token expiry
-        if platform in ("gmail", "calendar", "outlook", "outlook_calendar"):
+        elif platform in ("gmail", "calendar", "outlook", "outlook_calendar"):
             refreshed = await _check_oauth_token(connection_id, platform)
             from laya.egress.oauth import get_n8n_sync_error
 

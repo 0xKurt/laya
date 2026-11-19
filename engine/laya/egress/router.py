@@ -84,9 +84,16 @@ async def _resolve_backend(request: EgressRequest) -> EgressBackend | None:
     """Resolve the best available backend for a request.
 
     Priority:
+    0. Claude Code backend for a ``claude_code:`` connection
     1. SMTP backend for platform='smtp' (generic email — future)
     2. n8n backend for all other platforms (primary)
     """
+    # Claude Code connection (or an event it collected) → its own backend.
+    from laya.claude_code.egress import backend_for
+
+    if (claude_code := await backend_for(request)) is not None:
+        return claude_code
+
     # SMTP backend for generic email
     if request.platform == "smtp":
         return _smtp_backend

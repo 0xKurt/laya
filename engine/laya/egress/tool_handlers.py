@@ -138,7 +138,10 @@ async def _resolve_connection_id(platform: str, space_id: str | None) -> str | N
     """Pick a connected connection for a chat-driven egress action.
 
     Prefers one scoped to this space, else any connected connection for the
-    platform (review §2 egress — P4-22)."""
+    platform (review §2 egress — P4-22). A Claude Code connection
+    (``claude_code:<platform>``) is picked only when no other connection of
+    the platform qualifies, so a user who also has an n8n connection keeps
+    sending through it."""
     from laya.db.sqlite import get_db
     try:
         db = await get_db()
@@ -149,6 +152,7 @@ async def _resolve_connection_id(platform: str, space_id: str | None) -> str | N
         )
     except Exception:
         return None
+    rows = [r for r in rows if not r["connection_id"].startswith("claude_code:")] or rows
     if not rows:
         return None
     if space_id:
