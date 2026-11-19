@@ -503,13 +503,57 @@ next step assigned to {my_name} or to everyone, one per line, with its due date 
 Return {{"messages": []}} if there is nothing."""
 
 
+def _meeting_sections(body: str) -> tuple[str, dict[str, list[str]]]:
+    """Split the collector's meeting-notes body into its title line and its sections."""
+    lines = [l.rstrip() for l in body.splitlines() if l.strip()]
+    title = lines[0] if lines else ""
+    sections: dict[str, list[str]] = {}
+    current = None
+    for line in lines[1:]:
+        if line.endswith(":") and not line.startswith("-"):
+            current = line[:-1].strip().lower()
+            sections[current] = []
+        elif current and line.lstrip().startswith("-"):
+            sections[current].append(line.lstrip()[1:].strip())
+    return title, sections
+
+
+def _meeting_events(m: dict) -> list[LayaEvent]:
+    """One event per action item of the user's in a meeting's notes; none without items.
+
+    A whole meeting on one card hid its tasks in a paragraph and could only be
+    closed as a whole. Decisions and what the user waits on ride along as context.
+    """
+    title, sections = _meeting_sections(m.get("body", ""))
+    items = next((v for k, v in sections.items() if k.startswith("action items")), [])
+    context = ""
+    for name in ("decisions", "waiting on others"):
+        if sections.get(name):
+            context += f"\n\n{name.capitalize()} in that meeting:\n" + "\n".join(f"- {d}" for d in sections[name])
+    events = []
+    for i, item in enumerate(items):
+        task = item.split(":", 1)[0] if ":" in item[:60] else item
+        events.append(_make_event(
+            platform="gmail", native_id=f"{m['message_id']}:item:{i}", timestamp=_parse_ts(m["date"]),
+            raw_event_type="meeting_action_item", actor_name="Meeting notes",
+            actor_email=(m.get("from_email") or "").lower(), actor_handle=None,
+            subject_type="meeting", subject_id=f"{m['thread_id']}:item:{i}",
+            subject_title=f"{task} ({title})", subject_url=m.get("url"),
+            body=f"Action item for me from the meeting {title}:\n{item}{context}",
+            metadata={"gmail_thread_id": m["thread_id"], "meeting": title, "is_self": False},
+        ))
+    return events
+
+
 def _gmail_events(messages: list[dict], my_emails: set[str]) -> list[LayaEvent]:
     """One event per thread and sweep, split at the user's latest mail like Slack."""
+    events = [e for m in messages if m.get("kind") == "meeting_notes" for e in _meeting_events(m)]
     threads: dict[str, list[dict]] = {}
     for m in messages:
+        if m.get("kind") == "meeting_notes":
+            continue
         threads.setdefault(m["thread_id"], []).append(m)
 
-    events = []
     for msgs in threads.values():
         msgs.sort(key=lambda m: _parse_ts(m["date"]))
         own = [i for i, m in enumerate(msgs) if (m.get("from_email") or "").lower() in my_emails]

@@ -68,21 +68,47 @@ def test_event_ids_are_stable_and_platform_scoped():
     assert a != mc._event_id("gmail", "C1:1795000000.000100")
 
 
-def test_gmail_meeting_notes_and_self():
-    events = mc._gmail_events(
-        [
-            {"message_id": "m1", "thread_id": "t1", "date": "2026-11-18T15:49:57Z",
-             "from_email": "gemini-notes@google.com", "subject": "Notes: Sync",
-             "body": "- Kurt: ship the fix", "url": "https://mail/1", "kind": "meeting_notes"},
-            {"message_id": "m2", "thread_id": "t2", "date": "2026-11-18T16:00:00Z",
-             "from_email": "Me@Example.com", "subject": "Re: plan",
-             "body": "done", "url": "https://mail/2", "kind": "email"},
-        ],
+_NOTES = {"message_id": "m1", "thread_id": "t1", "date": "2026-11-18T15:49:57Z",
+          "from_email": "gemini-notes@google.com", "subject": "Notes: Sync",
+          "url": "https://docs/1", "kind": "meeting_notes"}
+
+
+def test_meeting_notes_become_one_card_per_action_item():
+    body = (
+        "SomniaLend Migration Sync – Nov 18, 2026\n"
+        "Action items for Kurt Merbeth:\n"
+        "- Remove Dropdown: Remove the dropdown and keep the save button.\n"
+        "- Update Domain: Point the domain at the new deployment.\n"
+        "Decisions:\n"
+        "- Docs move to the platform site.\n"
+        "Waiting on others:\n"
+        "- Woodsoft: Wallet Connect integration.\n"
+    )
+    events = mc._gmail_events([{**_NOTES, "body": body}], {"me@example.com"})
+    assert [e.subject.title for e in events] == [
+        "Remove Dropdown (SomniaLend Migration Sync – Nov 18, 2026)",
+        "Update Domain (SomniaLend Migration Sync – Nov 18, 2026)",
+    ]
+    first = events[0]
+    assert first.source.raw_event_type == "meeting_action_item"
+    assert first.subject.url == "https://docs/1"
+    assert "Docs move to the platform site." in first.content.body
+    assert "Woodsoft: Wallet Connect integration." in first.content.body
+    assert len({e.event_id for e in events}) == 2
+
+
+def test_meeting_without_items_for_me_makes_no_card():
+    body = "Network Weekly – Nov 18, 2026\nDecisions:\n- Move to Tokyo mainnet.\n"
+    assert mc._gmail_events([{**_NOTES, "body": body}], set()) == []
+
+
+def test_gmail_self_mail():
+    [mine] = mc._gmail_events(
+        [{"message_id": "m2", "thread_id": "t2", "date": "2026-11-18T16:00:00Z",
+          "from_email": "Me@Example.com", "subject": "Re: plan",
+          "body": "done", "url": "https://mail/2", "kind": "email"}],
         {"me@example.com"},
     )
-    notes, mine = events
-    assert notes.subject.type == "meeting"
-    assert notes.source.raw_event_type == "meeting_notes"
     assert mine.content.metadata["is_self"] is True
     assert mine.content.metadata["gmail_thread_id"] == "t2"
 
