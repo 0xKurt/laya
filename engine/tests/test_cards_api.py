@@ -130,6 +130,24 @@ class TestCardsAPI:
         assert resp.status_code == 200
         assert resp.json()["status"] == "done"
 
+    async def test_mark_card_done_from_requires_approval(self, db):
+        """POST /cards/:card_id/done works for a card waiting on draft approval,
+        and reopen restores that status."""
+        await insert_test_card(db, status="requires_approval")
+
+        from laya.main import app
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/cards/card_test/done", json={})
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "done"
+            assert (await client.post("/cards/card_test/reopen")).status_code == 200
+
+        rows = await db.execute_fetchall(
+            "SELECT status FROM action_cards WHERE card_id = ?", ("card_test",)
+        )
+        assert rows[0]["status"] == "requires_approval"
+
     async def test_mark_card_done_409_on_terminal(self, db):
         """POST /cards/:card_id/done returns 409 if card is already done."""
         await insert_test_card(db, status="done")
