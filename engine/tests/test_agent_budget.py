@@ -34,7 +34,7 @@ async def test_record_and_read_rate_limit(db):
     info = {"status": "allowed", "resetsAt": 1782541200, "rateLimitType": "five_hour"}
     await ab.record_rate_limit("claude_code", info)
     rl = await ab.get_rate_limit_state("claude_code")
-    assert rl == {"status": "allowed", "resets_at": 1782541200, "rate_limit_type": "five_hour"}
+    assert rl == {"status": "allowed", "resets_at": 1782541200, "rate_limit_type": "five_hour", "utilization": None}
     # Upsert overwrites.
     await ab.record_rate_limit("claude_code", {**info, "status": "rejected"})
     assert (await ab.get_rate_limit_state("claude_code"))["status"] == "rejected"
@@ -208,3 +208,18 @@ def test_cache_reads_count_at_a_tenth():
     usage = {"input_tokens": 10, "cache_creation_input_tokens": 1_000, "cache_read_input_tokens": 100_000}
     assert weighted_input_tokens(usage) == 11_010
     assert weighted_input_tokens({}) == 0
+
+
+def test_native_warning_pauses_only_above_utilization_threshold():
+    from laya.pipeline.agent_budget import DEFAULT_PAUSE_AT_UTILIZATION as T, native_limit_reached
+
+    week = {"status": "allowed_warning", "rate_limit_type": "seven_day"}
+    assert not native_limit_reached({**week, "utilization": 0.61}, T)
+    assert native_limit_reached({**week, "utilization": 0.8}, T)
+    assert not native_limit_reached({"status": "allowed_warning", "rate_limit_type": "five_hour", "utilization": 0.85}, T)
+    assert native_limit_reached({"status": "allowed_warning", "rate_limit_type": "five_hour", "utilization": 0.95}, T)
+    # Missing data or a hard rejection still pauses.
+    assert native_limit_reached({**week, "utilization": None}, T)
+    assert native_limit_reached({"status": "rejected", "rate_limit_type": "seven_day", "utilization": 0.5}, T)
+    assert not native_limit_reached({"status": "allowed"}, T)
+    assert not native_limit_reached(None, T)

@@ -39,6 +39,10 @@ DEFAULT_DAILY_CALL_LIMIT = 400
 
 # Native rate-limit statuses we consider "still OK to use".
 _OK_STATUSES = {"allowed", None, ""}
+# "allowed_warning" arrives early (e.g. at 61% of the weekly window, five days before
+# its reset); pausing on it would stop Laya for days while the user still has room.
+# A warning pauses only once the window's utilization crosses its threshold here.
+DEFAULT_PAUSE_AT_UTILIZATION = {"five_hour": 0.9, "seven_day": 0.8}
 
 
 # ── config ───────────────────────────────────────────────────────────────
@@ -51,6 +55,9 @@ def get_agent_budget_config() -> dict:
         "enabled": bool(s.get("enabled", True)),
         "agents": s.get("agents", {}) or {},
         "daily_call_limit": int(s.get("daily_call_limit", DEFAULT_DAILY_CALL_LIMIT) or 0),
+        "pause_at_utilization": {
+            **DEFAULT_PAUSE_AT_UTILIZATION, **(s.get("pause_at_utilization") or {})
+        },
     }
 
 
@@ -130,17 +137,35 @@ async def record_rate_limit(agent_id: str, info: dict) -> None:
 async def get_rate_limit_state(agent_id: str) -> dict | None:
     db = await get_db()
     rows = await db.execute_fetchall(
-        "SELECT status, resets_at, rate_limit_type FROM agent_rate_limit_state WHERE agent_id = ?",
+        "SELECT status, resets_at, rate_limit_type, raw_json FROM agent_rate_limit_state WHERE agent_id = ?",
         (agent_id,),
     )
     if not rows:
         return None
     r = rows[0]
+    try:
+        raw = json.loads(r["raw_json"] or "{}")
+    except (TypeError, ValueError):
+        raw = {}
     return {
         "status": r["status"],
         "resets_at": r["resets_at"],
         "rate_limit_type": r["rate_limit_type"],
+        "utilization": raw.get("utilization"),
     }
+
+
+def native_limit_reached(rl: dict | None, thresholds: dict) -> bool:
+    """Whether the CLI's own rate-limit signal should pause ingestion."""
+    if not rl or rl.get("status") in _OK_STATUSES:
+        return False
+    if rl.get("status") != "allowed_warning":
+        return True  # rejected or unknown: the agent can't run anyway
+    threshold = thresholds.get(rl.get("rate_limit_type") or "")
+    utilization = rl.get("utilization")
+    if threshold is None or utilization is None:
+        return True
+    return float(utilization) >= float(threshold)
 
 
 # ── usage accounting ─────────────────────────────────────────────────────
@@ -278,7 +303,7 @@ async def evaluate_agent_budget() -> None:
         rl = await get_rate_limit_state(agent_id)
 
         # Native signal first — when the CLI itself reports we're no longer allowed.
-        if rl and rl.get("status") not in _OK_STATUSES:
+        if native_limit_reached(rl, cfg.get("pause_at_utilization", DEFAULT_PAUSE_AT_UTILIZATION)):
             recovery_times.append(_ts_from_unix(rl.get("resets_at")) or _ts_in_hours(window_hours))
             reasons.append(f"{agent_id}: rate limit {rl['status']}")
             continue
