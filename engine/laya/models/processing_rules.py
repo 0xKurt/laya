@@ -8,7 +8,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # --- Extended operators (superset of filter rule operators) ---
@@ -86,6 +86,11 @@ class RunEntityAgentAction(BaseModel):
 
 
 class ExecuteEgressAction(BaseModel):
+    """An outbound send in a stored rule. It parses so such rules still load, but
+    create/update requests reject it (``reject_auto_send_actions``) and the engine
+    skips it when the rule fires: every outbound message needs the user's explicit
+    approval."""
+
     type: Literal["execute_egress"] = "execute_egress"
     platform: str
     action_type: str
@@ -117,6 +122,20 @@ ProcessingRuleAction = Annotated[
     ],
     Field(discriminator="type"),
 ]
+
+
+def reject_auto_send_actions(actions: list | None) -> list | None:
+    """Refuse actions that would send a message without the user's approval."""
+    if actions and any(
+        isinstance(a, ExecuteEgressAction)
+        or (isinstance(a, dict) and a.get("type") == "execute_egress")
+        for a in actions
+    ):
+        raise ValueError(
+            "execute_egress is not allowed: rules cannot send messages; "
+            "outbound actions need the user's approval on a card"
+        )
+    return actions
 
 
 # --- Rule model ---
@@ -152,6 +171,11 @@ class CreateProcessingRuleRequest(BaseModel):
     cooldown_secs: int = 0
     max_daily: int = 0
 
+    @field_validator("actions")
+    @classmethod
+    def no_auto_send(cls, actions):
+        return reject_auto_send_actions(actions)
+
 
 class UpdateProcessingRuleRequest(BaseModel):
     name: str | None = None
@@ -163,3 +187,8 @@ class UpdateProcessingRuleRequest(BaseModel):
     rate_limit: int | None = None
     cooldown_secs: int | None = None
     max_daily: int | None = None
+
+    @field_validator("actions")
+    @classmethod
+    def no_auto_send(cls, actions):
+        return reject_auto_send_actions(actions)

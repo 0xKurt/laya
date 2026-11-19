@@ -336,7 +336,7 @@ async def _execute_action(
         elif isinstance(action, RunEntityAgentAction):
             return await _exec_run_agent(action, entity_id, context)
         elif isinstance(action, ExecuteEgressAction):
-            return await _exec_egress(action, card_id, space_id, context)
+            return await _exec_egress(action, card_id)
         elif isinstance(action, SendNotificationAction):
             return await _exec_notification(action, card_id, context)
         elif isinstance(action, AddTagAction):
@@ -521,29 +521,16 @@ async def _exec_run_agent(
 async def _exec_egress(
     action: ExecuteEgressAction,
     card_id: str,
-    space_id: str | None,
-    context: dict[str, Any],
 ) -> dict[str, Any]:
-    resolved_payload = {}
-    for k, v in action.payload_template.items():
-        resolved_payload[k] = _resolve_template(v, context) if isinstance(v, str) else v
-
-    try:
-        from laya.egress import route_and_execute
-        from laya.egress.models import EgressRequest
-
-        req = EgressRequest(
-            card_id=card_id,
-            platform=action.platform,
-            action_type=action.action_type,
-            payload=resolved_payload,
-            connection_id=action.connection_id,
-            space_id=space_id,
-        )
-        result = await route_and_execute(req)
-        return {"success": result.success, "result": result.result_data if result.success else None, "error": result.error if not result.success else None}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    """Skip a stored send action. Rules never send: every outbound message
+    needs the user's explicit approval on its card."""
+    log.warning(
+        "processing_rule_egress_skipped",
+        card_id=card_id,
+        platform=action.platform,
+        action_type=action.action_type,
+    )
+    return {"success": True, "skipped": True, "reason": "rules cannot send messages; approve the card to send"}
 
 
 async def _exec_notification(

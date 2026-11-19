@@ -152,7 +152,6 @@
 		{ value: 'bookmark', label: 'Bookmark' },
 		{ value: 'add_tag', label: 'Add Tag' },
 		{ value: 'run_entity_agent', label: 'Run Agent' },
-		{ value: 'execute_egress', label: 'Execute Egress Action' },
 		{ value: 'send_notification', label: 'Send Notification' },
 	];
 
