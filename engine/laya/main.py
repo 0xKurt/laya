@@ -31,6 +31,7 @@ from laya.api.connections_api import router as connections_router
 from laya.api.context_rules_api import router as context_rules_router
 from laya.api.egress_api import router as egress_router
 from laya.api.chat_api import router as chat_router
+from laya.claude_code.api import router as claude_code_router
 from laya.api.dashboard_api import router as dashboard_router
 from laya.api.diagnostics_api import router as diagnostics_router
 from laya.api.documents_api import router as documents_router
@@ -401,6 +402,10 @@ async def lifespan(app: FastAPI):
     from laya.egress.health import start_health_monitor, stop_health_monitor
     await start_health_monitor()
 
+    # Start the Claude Code connector's sweeps (no-op until a platform is connected)
+    from laya.claude_code.service import start_service as start_claude_code, stop_service as stop_claude_code
+    await start_claude_code()
+
     # Sweep stale agent-upload staging files once at startup, then run an
     # hourly periodic sweep. A startup-only sweep is insufficient on macOS,
     # where the app can stay open for days.
@@ -422,6 +427,7 @@ async def lifespan(app: FastAPI):
     log.info("engine_stopping")
     await stop_staging_sweeper()
     await stop_health_monitor()
+    await stop_claude_code()
     stop_omni_processor()
     await stop_consumer()
     stop_scheduler()
@@ -530,6 +536,7 @@ app.include_router(connections_router, dependencies=auth_deps)
 app.include_router(context_rules_router, dependencies=auth_deps)
 app.include_router(egress_router, dependencies=auth_deps)
 app.include_router(chat_router, dependencies=auth_deps)
+app.include_router(claude_code_router, dependencies=auth_deps)
 app.include_router(dashboard_router, dependencies=auth_deps)
 app.include_router(diagnostics_router, dependencies=auth_deps)
 app.include_router(documents_router, dependencies=auth_deps)
