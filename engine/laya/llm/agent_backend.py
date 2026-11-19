@@ -271,6 +271,12 @@ def _build_args(
         # inference, nothing to request approval for. NO --mcp-config (keeps the per-call
         # system-prompt tax down and avoids loading Laya's tools).
         #
+        # --safe-mode skips the user's CLAUDE.md, skills, plugins, hooks and MCP servers
+        # while keeping the subscription login; --strict-mcp-config (with no --mcp-config)
+        # and an empty --setting-sources keep MCP servers and user/project settings out
+        # as well. Without them every call carries the user's whole Claude Code setup in
+        # its prompt and runs their hooks.
+        #
         # permission-mode=default (NOT plan): in plan mode Claude wraps the answer in
         # "I'm in plan mode … once plan mode is exited I can help you …" preamble — a
         # plan-and-wait framing we must avoid. In headless -p with tools denied, default
@@ -280,7 +286,8 @@ def _build_args(
         # rate_limit_event (window reset + status) for agent usage-budgeting; the final
         # `result` event still carries structured_output + usage + total_cost_usd.
         args = [binary, "-p", user_prompt, "--output-format", "stream-json", "--verbose",
-                "--permission-mode", "default", "--disallowedTools", _CLAUDE_BUILTIN_TOOLS]
+                "--permission-mode", "default", "--disallowedTools", _CLAUDE_BUILTIN_TOOLS,
+                "--safe-mode", "--strict-mcp-config", "--setting-sources", ""]
         if system_text:
             args += ["--append-system-prompt", system_text]
         if model_string:
@@ -327,6 +334,21 @@ def _build_args(
     raise ValueError(f"Unknown agent backend: {agent_id}")
 
 
+# Cache reads cost a tenth of fresh input (API pricing, and roughly their weight on
+# subscription usage limits). Every `claude -p` call re-reads the cached system prompt,
+# so counting cache reads in full would make each call look several times its cost.
+CACHE_READ_WEIGHT = 0.1
+
+
+def weighted_input_tokens(usage: dict) -> int:
+    """Input tokens of a Claude Code `result` usage block, cache reads weighted."""
+    return int(
+        int(usage.get("input_tokens") or 0)
+        + int(usage.get("cache_creation_input_tokens") or 0)
+        + int(usage.get("cache_read_input_tokens") or 0) * CACHE_READ_WEIGHT
+    )
+
+
 def _parse_output(agent_id: str, lines: list[str], native_schema: bool) -> dict[str, Any]:
     """Parse an agent's stdout into a normalized dict.
 
@@ -366,11 +388,7 @@ def _parse_output(agent_id: str, lines: list[str], native_schema: bool) -> dict[
             json.dumps(out["parsed"]) if out["parsed"] is not None else ""
         )
         usage = data.get("usage") or {}
-        out["input_tokens"] = (
-            int(usage.get("input_tokens", 0))
-            + int(usage.get("cache_creation_input_tokens", 0))
-            + int(usage.get("cache_read_input_tokens", 0))
-        )
+        out["input_tokens"] = weighted_input_tokens(usage)
         out["output_tokens"] = int(usage.get("output_tokens", 0))
         out["cost_usd"] = data.get("total_cost_usd")
         model_usage = data.get("modelUsage") or {}

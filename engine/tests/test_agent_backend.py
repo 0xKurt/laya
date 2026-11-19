@@ -130,6 +130,10 @@ def test_claude_args_are_noninteractive_and_toolless():
     # Must NOT use plan mode (it pollutes output with plan-and-wait framing).
     assert args[args.index("--permission-mode") + 1] == "default"
     assert "--mcp-config" not in args                     # no Laya tools / lower tax
+    # Isolated from the user's Claude Code setup: no CLAUDE.md, plugins, hooks, MCP.
+    assert "--safe-mode" in args
+    assert "--strict-mcp-config" in args
+    assert args[args.index("--setting-sources") + 1] == ""
     assert "--json-schema" in args                        # native structured output
     assert args[args.index("--model") + 1] == "m"
 
@@ -155,3 +159,25 @@ def test_codex_args_exec_readonly_never_approve():
 def test_unknown_agent_rejected():
     with pytest.raises(ValueError):
         _args("bogus_cli")
+
+
+# ── usage ────────────────────────────────────────────────────────────────
+
+
+def test_cache_reads_count_at_a_tenth():
+    usage = {"input_tokens": 10, "cache_creation_input_tokens": 1_000, "cache_read_input_tokens": 100_000}
+    assert ab.weighted_input_tokens(usage) == 11_010
+    assert ab.weighted_input_tokens({}) == 0
+
+
+def test_claude_result_input_tokens_are_weighted():
+    import json
+
+    result = {
+        "type": "result", "result": "ok", "is_error": False,
+        "usage": {"input_tokens": 20, "cache_creation_input_tokens": 3_720,
+                  "cache_read_input_tokens": 18_257, "output_tokens": 5},
+    }
+    out = ab._parse_output("claude_code", [json.dumps(result)], native_schema=False)
+    assert out["input_tokens"] == 20 + 3_720 + 1_825
+    assert out["output_tokens"] == 5
