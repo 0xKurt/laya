@@ -36,6 +36,7 @@ from laya.mcp.http_server import (
     sse_transport,
     streamable_sessions,
 )
+from laya.mcp import turn_tokens
 from laya.security.keychain import (
     delete_mcp_token,
     get_mcp_token,
@@ -174,7 +175,10 @@ async def _streamable_http_app(scope: Scope, receive: Receive, send: Send) -> No
             auth_header = val.decode("latin-1")
             break
 
-    if not _check_bearer(auth_header):
+    # A turn token (laya.mcp.turn_tokens) opens only sessions limited to its own
+    # tool allowlist; any other caller needs the user's bearer token.
+    turn_allowlist = turn_tokens.lookup_header(auth_header)
+    if turn_allowlist is None and not _check_bearer(auth_header):
         await JSONResponse({"detail": "unauthorized"}, status_code=401)(scope, receive, send)
         return
 
@@ -188,6 +192,9 @@ async def _streamable_http_app(scope: Scope, receive: Receive, send: Send) -> No
                 {"detail": "session not found"}, status_code=404
             )(scope, receive, send)
             return
+        if turn_allowlist is not None and session.tool_allowlist is None:
+            await JSONResponse({"detail": "forbidden"}, status_code=403)(scope, receive, send)
+            return
         await session.transport.handle_request(scope, receive, send)
         return
 
@@ -199,7 +206,9 @@ async def _streamable_http_app(scope: Scope, receive: Receive, send: Send) -> No
         return
 
     space_id = request.query_params.get("space_id") or None
-    session = await streamable_sessions.create_session(space_id=space_id)
+    session = await streamable_sessions.create_session(
+        space_id=space_id, tool_allowlist=turn_allowlist,
+    )
     await session.transport.handle_request(scope, receive, send)
 
 

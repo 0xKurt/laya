@@ -57,6 +57,12 @@ current_space_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "laya_mcp_current_space_id", default=None
 )
 
+# Per-session tool allowlist. None means "the user's Settings → MCP scopes"; a set
+# (from a turn token, see laya.mcp.turn_tokens) replaces those scopes for the session.
+current_tool_allowlist: contextvars.ContextVar[frozenset[str] | None] = contextvars.ContextVar(
+    "laya_mcp_current_tool_allowlist", default=None
+)
+
 # ---------------------------------------------------------------------------
 # Streamable HTTP session manager
 # ---------------------------------------------------------------------------
@@ -70,17 +76,19 @@ _SECURITY = TransportSecuritySettings(enable_dns_rebinding_protection=False)
 class _Session:
     """One Streamable HTTP session: a transport + a background server.run() task."""
 
-    __slots__ = ("transport", "task", "space_id", "last_activity")
+    __slots__ = ("transport", "task", "space_id", "tool_allowlist", "last_activity")
 
     def __init__(
         self,
         transport: StreamableHTTPServerTransport,
         task: asyncio.Task,  # type: ignore[type-arg]
         space_id: str | None,
+        tool_allowlist: frozenset[str] | None = None,
     ) -> None:
         self.transport = transport
         self.task = task
         self.space_id = space_id
+        self.tool_allowlist = tool_allowlist
         self.last_activity = time.monotonic()
 
 
@@ -116,7 +124,9 @@ class StreamableSessionManager:
                 session.task.cancel()
                 self._sessions.pop(sid, None)
 
-    async def create_session(self, space_id: str | None = None) -> _Session:
+    async def create_session(
+        self, space_id: str | None = None, tool_allowlist: frozenset[str] | None = None,
+    ) -> _Session:
         self._reap_idle()
         session_id = uuid.uuid4().hex
         transport = StreamableHTTPServerTransport(
@@ -129,6 +139,7 @@ class StreamableSessionManager:
 
         async def _run() -> None:
             token = current_space_id.set(space_id)
+            allow_token = current_tool_allowlist.set(tool_allowlist)
             try:
                 async with transport.connect() as (read_stream, write_stream):
                     ready.set()
@@ -138,13 +149,16 @@ class StreamableSessionManager:
                         server.create_initialization_options(),
                     )
             finally:
+                current_tool_allowlist.reset(allow_token)
                 current_space_id.reset(token)
                 self._sessions.pop(session_id, None)
 
         task = asyncio.create_task(_run())
         await ready.wait()
 
-        session = _Session(transport=transport, task=task, space_id=space_id)
+        session = _Session(
+            transport=transport, task=task, space_id=space_id, tool_allowlist=tool_allowlist,
+        )
         self._sessions[session_id] = session
         log.info("mcp_streamable_session_created", session_id=session_id, space_id=space_id)
         return session
@@ -170,6 +184,15 @@ def _current_scopes() -> dict[str, bool]:
     return load_settings().get("mcp", {}).get("tool_scopes", {}) or {}
 
 
+def _allowed_tool_names() -> set[str]:
+    """Tools callable in the current session: its own allowlist when it has one,
+    otherwise the user's Settings → MCP scopes."""
+    allowlist = current_tool_allowlist.get()
+    if allowlist is not None:
+        return set(allowlist)
+    return enabled_tool_names(_current_scopes())
+
+
 def build_mcp_server() -> Server:
     """Construct the MCP server with scope-aware handlers.
 
@@ -180,7 +203,7 @@ def build_mcp_server() -> Server:
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
-        allowed = enabled_tool_names(_current_scopes())
+        allowed = _allowed_tool_names()
         return [
             Tool(
                 name=fn["function"]["name"],
@@ -195,7 +218,7 @@ def build_mcp_server() -> Server:
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict | None = None) -> list[TextContent]:
-        allowed = enabled_tool_names(_current_scopes())
+        allowed = _allowed_tool_names()
         if name not in allowed:
             # The user's Settings → MCP toggles don't enable the scope this
             # tool belongs to. Surface a clear JSON-RPC error to the client.
