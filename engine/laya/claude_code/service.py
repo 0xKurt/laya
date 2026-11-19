@@ -183,6 +183,9 @@ async def _loop() -> None:
 async def start_service() -> None:
     global _task
     await store.ensure_tables()
+    from laya.claude_code import terminal
+
+    await terminal.startup()
     if await store.list_sources():
         # Also on start, so an install connected before this default existed
         # (or set up without an API key) gets subscription models without edits.
@@ -196,6 +199,9 @@ async def start_service() -> None:
 
 async def stop_service() -> None:
     global _task
+    from laya.claude_code import terminal
+
+    await terminal.shutdown_all()
     if _task is not None:
         _task.cancel()
         try:

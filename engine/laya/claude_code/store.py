@@ -10,7 +10,8 @@ upstream migration sequence stays untouched):
 - `claude_code_sources`: one row per connected platform (config, discovered
   tools, the user's identity, the sweep cursor and the last run's outcome);
 - `claude_code_state`: free key/value memory per platform (e.g. the Slack
-  threads the user wrote in).
+  threads the user wrote in);
+- `claude_code_terminal_sessions`: the Claude terminal tabs (`terminal.py`).
 
 Also holds the per-platform config defaults (docs/claude-code-connector.md,
 "Config").
@@ -49,6 +50,17 @@ _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS claude_code_state (
         platform TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
         PRIMARY KEY (platform, key)
+    )""",
+    # Terminal sessions (terminal.py): the open ones and the closed ones that
+    # can be resumed with `claude --resume <claude_session_id>`.
+    """CREATE TABLE IF NOT EXISTS claude_code_terminal_sessions (
+        id                TEXT PRIMARY KEY,
+        name              TEXT NOT NULL,
+        cwd               TEXT NOT NULL,
+        claude_session_id TEXT NOT NULL,
+        created_at        TEXT NOT NULL,
+        last_active_at    TEXT,
+        closed_at         TEXT
     )""",
 )
 

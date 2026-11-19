@@ -5,15 +5,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, HTTPException, WebSocket, WebSocketDisconnect
 
 from laya.claude_code import connect as connect_mod
 from laya.claude_code import egress as _egress  # noqa: F401  registers the send connection hooks
 from laya.claude_code import discover as discover_mod
-from laya.claude_code import my_work, service, store, work_actions
+from laya.claude_code import my_work, service, store, terminal, work_actions
 from laya.claude_code.discover import SEND_ROLES, Discovery, PlatformDiscovery
+from laya.security.engine_auth import WS_SUBPROTOCOL, offered_subprotocols
 
 router = APIRouter(prefix="/claude-code", tags=["claude-code"])
 
@@ -161,3 +164,172 @@ async def sync_platform(platform: str) -> dict[str, Any]:
     if await store.get_source(platform) is None:
         raise HTTPException(status_code=404, detail=f"{store.LABELS[platform]} is not connected")
     return await service.sweep(platform)
+
+
+# ── Claude terminal (terminal.py) ────────────────────────────────────────
+# These paths have two or more segments after `/terminal`, so they never
+# collide with the `/{platform}` and `/{platform}/<action>` routes above.
+
+
+def _terminal_call(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except terminal.TerminalError as e:
+        raise HTTPException(status_code=e.status, detail=str(e)) from e
+
+
+async def _terminal_acall(fn, *args, **kwargs):
+    try:
+        return await fn(*args, **kwargs)
+    except terminal.TerminalError as e:
+        raise HTTPException(status_code=e.status, detail=str(e)) from e
+
+
+def _int_field(body: dict[str, Any], key: str) -> int | None:
+    value = body.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HTTPException(status_code=422, detail=f"'{key}' must be an integer")
+    return value
+
+
+@router.get("/terminal/sessions")
+async def list_terminal_sessions() -> dict[str, Any]:
+    """Open terminal sessions, the closed ones that can be resumed, and the default cwd."""
+    return {
+        "sessions": terminal.list_open(),
+        "closed": await terminal.list_closed(),
+        "default_cwd": terminal.default_cwd(),
+    }
+
+
+@router.post("/terminal/sessions")
+async def create_terminal_session(body: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+    """Start `claude` in a new terminal session (`{cwd?, name?, resume?, cols?, rows?}`).
+
+    `resume` is the id of a closed session; its Claude conversation continues
+    with `claude --resume`.
+    """
+    body = body or {}
+    for key in ("cwd", "name", "resume"):
+        if body.get(key) is not None and not isinstance(body[key], str):
+            raise HTTPException(status_code=422, detail=f"'{key}' must be a string")
+    return await _terminal_acall(
+        terminal.create,
+        cwd=body.get("cwd"),
+        name=body.get("name"),
+        resume=body.get("resume"),
+        cols=_int_field(body, "cols"),
+        rows=_int_field(body, "rows"),
+    )
+
+
+@router.patch("/terminal/sessions/{session_id}")
+async def rename_terminal_session(session_id: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    name = body.get("name")
+    if not isinstance(name, str):
+        raise HTTPException(status_code=422, detail="'name' must be a string")
+    return await _terminal_acall(terminal.rename, session_id, name)
+
+
+@router.delete("/terminal/sessions/{session_id}")
+async def close_terminal_session(session_id: str) -> dict[str, Any]:
+    await _terminal_acall(terminal.close, session_id)
+    return {"status": "closed", "id": session_id}
+
+
+@router.post("/terminal/{session_id}/resize")
+async def resize_terminal(session_id: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    cols, rows = _int_field(body, "cols"), _int_field(body, "rows")
+    if cols is None or rows is None:
+        raise HTTPException(status_code=422, detail="'cols' and 'rows' are required")
+    return _terminal_call(terminal.resize, session_id, cols, rows)
+
+
+@router.post("/terminal/{session_id}/input")
+async def terminal_input(session_id: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """Insert text at the session's prompt as a bracketed paste; Enter is never sent."""
+    text = body.get("text")
+    if not isinstance(text, str):
+        raise HTTPException(status_code=422, detail="'text' must be a string")
+    return await _terminal_acall(terminal.paste, session_id, text)
+
+
+@router.websocket("/terminal/{session_id}/pty")
+async def terminal_pty(websocket: WebSocket, session_id: str) -> None:
+    """Bidirectional PTY stream of one terminal session.
+
+    The handshake is authenticated like `/ws` (the router's auth dependency
+    applies `require_ws_engine_auth` to websocket routes; the origin guard runs
+    before routing). Server → client: binary frames of terminal output (the
+    buffered recent output first), and text frames `{"type": "status", ...}` /
+    `{"type": "exit", "code": n}`. Client → server: binary frames of input
+    bytes, and text frames `{"type": "resize", "cols", "rows"}` or
+    `{"type": "input", "data": "<text>"}`.
+    """
+    offered = offered_subprotocols(websocket)
+    await websocket.accept(subprotocol=WS_SUBPROTOCOL if WS_SUBPROTOCOL in offered else None)
+    try:
+        session = terminal.get(session_id)
+    except terminal.TerminalError:
+        await websocket.close(code=4404, reason="Terminal session not found")
+        return
+
+    # Subscribing and copying the buffer happen without an await in between, so
+    # no output chunk is lost or sent twice.
+    queue = terminal.subscribe(session)
+    backlog = bytes(session.buffer)
+
+    async def pump() -> None:
+        if backlog:
+            await websocket.send_bytes(backlog)
+        await websocket.send_text(json.dumps({"type": "status", **session.to_dict()}))
+        if not session.running and session.exit_code is not None:
+            await websocket.send_text(json.dumps({"type": "exit", "code": session.exit_code}))
+        while True:
+            item = await queue.get()
+            if item is None:
+                await websocket.close(code=1000, reason="Terminal session closed")
+                return
+            if isinstance(item, bytes):
+                await websocket.send_bytes(item)
+            else:
+                await websocket.send_text(json.dumps(item))
+
+    pump_task = asyncio.create_task(pump())
+    try:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            if message.get("bytes"):
+                terminal.write(session, message["bytes"])
+                continue
+            text = message.get("text")
+            if not text:
+                continue
+            try:
+                data = json.loads(text)
+            except ValueError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            if data.get("type") == "resize":
+                cols, rows = data.get("cols"), data.get("rows")
+                if isinstance(cols, int) and isinstance(rows, int):
+                    try:
+                        terminal.resize(session_id, cols, rows)
+                    except terminal.TerminalError:
+                        pass
+            elif data.get("type") == "input" and isinstance(data.get("data"), str):
+                terminal.write(session, data["data"].encode("utf-8"))
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        terminal.unsubscribe(session, queue)
+        pump_task.cancel()
+        try:
+            await pump_task
+        except (asyncio.CancelledError, Exception):
+            pass

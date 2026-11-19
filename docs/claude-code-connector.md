@@ -28,6 +28,7 @@ This document is the contract between the parts of the integration. Code that im
 | `egress.py` | `ClaudeCodeBackend(EgressBackend)` for sending |
 | `my_work.py` | the "My work" view's data: open Linear issues and the user's own open pull requests (section "My work" below) |
 | `work_actions.py` | direct actions on My work rows, each on the user's click (section "My work actions" below) |
+| `terminal.py` | the Claude terminal: plain `claude` sessions in a PTY (section "Claude terminal" below) |
 | `api.py` | REST endpoints below |
 
 ### Tables (module-owned)
@@ -46,6 +47,11 @@ CREATE TABLE IF NOT EXISTS claude_code_sources (
 CREATE TABLE IF NOT EXISTS claude_code_state (
     platform TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,  -- e.g. slack thread memory, links cache
     PRIMARY KEY (platform, key)
+);
+CREATE TABLE IF NOT EXISTS claude_code_terminal_sessions (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, cwd TEXT NOT NULL,
+    claude_session_id TEXT NOT NULL,        -- passed as --session-id, resumed with --resume
+    created_at TEXT NOT NULL, last_active_at TEXT, closed_at TEXT
 );
 ```
 
@@ -124,6 +130,13 @@ Linked documents:
 | GET | `/claude-code/my-work/linear/states?team=TRAD&refresh=false` | `{team, states: [{id, name, type}]}` |
 | POST | `/claude-code/my-work/linear/{identifier}/action` | `{action: state\|assign_me\|priority\|comment, value, dry_run?}` → `{ok, issue, removed, result}` |
 | POST | `/claude-code/my-work/github/action` | `{repo, number, action: ready\|draft\|reviewers\|comment\|update_branch\|merge, reviewers?, body?, method?, head_sha?, delete_branch?, dry_run?}` → `{ok, pr, removed, state, output}` |
+| GET | `/claude-code/terminal/sessions` | `{sessions: [<open session>], closed: [<row + resumable>], default_cwd}` |
+| POST | `/claude-code/terminal/sessions` | `{cwd?, name?, resume?, cols?, rows?}` → the new session (`resume` = id of a closed session) |
+| PATCH | `/claude-code/terminal/sessions/{id}` | `{name}` → the session |
+| DELETE | `/claude-code/terminal/sessions/{id}` | closes the session (process group killed, MCP token revoked) |
+| POST | `/claude-code/terminal/{id}/resize` | `{cols, rows}` |
+| POST | `/claude-code/terminal/{id}/input` | `{text}` → inserted as one bracketed paste, control characters stripped, no Enter |
+| WS | `/claude-code/terminal/{id}/pty` | PTY stream (section "Claude terminal") |
 
 ### Seeded rules (idempotent by name, through the rules API)
 
@@ -142,6 +155,8 @@ Linked documents:
 | `egress/health.py`, `egress/connections.py` (`test_connection`, `remove_connection`) | rows with ids starting `claude_code:` are delegated to the module |
 | `egress/tool_handlers.py` | `_resolve_connection_id`: a `claude_code:` row only when the platform has no other connected row |
 | `claude_code/api.py` | imports `claude_code.egress`, which registers the connect/disconnect hooks |
+| `security/engine_auth.py` | `require_engine_auth` authenticates a websocket route on a REST router with `require_ws_engine_auth` (the terminal's `/pty` socket) |
+| `mcp/turn_tokens.py` | `mint(..., ttl_seconds=None)` mints a token without expiry (a terminal session's, revoked on close) |
 | UI | `IntegrationsConfig.svelte` injects a "via Claude Code" entry per platform (the SMTP injection pattern) using `/claude-code/status`; `ClaudeCodeSource.svelte` is the detail panel; the setup wizard's step 3 includes `SetupClaudeCode.svelte`; `RulesEditor.svelte` accepts a free field path |
 
 ## Sending (Claude Code egress)
@@ -169,6 +184,16 @@ A send turn: `--allowedTools` = the one tool (Slack `send` role, Gmail `draft` r
 - **GitHub** (ready for review, back to draft, request reviewers, comment, update branch, merge), with `gh` and no model turn: `gh pr ready N -R o/r [--undo]`, `gh pr edit --add-reviewer`, `gh pr comment --body-file -` (body on stdin), `gh pr update-branch`, `gh pr merge N -R o/r --squash|--merge|--rebase --match-head-commit <sha> [--delete-branch]`. `--admin` and `--auto` are never built. Before each command the PR is read live (one GraphQL call with `viewer`): the author must be the viewer, the PR open, and for a merge the method one the repository allows, the PR not a draft and its head the commit the user confirmed. `gh` runs in an empty temp directory with `GH_PROMPT_DISABLED=1`, so it never touches a local checkout.
 - After an action the row's fresh data replaces it in the My work cache (`my_work.replace_cached_item`); a completed / canceled issue or a merged / closed PR is dropped. The PR query also reads `headRefOid`, `mergeStateStatus`, the author and the repository's `mergeCommitAllowed` / `squashMergeAllowed` / `rebaseMergeAllowed` / `deleteBranchOnMerge`.
 - UI: `lib/components/work/LinearRowActions.svelte` (state picker + menu) and `PrRowActions.svelte` (inline Ready for review / Merge + menu, merge confirm dialog with repo#number, title, method, head commit, checks, review, merge state and delete-branch checkbox); pure logic in `lib/work/actions.ts`.
+
+## Claude terminal
+
+`/terminal` ("Claude") is a plain terminal that runs the user's own `claude` CLI (`claude_code/terminal.py`, UI `ui/src/routes/terminal/+page.svelte`).
+
+- Spawn: only `config.get_agent_binary("claude_code")`, in a PTY (stdlib `pty.openpty`, own session and process group, the PTY as controlling terminal), with the user's environment (`TERM=xterm-256color`) and Claude Code configuration. Arguments: `--session-id <uuid>` (or `--resume <uuid>` when a closed session is resumed) and `--mcp-config <0600 temp file>`. Nothing else: no permission mode, setting sources, agents or system prompt.
+- MCP: the config file points at Laya's Streamable HTTP endpoint (`/mcp/`) with a per-session turn token limited to the read tools, without expiry; it is revoked and the file deleted when the process exits or the tab closes. When Laya's MCP tools are not available the session starts without `--mcp-config` and carries a `note`.
+- Sessions live in the engine (`_sessions`), so tabs survive navigating away; the last 200 KB of output are replayed when a socket attaches. Rows in `claude_code_terminal_sessions` keep closed sessions for the "Resume…" menu (`resumable` = Claude Code stored a transcript for the id). On engine start rows left open are marked closed; on shutdown (`stop_service`) every session is closed.
+- Socket `/claude-code/terminal/{id}/pty`: authenticated like `/ws` (app token as the second `Sec-WebSocket-Protocol` entry, origin guard). Server → client: binary output frames, text `{"type":"status",…}` and `{"type":"exit","code"}`. Client → server: binary input frames, text `{"type":"resize","cols","rows"}`.
+- "Reference in Claude" (ActionCard, CardDetail, My work Linear and PR rows) sends a one-line reference through `POST /claude-code/terminal/{id}/input` to the most recently active tab (`lib/stores/claudeTerminal.ts`), or opens `/terminal` with a new tab and inserts it there: card `[<platform> card] <header> — <source_url>`, Linear `[<identifier>] <title> — <url>`, PR `[<repo>#<number>] <title> — <url>`.
 
 ## Board
 

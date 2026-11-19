@@ -7,7 +7,9 @@ When chat or Coherence runs on an agent model (``agent/claude_code/...``), the a
 runs the tool loop itself and calls Laya's tools through Laya's own Streamable HTTP
 MCP endpoint. Each such turn gets its own token, minted here, that:
 
-- is valid only until it expires or the turn revokes it;
+- is valid only until it expires or the turn revokes it (a terminal session's
+  token has no expiry and lives until the terminal tab closes, see
+  ``laya.claude_code.terminal``);
 - opens only the Streamable HTTP transport (``/mcp/``), not the legacy SSE one;
 - limits the MCP session it opens to an explicit set of tool names, independent of
   the user's Settings → MCP scope toggles (those govern external clients; the set
@@ -19,6 +21,7 @@ Tokens live in process memory only; an engine restart invalidates all of them.
 from __future__ import annotations
 
 import hmac
+import math
 import secrets
 import time
 
@@ -36,8 +39,11 @@ def _prune(now: float) -> None:
             _tokens.pop(tok, None)
 
 
-def mint(tool_names: set[str] | frozenset[str], ttl_seconds: float) -> str:
+def mint(tool_names: set[str] | frozenset[str], ttl_seconds: float | None) -> str:
     """Mint a token whose MCP session may list and call only ``tool_names``.
+
+    ``ttl_seconds=None`` mints a token without expiry; it stays valid until
+    ``revoke`` is called or the engine restarts.
 
     Names outside the read scope are dropped, so a turn token can never reach a
     write or egress tool whatever the caller passes.
@@ -46,7 +52,8 @@ def mint(tool_names: set[str] | frozenset[str], ttl_seconds: float) -> str:
     now = time.monotonic()
     _prune(now)
     token = f"{TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
-    _tokens[token] = (allowed, now + max(1.0, float(ttl_seconds)))
+    expires = math.inf if ttl_seconds is None else now + max(1.0, float(ttl_seconds))
+    _tokens[token] = (allowed, expires)
     return token
 
 

@@ -26,6 +26,7 @@ import hmac
 
 import structlog
 from fastapi import HTTPException, Request, WebSocket, WebSocketException, status
+from starlette.requests import HTTPConnection
 
 from laya.security import n8n_auth
 from laya.security.keychain import get_engine_token
@@ -130,13 +131,22 @@ async def require_ws_engine_auth(websocket: WebSocket) -> None:
         raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION, reason="Unauthorized")
 
 
-async def require_engine_auth(request: Request) -> str:
+async def require_engine_auth(request: HTTPConnection) -> str:
     """Authenticate an incoming REST request.
 
     Returns the app token, "n8n" when the n8n token was used, or "" when the
     route is exempt or let through in n8n log mode. GET /health is exempted at
     the router inclusion level in main.py.
+
+    A websocket route on a router included with this dependency is
+    authenticated exactly like `/ws` (`require_ws_engine_auth`): the handshake
+    carries no `Authorization` header, so the bearer check cannot apply to it.
     """
+    if request.scope["type"] == "websocket":
+        await require_ws_engine_auth(request)  # type: ignore[arg-type]
+        return ""
+    if not isinstance(request, Request):
+        raise _unauthorized()
     path = request.url.path.rstrip("/")
     method = request.method
     if is_auth_exempt(method, path):
