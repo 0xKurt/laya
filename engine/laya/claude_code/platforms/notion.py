@@ -27,6 +27,14 @@ from laya.models.event import LayaEvent
 
 PLATFORM = "notion"
 
+# Hard caps of one sweep.
+OWN_PAGES = 10  # recently edited pages the user created
+MENTION_PAGES = 10  # recently edited pages that name the user
+COMMENT_READS = 12  # pages whose comments are read
+TEXT_CHARS = 1500
+
+# Compact field names keep the model's output short; `expand_item` maps them
+# onto the names the rest of the module uses.
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -36,17 +44,16 @@ SCHEMA = {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string"},
-                    "created_at": {"type": "string"},
-                    "kind": {"type": "string", "enum": ["comment", "mention"]},
-                    "page_id": {"type": "string"},
-                    "page_title": {"type": "string"},
-                    "page_url": {"type": "string"},
-                    "discussion_id": {"type": ["string", "null"]},
-                    "author_name": {"type": "string"},
-                    "author_email": {"type": "string"},
-                    "text": {"type": "string"},
+                    "at": {"type": "string", "description": "created_at, ISO 8601"},
+                    "k": {"type": "string", "enum": ["comment", "mention"]},
+                    "p": {"type": "string", "description": "page id"},
+                    "pt": {"type": "string", "description": "page title"},
+                    "d": {"type": ["string", "null"], "description": "discussion id"},
+                    "an": {"type": "string", "description": "author name"},
+                    "ae": {"type": "string", "description": "author email"},
+                    "t": {"type": "string", "description": "text"},
                 },
-                "required": ["id", "created_at", "kind", "page_id", "page_title", "page_url", "author_name", "text"],
+                "required": ["id", "at", "k", "p", "pt", "an", "t"],
             },
         },
     },
@@ -60,18 +67,42 @@ def build_prompt(tools: dict[str, str], since: datetime, name: str) -> str:
     who = f" (call {tools['self']} for my user id and email)" if tools.get("self") else ""
     return f"""You are a data collector. Copy data exactly; do not summarize or judge.
 I am {name}{who}.
+Make the two searches in parallel in ONE step, then all comment reads in parallel in ONE step.
 1. {tools['search']} with query "", filters {{"created_by_user_ids": ["me"],
-   "last_edited_date_range": {{"start_date": "{day}"}}}}, sort "last_edited", page_size 25.
+   "last_edited_date_range": {{"start_date": "{day}"}}}}, sort "last_edited",
+   page_size {OWN_PAGES}, max_highlight_length 0.
 2. {tools['search']} with query "{name}", filters {{"last_edited_date_range":
-   {{"start_date": "{day}"}}}}, sort "last_edited", page_size 15.
-For every page found, call {tools['comments']} and return each comment created after
-{iso}: kind="comment", id = the comment id, discussion_id, author_name, author_email,
-text, created_at, page_id, page_title, page_url.
-For pages from step 2 that @-mention me in their content (fetch them with
-{tools['fetch']}), return one item kind="mention" with id = page id + ":" + the page's
-last edited time, created_at = that time, author = who last edited it, and text = the
-paragraph that mentions me.
+   {{"start_date": "{day}"}}}}, sort "last_edited", page_size {MENTION_PAGES}, max_highlight_length 300.
+3. Call {tools['comments']} for the pages found, most recently edited first, at most
+   {COMMENT_READS} pages, and return each comment created after {iso}: k="comment",
+   id = the comment id, d = discussion id, an / ae = author name / email, t = text,
+   at = created time, p = page id, pt = page title.
+4. For pages from step 2 edited after {iso} whose highlight @-mentions me, return one item
+   k="mention" with id = page id + ":" + the page's last edited time, at = that time,
+   an = who last edited it, t = the highlight. Do not fetch pages.
+Texts at most {TEXT_CHARS} characters. Call no other tool.
 Return {{"items": []}} if there is nothing."""
+
+
+def page_url(page_id: str) -> str:
+    return f"https://www.notion.so/{page_id.replace('-', '')}"
+
+
+def expand_item(it: dict[str, Any]) -> dict[str, Any]:
+    """A compact turn item in the module's own field names."""
+    page = it.get("p") or ""
+    return {
+        "id": it.get("id") or "",
+        "created_at": it.get("at") or "",
+        "kind": it.get("k") or "comment",
+        "page_id": page,
+        "page_title": it.get("pt") or "",
+        "page_url": page_url(page) if page else None,
+        "discussion_id": it.get("d") or None,
+        "author_name": it.get("an") or "",
+        "author_email": it.get("ae") or "",
+        "text": (it.get("t") or "")[:TEXT_CHARS],
+    }
 
 
 def conversation_of(item: dict[str, Any]) -> str:
@@ -125,4 +156,5 @@ async def collect(source: dict[str, Any], since: datetime) -> list[LayaEvent]:
     out = await run_turn(
         source, PLATFORM, build_prompt(source["tools"], since, my_name(source)), SCHEMA
     )
-    return build_events(out.get("items", []), my_emails(source))
+    items = [expand_item(it) for it in out.get("items", []) if it.get("id") and it.get("at")]
+    return build_events(items, my_emails(source))

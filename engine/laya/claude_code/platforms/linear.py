@@ -34,26 +34,33 @@ _REVIEW_REQUEST = re.compile(r"request(?:ed|s)?\b.*\breview", re.IGNORECASE)
 
 KINDS = ["comment", "mention", "assigned", "status_changed", "issue_created", "review_requested", "other"]
 
+# Hard caps of one sweep.
+ISSUES_LIMIT = 25  # assigned issues listed
+TEXT_CHARS = 1500  # characters kept of a comment
+DESCRIPTION_CHARS = 500  # characters kept of an issue description
+
+# Compact field names keep the model's output short; `expand_item` maps them
+# onto the names the rest of the module uses.
 SCHEMA = {
     "type": "object",
     "properties": {
+        "ws": {"type": ["string", "null"], "description": "workspace slug of the issue links"},
         "items": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string"},
-                    "created_at": {"type": "string"},
-                    "kind": {"type": "string", "enum": KINDS},
-                    "issue_identifier": {"type": "string"},
-                    "issue_title": {"type": "string"},
-                    "issue_url": {"type": "string"},
-                    "issue_status": {"type": "string"},
-                    "actor_name": {"type": "string"},
-                    "actor_email": {"type": "string"},
-                    "text": {"type": "string"},
+                    "at": {"type": "string", "description": "created_at, ISO 8601"},
+                    "k": {"type": "string", "enum": KINDS},
+                    "i": {"type": "string", "description": "issue identifier"},
+                    "it": {"type": "string", "description": "issue title"},
+                    "st": {"type": "string", "description": "issue status"},
+                    "an": {"type": "string", "description": "actor name"},
+                    "ae": {"type": "string", "description": "actor email"},
+                    "t": {"type": "string", "description": "text"},
                 },
-                "required": ["id", "created_at", "kind", "issue_identifier", "issue_title", "issue_url", "text"],
+                "required": ["id", "at", "k", "i", "it", "t"],
             },
         },
     },
@@ -64,17 +71,40 @@ SCHEMA = {
 def build_prompt(tools: dict[str, str], since: datetime) -> str:
     iso = since.isoformat()
     return f"""You are a data collector. Copy data exactly; do not judge relevance.
+Make the two calls below in parallel in ONE step, then answer.
 1. Call {tools['notifications']} and take every notification created after {iso} (read or
    unread): mentions, comments, assignments, status changes, review requests. For each
-   return id (the notification id), created_at, kind (review_requested when someone
-   requested a review), issue_identifier, issue_title, issue_url, issue_status (the
-   issue's current status name), actor_name, actor_email and text: the comment body for
-   comments and mentions, otherwise one sentence describing the change.
-2. Call {tools['list_issues']} with assignee="me" and updatedAt="{iso}" and add each issue
-   not already covered by step 1 with kind="assigned" (id = "issue:" + identifier + ":" +
-   its updatedAt, created_at = its updatedAt, issue_status = its status, text = its status
-   and the first 500 characters of its description).
-Return {{"items": []}} if there is nothing."""
+   return id (the notification id), at = created time, k (review_requested when someone
+   requested a review), i = issue identifier, it = issue title, st = the issue's current
+   status name, an / ae = actor name / email and t: the comment body (at most {TEXT_CHARS}
+   characters) for comments and mentions, otherwise one sentence describing the change.
+2. Call {tools['list_issues']} with assignee="me", updatedAt="{iso}", limit={ISSUES_LIMIT} and add
+   each issue not already covered by step 1 with k="assigned" (id = "issue:" + identifier +
+   ":" + its updatedAt, at = its updatedAt, st = its status, t = its status and the first
+   {DESCRIPTION_CHARS} characters of its description).
+ws = the workspace slug of the issue links (linear.app/<ws>/issue/...).
+Call no other tool. Return {{"items": []}} if there is nothing."""
+
+
+def issue_url(workspace: str | None, identifier: str) -> str | None:
+    return f"https://linear.app/{workspace}/issue/{identifier}" if workspace and identifier else None
+
+
+def expand_item(it: dict[str, Any], workspace: str | None) -> dict[str, Any]:
+    """A compact turn item in the module's own field names."""
+    identifier = it.get("i") or ""
+    return {
+        "id": it.get("id") or "",
+        "created_at": it.get("at") or "",
+        "kind": it.get("k") or "other",
+        "issue_identifier": identifier,
+        "issue_title": it.get("it") or "",
+        "issue_url": issue_url(workspace, identifier),
+        "issue_status": it.get("st") or "",
+        "actor_name": it.get("an") or "",
+        "actor_email": it.get("ae") or "",
+        "text": (it.get("t") or "")[:TEXT_CHARS],
+    }
 
 
 def is_review_request(item: dict[str, Any]) -> bool:
@@ -141,4 +171,6 @@ def build_events(items: list[dict[str, Any]], mine: set[str]) -> list[LayaEvent]
 
 async def collect(source: dict[str, Any], since: datetime) -> list[LayaEvent]:
     out = await run_turn(source, PLATFORM, build_prompt(source["tools"], since), SCHEMA)
-    return build_events(out.get("items", []), my_emails(source))
+    workspace = out.get("ws") or None
+    items = [expand_item(it, workspace) for it in out.get("items", []) if it.get("id") and it.get("at")]
+    return build_events(items, my_emails(source))
