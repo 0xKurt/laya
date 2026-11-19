@@ -16,6 +16,8 @@
 	import PlatformIcon from '$lib/components/settings/PlatformIcon.svelte';
 	import { platformDotColor, platformKey, actorInitials, actorAvatarColor, PRIORITY_LABELS, PRIORITY_COLORS } from '$lib/utils/cardVisuals';
 	import { effortOf, formatEffort } from '$lib/sessions/session';
+	import ReferenceInClaude from '$lib/components/claude/ReferenceInClaude.svelte';
+	import { cardReference } from '$lib/claude/reference';
 
 	let { card, onselect, ondelete, onlink, selectedCardId = '', hasSelection = false, lastViewedCardId = '' }: { card: ActionCard; onselect: (card: ActionCard) => void; ondelete?: (cardId: string) => void; onlink?: (card: ActionCard) => void; selectedCardId?: string; hasSelection?: boolean; lastViewedCardId?: string } = $props();
 
@@ -583,6 +585,13 @@
 					</span>
 				</div>
 			{/if}
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="relative" onmouseenter={(e) => showTooltip(e.currentTarget, 'Reference in Claude')} onmouseleave={hideTooltip}>
+				<ReferenceInClaude
+					reference={() => cardReference(card)}
+					class="h-6 w-6 text-surface-400 hover:bg-laya-orange/15 hover:text-laya-orange opacity-0 group-hover/card:opacity-100 focus-visible:opacity-100"
+				/>
+			</div>
 			<!-- Bookmark -->
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<div class="relative" onmouseenter={(e) => showTooltip(e.currentTarget, card.bookmarked_at ? 'Remove Bookmark' : 'Bookmark')} onmouseleave={hideTooltip}>

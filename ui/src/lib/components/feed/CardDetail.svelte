@@ -21,6 +21,8 @@
 	import { compose } from '$lib/stores/compose';
 	import { detailExpanded } from '$lib/stores/detailPanel';
 	import { spaces, loadSpaces } from '$lib/stores/spaces';
+	import ReferenceInClaude from '$lib/components/claude/ReferenceInClaude.svelte';
+	import { cardReference } from '$lib/claude/reference';
 
 	let {
 		card,
@@ -783,20 +785,27 @@
 						{/if}
 					</div>
 				{/if}
-				{#if card.source_url}
-					<!-- An explicit way back to the source; the layout opens it in the default browser. -->
-					<a
-						href={card.source_url}
-						target="_blank"
-						rel="noopener noreferrer"
-						class="mb-1.5 inline-flex w-fit items-center gap-1.5 rounded-md border border-surface-700 px-2.5 py-1 text-laya-secondary font-medium text-surface-200 transition-colors hover:border-laya-orange/60 hover:text-laya-orange"
-					>
-						Open in {platformLabel(card.entity_id?.split(':')[0] || 'source')}
-						<svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-						</svg>
-					</a>
-				{/if}
+				<div class="mb-1.5 flex items-center gap-1.5">
+					{#if card.source_url}
+						<!-- An explicit way back to the source; the layout opens it in the default browser. -->
+						<a
+							href={card.source_url}
+							target="_blank"
+							rel="noopener noreferrer"
+							class="inline-flex w-fit items-center gap-1.5 rounded-md border border-surface-700 px-2.5 py-1 text-laya-secondary font-medium text-surface-200 transition-colors hover:border-laya-orange/60 hover:text-laya-orange"
+						>
+							Open in {platformLabel(card.entity_id?.split(':')[0] || 'source')}
+							<svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+							</svg>
+						</a>
+					{/if}
+					<ReferenceInClaude
+						reference={() => cardReference(card)}
+						size="h-3.5 w-3.5"
+						class="h-7 w-7 border border-surface-700 text-surface-300 hover:border-laya-orange/60 hover:text-laya-orange"
+					/>
+				</div>
 				{#if card.actor_name}
 					<div class="flex items-center gap-1.5 min-w-0">
 						<span class="shrink-0 text-laya-micro font-semibold uppercase tracking-wider text-surface-500">Actor</span>
