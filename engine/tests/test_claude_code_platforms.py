@@ -145,6 +145,9 @@ def test_slack_one_event_per_conversation_with_context():
     assert "\n\nNew:\n" in body and body.index("first") < body.index("second")
     md = e.content.metadata
     assert md["slack_channel_id"] == "C1" and md["slack_thread_ts"] == "100.0"
+    assert md["slack_channel"] == "C1"  # read by Slack egress
+    from laya.egress.platforms.slack import SlackPlatform
+    assert SlackPlatform().identifiers_from_event("reply_to_thread", e.event_id, md, {})["channel"] == "C1"
     assert md["slack_channel_type"] == "public" and md["slack_channel_name"] == "general"
     assert md["claude_code"] is True and md["slack_message_count"] == 2
 
@@ -195,27 +198,103 @@ def test_slack_identity_contract_resolves_self():
 
 @pytest.mark.asyncio
 async def test_slack_collect_filters_and_remembers_threads(db):
-    out = {"messages": [
-        {"channel_id": "C1", "channel_type": "channel", "ts": "10.0", "thread_ts": "9.0",
-         "user_id": ME, "user_name": "Kim", "text": "mine", "permalink": "p"},
-        {"channel_id": "C2", "channel_type": "channel", "ts": "11.0", "thread_ts": None,
-         "user_id": "U_X", "user_name": "X", "text": "chatter", "permalink": "p"},
-        {"channel_id": "C1", "channel_type": "channel", "ts": "12.0", "thread_ts": "9.0",
-         "user_id": "U_X", "user_name": "X", "text": "reply in my thread", "permalink": "p"},
+    out = {"ws": "acme", "ch": [{"id": "C1", "nm": "general", "ty": "channel"},
+                                 {"id": "C2", "nm": "random", "ty": "channel"}],
+           "m": [
+        {"q": "o", "c": "C1", "ts": "10.0", "th": "9.0", "u": ME, "n": "Kim", "t": "mine"},
+        {"q": "x", "c": "C2", "ts": "11.0", "th": None, "u": "U_X", "n": "X", "t": "chatter"},
+        {"q": "w", "c": "C1", "ts": "12.0", "th": "9.0", "u": "U_X", "n": "X", "t": "reply in my thread"},
     ]}
     source = {"config": slack_config(), "identity": {"slack_user_id": ME},
               "tools": {"search": "s", "read_thread": "t", "read_channel": "c"}}
     with patch.object(slack, "run_turn", new_callable=AsyncMock, return_value=out) as turn:
         events = await slack.collect(source, datetime(2026, 1, 1, tzinfo=timezone.utc))
-    assert "s" in turn.await_args.args[2]
+    # The user answered inside the sweep: no context turn.
+    assert turn.await_count == 1
+    prompt = turn.await_args.args[2]
+    assert f"with:<@{ME}>" in prompt and f"keywords=[\"<@{ME}>\"]" in prompt and "include_context=false" in prompt
     assert {e.subject.id for e in events} == {"C1:9.0"}
+    reply = next(e for e in events if e.actor.platform_handle == "U_X")
+    assert reply.subject.url == "https://acme.slack.com/archives/C1/p120?thread_ts=9.0&cid=C1"
     from laya.claude_code import store
     assert "thread:C1:9.0" in await store.get_state("slack", "thread:")
+    assert "seen:C1:9.0" in await store.get_state("slack", "seen:")
 
-    # The next sweep re-reads the remembered thread.
-    with patch.object(slack, "run_turn", new_callable=AsyncMock, return_value={"messages": []}) as turn:
-        await slack.collect(source, datetime(2026, 1, 1, tzinfo=timezone.utc))
-    assert "channel_id=C1 thread_ts=9.0" in turn.await_args.args[2]
+
+@pytest.mark.asyncio
+async def test_slack_context_read_only_for_unseen_conversations_with_others(db):
+    from laya.claude_code import store
+
+    await store.set_state("slack", "seen:D2", datetime.now(timezone.utc).isoformat())
+    search = {"ws": "acme", "ch": [
+        {"id": "D1", "ty": "dm", "pp": ["Mike", "Kim"]},
+        {"id": "D2", "ty": "dm", "pp": ["Ana", "Kim"]},
+        {"id": "C1", "nm": "eng", "ty": "channel"},
+        {"id": "C3", "nm": "ops", "ty": "channel"},
+    ], "m": [
+        {"q": "w", "c": "D1", "ts": "100.0", "u": "U_MIKE", "n": "Mike", "t": "new in D1"},
+        {"q": "w", "c": "D2", "ts": "101.0", "u": "U_ANA", "n": "Ana", "t": "already seen DM"},
+        {"q": "m", "c": "C1", "ts": "102.0", "th": "50.0", "u": "U_ANA", "n": "Ana", "t": f"<@{ME}> look"},
+        {"q": "m", "c": "C3", "ts": "103.0", "u": "U_ANA", "n": "Ana", "t": f"root <@{ME}>"},
+        {"q": "o", "c": "D1", "ts": "99.0", "u": ME, "n": "Kim", "t": "own earlier"},
+    ]}
+    context = {"m": [
+        {"c": "C1", "ts": "50.0", "th": "50.0", "u": "U_MIKE", "n": "Mike", "t": "thread root"},
+        {"c": "C9", "ts": "1.0", "u": "U_MIKE", "n": "Mike", "t": "not asked for"},
+    ]}
+    source = {"config": slack_config(), "identity": {"slack_user_id": ME, "name": "Kim"},
+              "tools": {"search": "s", "read_thread": "rt", "read_channel": "rc"}}
+    with patch.object(slack, "run_turn", new_callable=AsyncMock, side_effect=[search, context]) as turn:
+        events = await slack.collect(source, datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert turn.await_count == 2
+    ctx_prompt = turn.await_args_list[1].args[2]
+    # D1 has the user's own message in this sweep, D2 was delivered before, C3 is a root.
+    assert "channel_id=C1 message_ts=50.0 latest=102.0" in ctx_prompt
+    assert "D1" not in ctx_prompt and "D2" not in ctx_prompt and "C3" not in ctx_prompt
+    assert turn.await_args_list[1].args[3] is slack.CONTEXT_SCHEMA
+    thread = next(e for e in events if e.subject.id == "C1:50.0")
+    assert "Mike: thread root" in thread.content.body
+    assert all("not asked for" not in e.content.body for e in events)
+
+
+def test_slack_context_wanted_caps_and_orders():
+    msgs = [_slack(f"{i}.0", channel=f"D{i}", ctype="im") for i in range(1, 15)]
+    wanted = slack.context_wanted(msgs, ME, set(), limit=3)
+    assert [w["channel_id"] for w in wanted] == ["D14", "D13", "D12"]
+    assert all(w["thread_ts"] is None for w in wanted)
+
+
+def test_slack_expand_message_builds_permalink_and_caps_text():
+    channels = {"C1": {"id": "C1", "nm": "eng", "ty": "channel"}}
+    m = slack.expand_message({"c": "C1", "ts": "p1700000000123456", "u": "U1", "n": "A", "t": "x" * 5000},
+                             channels, "acme", context=False)
+    assert m["ts"] == "1700000000.123456"
+    assert m["permalink"] == "https://acme.slack.com/archives/C1/p1700000000123456"
+    assert len(m["text"]) == slack.TEXT_CHARS and m["channel_name"] == "eng"
+    assert slack.expand_message({"c": "C1", "ts": "1.0", "u": "U", "t": ""}, {}, None, context=True)["permalink"] is None
+
+
+def test_slack_group_dm_with_d_id_is_not_a_dm():
+    msgs = [
+        _slack("1.0", channel="D7", ctype="group_dm", name="Euan", user="U_E"),
+        _slack("2.0", channel="D7", ctype="dm", name="Roland", user="U_R"),
+    ]
+    for m in msgs:
+        m.update(participants=["Euan", "Kim Self", "Roland"])
+    msgs = [slack.normalize_message(m) for m in msgs]
+    assert {m["channel_type"] for m in msgs} == {"group_dm"}
+    events = slack.build_events(msgs, ME, my_names={"Kim Self"})
+    assert events[0].subject.title == "Group DM: Euan, Roland"
+    assert events[0].content.metadata["slack_channel_type"] == "group_dm"
+    # A 1:1 DM with a D id stays a DM.
+    assert _slack("1", channel="D8", ctype="")["channel_type"] == "dm"
+
+
+def test_slack_group_dm_title_without_participants_uses_senders():
+    msgs = [_slack("1.0", channel="G1", ctype="mpim", name="Euan", user="U_E"),
+            _slack("2.0", channel="G1", ctype="mpim", name="Kim", user=ME)]
+    events = slack.build_events(msgs, ME)
+    assert {e.subject.title for e in events} == {"Group DM: Euan"}
 
 
 def slack_config(**kw):
@@ -451,10 +530,82 @@ def test_slack_ts_without_dot_is_normalized():
 
 
 @pytest.mark.asyncio
-async def test_gmail_collect_unescapes_html(db):
-    out = {"messages": [_mail("m1", body="say &quot;hi&quot;")]}
-    source = {"config": {}, "tools": {"search": "S", "get_thread": "G"}, "identity": {}}
-    with patch.object(gmail, "run_turn", new_callable=AsyncMock, return_value=out), \
+async def test_gmail_collect_unescapes_html_and_builds_links(db):
+    out = {"m": [{"id": "m1", "th": "t1", "d": "2026-02-22T10:00:00Z", "fn": "Mike",
+                  "fe": "mike@company.com", "s": "A &amp; B", "b": "say &quot;hi&quot;" + "x" * 5000,
+                  "k": "email", "to": ["kim@company.com"]}]}
+    source = {"config": {}, "tools": {"search": "S", "get_thread": "G", "get_message": "M"},
+              "identity": {"email": "kim@company.com"}}
+    with patch.object(gmail, "run_turn", new_callable=AsyncMock, return_value=out) as turn, \
          patch("laya.config.get_self_user", return_value=None):
         events = await gmail.collect(source, datetime(2026, 1, 1, tzinfo=timezone.utc))
-    assert events[0].content.body == 'say "hi"'
+    e = events[0]
+    assert e.content.body.startswith('say "hi"') and len(e.content.body) == gmail.BODY_CHARS
+    assert e.subject.title == "A & B"
+    assert e.subject.url == "https://mail.google.com/mail/?authuser=kim%40company.com#all/t1"
+    prompt = turn.await_args.args[2]
+    # Bodies are read per message from others, own mails keep their snippet.
+    assert "call M (messageFormat PLAIN_TEXT)" in prompt and "THREAD_VIEW_MINIMAL" in prompt
+    assert "snippet" in prompt and str(gmail.BODY_CHARS) in prompt
+
+
+def test_gmail_prompt_falls_back_to_get_thread():
+    p = gmail.build_prompt({"search": "S", "get_thread": "G"}, datetime(2026, 1, 1, tzinfo=timezone.utc),
+                           [], "Kim", False)
+    assert "call G (messageFormat PLAIN_TEXT) once for its thread" in p
+
+
+def test_gmail_meeting_notes_keep_document_link():
+    m = gmail.expand_message({"id": "m", "th": "t", "d": "2026-01-01T00:00:00Z", "fe": gmail.MEETING_NOTES_SENDER,
+                              "s": "Notes", "b": "Sync\nAction items for Kim:\n- do it", "k": "meeting_notes",
+                              "u": "https://docs.google.com/document/d/x"})
+    assert m["url"] == "https://docs.google.com/document/d/x" and m["kind"] == "meeting_notes"
+
+
+def test_gmail_event_carries_newest_message_id():
+    msgs = [_mail("m1", date="2026-02-22T10:00:00Z"), _mail("m2", date="2026-02-22T11:00:00Z")]
+    e = gmail.build_events(msgs, MINE)[0]
+    assert e.content.metadata["gmail_message_id"] == "m2"
+    own = gmail.build_events([_mail("m3", sender="kim@company.com")], MINE)[0]
+    assert own.content.metadata["gmail_message_id"] == "m3"
+
+
+@pytest.mark.asyncio
+async def test_notion_collect_expands_compact_items(db):
+    out = {"items": [{"id": "c1", "at": "2026-02-22T10:00:00Z", "k": "comment", "p": "0123-abcd",
+                      "pt": "Plan", "d": "d1", "an": "Mike", "ae": "mike@company.com", "t": "x" * 3000}]}
+    source = {"config": {}, "tools": {"search": "S", "comments": "C", "fetch": "F"}, "identity": {}}
+    with patch.object(notion, "run_turn", new_callable=AsyncMock, return_value=out) as turn, \
+         patch("laya.config.get_self_user", return_value=None):
+        [e] = await notion.collect(source, datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert e.subject.id == "0123-abcd:d1" and e.subject.url == "https://www.notion.so/0123abcd"
+    assert len(e.content.body) == notion.TEXT_CHARS
+    prompt = turn.await_args.args[2]
+    assert "max_highlight_length 0" in prompt and "Do not fetch pages" in prompt
+
+
+@pytest.mark.asyncio
+async def test_linear_collect_expands_compact_items(db):
+    out = {"ws": "acme", "items": [{"id": "n1", "at": "2026-02-22T10:00:00Z", "k": "comment", "i": "TRAD-9",
+                                    "it": "Fix", "st": "Todo", "an": "Mike", "ae": "mike@company.com",
+                                    "t": "please"}]}
+    source = {"config": {}, "tools": {"notifications": "N", "list_issues": "L", "get_issue": "G"}, "identity": {}}
+    with patch.object(linear, "run_turn", new_callable=AsyncMock, return_value=out) as turn, \
+         patch("laya.config.get_self_user", return_value=None):
+        [e] = await linear.collect(source, datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert e.subject.url == "https://linear.app/acme/issue/TRAD-9"
+    assert e.subject.title == "TRAD-9: Fix" and e.content.metadata["linear_status"] == "Todo"
+    assert f"limit={linear.ISSUES_LIMIT}" in turn.await_args.args[2]
+
+
+def test_slack_dm_title_from_participants_when_only_the_user_wrote():
+    m = _slack("1.0", channel="D1", ctype="dm", user=ME, name="Kim Self")
+    m["participants"] = ["Euan Hay", "Kim Self"]
+    assert slack.build_events([m], ME, my_names={"Kim Self"})[0].subject.title == "DM with Euan Hay"
+
+
+def test_slack_mention_with_display_name_counts():
+    m = _slack("1.0", text=f"<@{ME}|Kim> can you look")
+    assert slack.mentions(m, ME) and slack.is_relevant(m, ME, set())
+    assert slack.build_events([m], ME)[0].content.metadata["slack_is_mention"] is True
+    assert not slack.mentions(_slack("1.0", text="<@U_MEX> hi"), ME)

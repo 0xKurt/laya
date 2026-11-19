@@ -65,7 +65,8 @@ COMMON_DEFAULTS: dict[str, Any] = {
 }
 
 PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
-    "slack": {"context_messages": 8, "thread_memory_days": 14, "only_relevant": True},
+    "slack": {"context_messages": 8, "thread_memory_days": 14, "only_relevant": True,
+              "linked_documents": True},
     "gmail": {
         "exclude_senders": [
             "notifications@linear.app",
@@ -74,10 +75,11 @@ PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
             "notify@mail.notion.com",
         ],
         "meeting_notes": True,
+        "linked_documents": True,
     },
     "github": {"orgs": [], "others_prs_only_on_mention": True},
-    "linear": {},
-    "notion": {},
+    "linear": {"linked_documents": True},
+    "notion": {"linked_documents": True},
 }
 
 

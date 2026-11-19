@@ -17,11 +17,11 @@ This document is the contract between the parts of the integration. Code that im
 | File | Responsibility |
 |---|---|
 | `store.py` | tables `claude_code_sources` and `claude_code_state` (see below); async helpers; the per-platform config defaults |
-| `discover.py` | locate the `claude` binary (`config.get_agent_binary("claude_code")`), list available MCP tools (one cheap `claude -p` listing turn, cached), map platform roles to real tool names, read the user's identity per platform; returns a structured `Discovery` with per-platform `available`, `tools`, `identity`, `problem` (human-readable reason when something is missing) |
+| `discover.py` | locate the `claude` binary (`config.get_agent_binary("claude_code")`), list available MCP tools (one cheap `claude -p` listing turn, cached), map platform roles to real tool names, read the user's identity per platform; returns a structured `Discovery` with per-platform `available`, `tools`, `identity`, `problem` (human-readable reason when something is missing); `refresh_stored_tools` writes the newly discovered tool names into `claude_code_sources.tools` of every connected, available platform (on `POST /claude-code/discover` and on the listing a sweep runs when no discovery is cached) |
 | `cli.py` | `run_collect(platform, prompt, schema, tools, model, timeout)` and `run_send(...)` on `agents/subprocess_helper.AgentProcess`; `--allowedTools` = the given tools, built-in tools disallowed; usage logged with `log_to_audit(step="claude_code_<platform>", model="agent/claude_code/<model>")` using cache reads weighted 0.1 |
 | `platforms/slack.py`, `gmail.py`, `linear.py`, `notion.py`, `github.py` | one collector each: `async collect(source, since) -> list[LayaEvent]` |
 | `platforms/common.py` | shared event helpers (`make_event`, stable ids, `split_conversation`) and the enrich step: `register_enricher(fn)` adds a step that runs over every sweep's events before they are posted (`links.py` registers here) |
-| `links.py` | linked documents: extract Notion / Google Docs / GitHub links from an event, fetch read-only, summarise; appended to the event body (section "Linked documents") |
+| `links.py` | linked documents: extract Notion / Google Docs / GitHub links from an event, fetch read-only, summarise; appended to the event body (section "Linked documents" below) |
 | `recheck.py` | "still open?" re-check of open cards |
 | `service.py` | background loop, `start_service()` / `stop_service()` |
 | `connect.py` | connect / disconnect / configure a platform |
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS claude_code_sources (
     connected_at TEXT
 );
 CREATE TABLE IF NOT EXISTS claude_code_state (
-    platform TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,  -- e.g. slack thread memory
+    platform TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,  -- e.g. slack thread memory, links cache
     PRIMARY KEY (platform, key)
 );
 ```
@@ -64,20 +64,48 @@ On connect the module inserts (replacing a row auto-registered for the same work
 
 - `event_id = "evt_" + uuid5(NAMESPACE_URL, "laya-claude-code:<platform>:<native id>")`. Overlapping sweeps re-deliver the same ids and `POST /events` drops duplicates.
 - At most two events per conversation and sweep: the user's latest own message (it concludes what came before it), and one event carrying all new messages after it. When the user wrote last, only the user's message is emitted. Both are needed when the user answered and someone wrote again in the same sweep: without the user's event the cards of earlier sweeps would stay open.
-- `content.body` for Slack conversations: `Earlier in the conversation:` with up to `context_messages` previous messages, then `New:`. Each line is `[<Mon dd.mm HH:MM>] <Name|Me>: <text>`.
+- `content.body` for Slack conversations: `Earlier in the conversation:` with up to `context_messages` previous messages, then `New:`. Each line is `[<Mon dd.mm HH:MM>] <Name|Me>: <text>`. Earlier messages are read only for a conversation with a new message from someone else that no earlier sweep delivered (`seen:` state, kept `thread_memory_days`) and that has earlier messages (a DM or a thread reply); otherwise the earlier sweeps' events carry them.
+- Slack titles: `DM with <name>`, `Group DM: <other members>` (without the user's own name), `#<channel>`. A group DM is recognised by its reported type or by more than two participants, also when its channel id starts with `D`; only then does the `D` prefix mean a 1:1 DM.
 - **Identity contract.** `connect.py` writes the user's handles into team.json `self.accounts` (Slack user id, GitHub login) and emails into `self.aliases`, through the team API. Collectors emit exactly those strings, so `run_ingest` yields `actor_relationship == "self"` for the user's own messages.
 - **Conclusions.** An event with `content.metadata.resolved_in_source = true` (Linear issue Done/Canceled, PR merged or closed, re-check found the item answered; `raw_event_type` `issue_status_changed`, `pr_merged`, `pr_closed`, `recheck_resolved`) concludes its conversation like the user's own reply. `raw_event_type` values the seeded rules match: `review_requested`, `state_change`, `ci_activity`.
-- `content.metadata` always has `claude_code: true` and the platform's own keys (`slack_channel_id`, `slack_channel_name`, `slack_channel_type`, `slack_thread_ts`, `gmail_thread_id`, `github_repo`, `github_reason`, `linear_status`, `notion_page_id`, `meeting`).
+- `content.metadata` always has `claude_code: true` and the platform's own keys (`slack_channel_id`, `slack_channel` (the same channel id, the key Slack egress reads), `slack_channel_name`, `slack_channel_type`, `slack_thread_ts`, `gmail_thread_id`, `gmail_message_id` (the newest message of the event; drafts are threaded by it), `github_repo`, `github_reason`, `linear_status`, `notion_page_id`, `meeting`, `linked_documents` (the links summarised in the body)).
+
+### Collector turns
+
+Each collector turn asks the model to make its independent tool calls in parallel in one step (every extra round re-reads the whole conversation) and to answer in compact field names (e.g. Slack `c`, `ts`, `th`, `u`, `n`, `t`) and the code maps them, builds permalinks / web links (Slack from the workspace subdomain, Gmail `https://mail.google.com/mail/?authuser=<email>#all/<thread id>`, Linear from the workspace slug, Notion `https://www.notion.so/<page id>`), groups, filters and titles. The prompts set hard caps:
+
+| Platform | Turns and caps |
+|---|---|
+| slack | search turn: three searches in parallel, `with:<@me>` (DMs, group DMs and threads the user is in), keyword `<@me>` with `-from:<@me>` (mentions), `from:<@me>`; `response_format=detailed`, `include_context=false`, 20 results, a second page only after a full first page; no thread or channel reads; of the user's own messages only the newest per conversation. Context turn only when needed (see above): all reads in parallel, at most 8 conversations, `read_channel` with `limit=context_messages`, `read_thread` with `limit=50`. Text at most 1500 characters (own messages 500, context 600) |
+| gmail | `search_threads` `THREAD_VIEW_MINIMAL`, 20 threads, at most 2 pages; own mails keep their snippet; mails from others are read one by one (`get_message`, else `get_thread`), at most 15, body = newest part only, at most 1200 characters |
+| notion | own pages and pages naming the user, 10 each, edited since the window's day; comments of at most 12 pages; mentions from the search highlight (300 characters), no page fetches; text at most 1500 characters |
+| linear | notifications since the window; assigned issues `limit=25`; comment text at most 1500 characters, descriptions 500 |
 
 ### Config (per platform, `claude_code_sources.config`)
 
 | Platform | Keys (defaults) |
 |---|---|
 | all | `interval_minutes` 60, `active_hours` {start "08:00", end "19:00", days [0..4]}, `timezone` (system), `model` "haiku", `initial_lookback_hours` 12, `recheck_after_hours` 6 |
-| slack | `context_messages` 8, `thread_memory_days` 14, `only_relevant` true (DMs, mentions, own messages, threads the user wrote in) |
-| gmail | `exclude_senders` [notifications@linear.app, notifications@github.com, noreply@github.com, notify@mail.notion.com], `meeting_notes` true |
+| slack | `context_messages` 8, `thread_memory_days` 14, `only_relevant` true (DMs, mentions, own messages, threads the user wrote in), `linked_documents` true |
+| gmail | `exclude_senders` [notifications@linear.app, notifications@github.com, noreply@github.com, notify@mail.notion.com], `meeting_notes` true, `linked_documents` true |
 | github | `orgs` [] (empty = all), `others_prs_only_on_mention` true |
-| linear, notion | none beyond "all" |
+| linear, notion | `linked_documents` true |
+
+### Linked documents (`links.py`)
+
+An enricher (`register_enricher`) over the Slack, Gmail, Linear and Notion events of every sweep, switched per platform by `linked_documents`. It finds links in `content.body` to Notion pages (`notion.so` / `notion.site`, page id), Google Docs / Sheets / Slides / Drive files (file id) and GitHub issues / pull requests, skipping the event's own `subject.url`, and appends
+
+```
+Linked documents:
+- <title> (<link>): <2-4 sentence summary or the relevant excerpt>
+```
+
+- At most 3 links per event, in order of appearance, one entry per document.
+- GitHub: `gh api repos/<owner>/<repo>/issues/<n>`, no model turn; the entry is the state (open / closed / merged) and the start of the description.
+- Notion and Google: one batched `claude -p` turn per event (step `claude_code_links`, the platform's `model`) that may only use the discovered Notion fetch tool and the Drive read tool (`drive_read`); every other MCP tool is denied.
+- Every result, also "could not be read", is cached in `claude_code_state` (platform `links`, key `link:<kind>:<id>`) for 24 h; a failed turn caches nothing.
+- While the agent budget is paused no model turn runs; cached entries and GitHub entries are still added.
+- A failure leaves the event as it was.
 
 ### REST API (`api.py`, auth like every router)
 

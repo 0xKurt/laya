@@ -16,6 +16,7 @@ from __future__ import annotations
 import html
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 from laya.claude_code.platforms.common import (
     dedupe,
@@ -31,37 +32,45 @@ from laya.models.event import LayaEvent
 PLATFORM = "gmail"
 MEETING_NOTES_SENDER = "gemini-notes@google.com"
 
+# Hard caps of one sweep.
+SEARCH_PAGE_SIZE = 20  # threads per search page
+SEARCH_PAGES = 2
+BODY_CHARS = 1200  # characters kept of a mail body (newest part only)
+READS_PER_SWEEP = 15  # mails from others whose body is read
+
+# Compact field names keep the model's output short; `expand_message` maps
+# them onto the names the rest of the module uses.
 SCHEMA = {
     "type": "object",
     "properties": {
-        "messages": {
+        "m": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
-                    "message_id": {"type": "string"},
-                    "thread_id": {"type": "string"},
-                    "date": {"type": "string"},
-                    "from_name": {"type": "string"},
-                    "from_email": {"type": "string"},
+                    "id": {"type": "string", "description": "message id"},
+                    "th": {"type": "string", "description": "thread id"},
+                    "d": {"type": "string", "description": "date, ISO 8601"},
+                    "fn": {"type": "string", "description": "sender name"},
+                    "fe": {"type": "string", "description": "sender email"},
                     "to": {"type": "array", "items": {"type": "string"}},
                     "cc": {"type": "array", "items": {"type": "string"}},
-                    "subject": {"type": "string"},
-                    "body": {"type": "string"},
-                    "labels": {"type": "array", "items": {"type": "string"}},
-                    "url": {"type": "string"},
-                    "kind": {"type": "string", "enum": ["email", "meeting_notes"]},
+                    "s": {"type": "string", "description": "subject"},
+                    "b": {"type": "string", "description": "body"},
+                    "k": {"type": "string", "enum": ["email", "meeting_notes"]},
+                    "u": {"type": ["string", "null"], "description": "notes document link (meeting notes only)"},
                 },
-                "required": ["message_id", "thread_id", "date", "from_email", "subject", "body", "url", "kind"],
+                "required": ["id", "th", "d", "fe", "s", "b", "k"],
             },
         },
     },
-    "required": ["messages"],
+    "required": ["m"],
 }
 
 
 def build_prompt(
     tools: dict[str, str], since: datetime, exclude: list[str], name: str, meeting_notes: bool,
+    me: str = "",
 ) -> str:
     after = int(since.timestamp())
     excluded = " ".join(f"-from:{s}" for s in exclude)
@@ -74,21 +83,55 @@ def build_prompt(
             if drive else "Use the mail text."
         )
         notes = f"""
-Mails from {MEETING_NOTES_SENDER} are meeting notes: set kind="meeting_notes". {open_doc}
-Put into body: the meeting title on the first line; then "Action items for {name}:" with
+Mails from {MEETING_NOTES_SENDER} are meeting notes: set k="meeting_notes". {open_doc}
+Put into b: the meeting title on the first line; then "Action items for {name}:" with
 every action item or next step assigned to {name} or to everyone, one per line starting
 with "- ", with its due date if given; "Decisions:" with the decisions taken, one per line
 starting with "- "; "Waiting on others:" with items {name} asked others for, one per line
-starting with "- ". Leave a heading out when it has no lines. Use the document's link as
-url when you opened it."""
-    return f"""You are a data collector. Copy data exactly; do not judge relevance.
-Use {tools['search']} with query "after:{after} -category:promotions -category:social {excluded}"
-(pageSize 25, up to 2 pages). This includes mails I sent. For every thread found, call
-{tools['get_thread']} and return each message dated after unix time {after}: message_id,
-thread_id, date (ISO 8601), from_name, from_email, to, cc, subject, the plain-text body
-(newest part only, without quoted history, at most 2000 characters), labels and the
-message's web link as url. Set kind="email".{notes}
-Return {{"messages": []}} if there is nothing."""
+starting with "- ". Leave a heading out when it has no lines. Set u to the document's link
+when you opened it."""
+    read = tools.get("get_message")
+    read_step = (
+        f"call {read} (messageFormat PLAIN_TEXT) on that message" if read
+        else f"call {tools['get_thread']} (messageFormat PLAIN_TEXT) once for its thread"
+    )
+    mine = f" (from {me})" if me else ""
+    return f"""You are a data collector. Copy data exactly; do not judge relevance or summarize.
+1. {tools['search']} with query "after:{after} -category:promotions -category:social {excluded}",
+   pageSize {SEARCH_PAGE_SIZE}, view THREAD_VIEW_MINIMAL; follow pageToken at most {SEARCH_PAGES - 1} time.
+2. Take each listed message dated after unix time {after}. Mine{mine}: b = its snippet, no
+   further call. From someone else: {read_step}; make all these reads in parallel in ONE step
+   (at most {READS_PER_SWEEP}, newest first) and set b = only the newest part of the plain-text
+   body: no quoted history, no signature, at most {BODY_CHARS} characters.
+Return per message in "m": id, th = thread id, d = date (ISO 8601), fn / fe = sender name /
+email, to, cc, s = subject, b, k="email".{notes}
+Call no other tool. Return {{"m": []}} if there is nothing."""
+
+
+def thread_url(thread_id: str, account: str = "") -> str:
+    """The Gmail web link of a thread (opened in the given account when known)."""
+    auth = f"?authuser={quote(account)}" if account else ""
+    return f"https://mail.google.com/mail/{auth}#all/{thread_id}"
+
+
+def expand_message(m: dict[str, Any], account: str = "") -> dict[str, Any]:
+    """A compact turn message in the module's own field names."""
+    kind = m.get("k") or "email"
+    url = (m.get("u") if kind == "meeting_notes" else None) or thread_url(m.get("th") or "", account)
+    return {
+        "message_id": m.get("id") or "",
+        "thread_id": m.get("th") or "",
+        "date": m.get("d") or "",
+        "from_name": m.get("fn") or "",
+        "from_email": m.get("fe") or "",
+        "to": list(m.get("to") or []),
+        "cc": list(m.get("cc") or []),
+        # Mail text comes back with HTML entities (`&quot;`) left in.
+        "subject": html.unescape(m.get("s") or ""),
+        "body": html.unescape(m.get("b") or "")[: BODY_CHARS if kind == "email" else None],
+        "url": url,
+        "kind": kind,
+    }
 
 
 def meeting_sections(body: str) -> tuple[str, dict[str, list[str]]]:
@@ -161,7 +204,8 @@ def _event(msgs: list[dict[str, Any]]) -> LayaEvent:
         body=body,
         metadata={
             "gmail_thread_id": last["thread_id"],
-            "gmail_labels": last.get("labels") or [],
+            # Replies are threaded by the newest message's id (create_draft).
+            "gmail_message_id": last["message_id"],
             "gmail_from": sender,
             "gmail_to": last.get("to") or [],
             "gmail_cc": last.get("cc") or [],
@@ -191,14 +235,11 @@ def build_events(messages: list[dict[str, Any]], mine: set[str]) -> list[LayaEve
 
 async def collect(source: dict[str, Any], since: datetime) -> list[LayaEvent]:
     config = source.get("config") or {}
+    account = (source.get("identity") or {}).get("email") or ""
     prompt = build_prompt(
         source["tools"], since, list(config.get("exclude_senders") or []),
-        my_name(source), bool(config.get("meeting_notes", True)),
+        my_name(source), bool(config.get("meeting_notes", True)), me=account,
     )
     out = await run_turn(source, PLATFORM, prompt, SCHEMA)
-    messages = [
-        # Mail bodies come back with HTML entities (`&quot;`) left in.
-        {**m, "body": html.unescape(m.get("body") or ""), "subject": html.unescape(m.get("subject") or "")}
-        for m in out.get("messages", []) if m.get("message_id") and m.get("thread_id")
-    ]
+    messages = [expand_message(m, account) for m in out.get("m", []) if m.get("id") and m.get("th")]
     return build_events(messages, my_emails(source))

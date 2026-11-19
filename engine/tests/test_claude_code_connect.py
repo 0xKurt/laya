@@ -480,3 +480,42 @@ async def test_api_discover_forces_a_new_run(db, files):
             resp = await client.post("/claude-code/discover")
     assert resp.status_code == 200
     assert run.await_args.kwargs == {"force": True, "with_identity": True}
+
+
+@pytest.mark.asyncio
+async def test_api_discover_refreshes_stored_tool_names(db, files):
+    await connect.connect("slack")
+    await connect.connect("gmail")
+    renamed = {k: v.replace("mcp__s__", "mcp__claude_ai_Slack__") for k, v in SLACK_TOOLS.items()}
+    fresh = _discovery(
+        slack=PlatformDiscovery(available=True, tools=renamed, identity={"slack_user_id": "U_ME"}),
+        # An unavailable platform keeps the names it had.
+        gmail=PlatformDiscovery(available=False, problem="needs auth"),
+    )
+    with patch.object(discover, "discover", new_callable=AsyncMock, return_value=fresh):
+        async with await _client() as client:
+            resp = await client.post("/claude-code/discover")
+    assert resp.status_code == 200
+    assert (await store.get_source("slack"))["tools"] == renamed
+    assert (await store.get_source("gmail"))["tools"] == {"search": "g1", "get_thread": "g2"}
+    assert await discover.refresh_stored_tools(fresh) == []
+
+
+@pytest.mark.asyncio
+async def test_sweep_after_restart_uses_refreshed_tool_names(db, files):
+    await connect.connect("slack")
+    renamed = {**SLACK_TOOLS, "search": "mcp__new__search"}
+    fresh = _discovery(slack=PlatformDiscovery(available=True, tools=renamed, identity={"slack_user_id": "U_ME"}))
+    discover.reset_cache()
+    seen = {}
+
+    async def collector(source, since):
+        seen.update(source)
+        return []
+
+    with patch.object(discover, "discover", new_callable=AsyncMock, return_value=fresh), \
+         patch.dict(service.COLLECTORS, {"slack": collector}), \
+         patch("laya.claude_code.recheck.recheck", new_callable=AsyncMock, return_value=[]):
+        await service.sweep("slack")
+    assert seen["tools"]["search"] == "mcp__new__search"
+    assert seen["deny_tools"] == fresh.all_tools
