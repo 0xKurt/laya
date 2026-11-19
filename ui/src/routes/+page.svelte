@@ -2,5 +2,5 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	goto('/feed');
+	goto('/board', { replaceState: true });
 </script>
