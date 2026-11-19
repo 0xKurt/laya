@@ -551,7 +551,7 @@ async def test_connect_without_api_key_uses_subscription_models(db, files):
     assert models["router"] == "agent/claude_code/haiku"
     assert models["stager"] == "agent/claude_code/sonnet"
     assert models["omni"] == "ollama/llama3"          # a local model the user chose stays
-    assert models["chat"] == "claude-sonnet-4-6"      # roles outside the subscription set stay
+    assert models["chat"] == "agent/claude_code/sonnet"
 
 
 @pytest.mark.asyncio
@@ -560,3 +560,14 @@ async def test_connect_with_api_key_keeps_models(db, files):
     before = copy.deepcopy(files.settings)
     await connect.connect("slack")
     assert files.settings == before
+
+
+
+@pytest.mark.asyncio
+async def test_service_start_switches_models_when_sources_exist(db, files):
+    await connect.connect("slack")
+    files.settings["models"]["router"] = "claude-haiku-4-5"   # e.g. set up before the default
+    with patch.object(service, "_loop", new_callable=AsyncMock):
+        await service.start_service()
+        await service.stop_service()
+    assert files.settings["models"]["router"] == "agent/claude_code/haiku"

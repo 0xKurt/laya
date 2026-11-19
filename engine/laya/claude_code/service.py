@@ -183,6 +183,12 @@ async def _loop() -> None:
 async def start_service() -> None:
     global _task
     await store.ensure_tables()
+    if await store.list_sources():
+        # Also on start, so an install connected before this default existed
+        # (or set up without an API key) gets subscription models without edits.
+        from laya.claude_code.connect import use_subscription_models
+
+        use_subscription_models()
     if _task is None or _task.done():
         _task = asyncio.create_task(_loop(), name="claude_code_service")
         log.info("claude_code_service_started")

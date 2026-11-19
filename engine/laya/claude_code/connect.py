@@ -201,6 +201,8 @@ SUBSCRIPTION_MODELS = {
     "router": "agent/claude_code/haiku",
     "stager": "agent/claude_code/sonnet",
     "omni": "agent/claude_code/haiku",
+    "chat": "agent/claude_code/sonnet",
+    "trace": "agent/claude_code/sonnet",
 }
 
 
