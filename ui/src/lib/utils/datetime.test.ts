@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { parseBackendDate, timeAgo } from './datetime';
+import { parseBackendDate, timeAgo, cardTimeTooltip } from './datetime';
 
 describe('parseBackendDate', () => {
 	it('returns null for empty/nullish input', () => {
@@ -85,5 +85,23 @@ describe('timeAgo', () => {
 	it('does not switch to weeks below 7 days even with weeks:true', () => {
 		freezeAt('2026-07-07T12:00:00Z'); // 6 days
 		expect(timeAgo('2026-07-01 12:00:00', { weeks: true })).toBe('6d ago');
+	});
+});
+
+describe('cardTimeTooltip', () => {
+	const fmt = (s: string) => `<${s}>`;
+
+	it('gives the source time and the card time', () => {
+		expect(cardTimeTooltip('2026-11-19 08:00:00', '2026-11-19 09:00:00', fmt)).toBe(
+			'Last message: <2026-11-19 08:00:00> · Card created: <2026-11-19 09:00:00>'
+		);
+	});
+
+	it('falls back to the card time without a source time', () => {
+		expect(cardTimeTooltip(undefined, '2026-11-19 09:00:00', fmt)).toBe('<2026-11-19 09:00:00>');
+	});
+
+	it('gives the source time alone without a card time', () => {
+		expect(cardTimeTooltip('2026-11-19 08:00:00', null, fmt)).toBe('Last message: <2026-11-19 08:00:00>');
 	});
 });

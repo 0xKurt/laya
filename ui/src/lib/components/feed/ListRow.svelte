@@ -9,7 +9,7 @@
 	import { portal } from '$lib/actions/portal';
 	import StatusDot from './StatusDot.svelte';
 	import { platformDotColor, platformKey, PRIORITY_LABELS, PRIORITY_COLORS } from '$lib/utils/cardVisuals';
-	import { timeAgo } from '$lib/utils/datetime';
+	import { timeAgo, cardTimeTooltip, parseBackendDate } from '$lib/utils/datetime';
 
 	let {
 		card,
@@ -350,7 +350,10 @@
 	</span>
 
 	<!-- Time — fixed width -->
-	<span class="col-time w-[52px] shrink-0 text-right text-laya-micro text-surface-500 whitespace-nowrap">{timeAgo(card.created_at)}</span>
+	<span
+		class="col-time w-[52px] shrink-0 text-right text-laya-micro text-surface-500 whitespace-nowrap"
+		title={cardTimeTooltip(card.event_timestamp, card.created_at, (s) => parseBackendDate(s)?.toLocaleString() ?? '')}
+	>{timeAgo(card.event_timestamp ?? card.created_at)}</span>
 	</div>
 </div>
 </div>

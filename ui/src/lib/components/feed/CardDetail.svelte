@@ -8,7 +8,7 @@
 	import { chatOpen, chatCardContext, chatCardIds, chatListOpen } from '$lib/stores/chat';
 	import { buildSingleCardContext } from '$lib/utils/cardContext';
 	import { parseBackendDate } from '$lib/utils/datetime';
-	import { PRIORITY_LABELS, PRIORITY_COLORS } from '$lib/utils/cardVisuals';
+	import { PRIORITY_LABELS, PRIORITY_COLORS, platformLabel } from '$lib/utils/cardVisuals';
 	import { lastMessage } from '$lib/stores/websocket';
 	import MarkdownRender from '$lib/components/MarkdownRender.svelte';
 	import ClassificationDialog from './ClassificationDialog.svelte';
@@ -779,6 +779,20 @@
 						{/if}
 					</div>
 				{/if}
+				{#if card.source_url}
+					<!-- An explicit way back to the source; the layout opens it in the default browser. -->
+					<a
+						href={card.source_url}
+						target="_blank"
+						rel="noopener noreferrer"
+						class="mb-1.5 inline-flex w-fit items-center gap-1.5 rounded-md border border-surface-700 px-2.5 py-1 text-laya-secondary font-medium text-surface-200 transition-colors hover:border-laya-orange/60 hover:text-laya-orange"
+					>
+						Open in {platformLabel(card.entity_id?.split(':')[0] || 'source')}
+						<svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+						</svg>
+					</a>
+				{/if}
 				{#if card.actor_name}
 					<div class="flex items-center gap-1.5 min-w-0">
 						<span class="shrink-0 text-laya-micro font-semibold uppercase tracking-wider text-surface-500">Actor</span>
@@ -1080,6 +1094,9 @@
 					</span>
 				{:else}
 					<span class={statusColors[card.status] ?? 'text-surface-400'}>Status: {statusLabels[card.status] ?? card.status}</span>
+				{/if}
+				{#if card.event_timestamp}
+					<span>Last message: {parseBackendDate(card.event_timestamp)?.toLocaleString()}</span>
 				{/if}
 				{#if card.created_at}
 					<span>Created: {parseBackendDate(card.created_at)?.toLocaleString()}</span>

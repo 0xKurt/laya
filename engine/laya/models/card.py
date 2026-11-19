@@ -113,6 +113,9 @@ class CardResponse(BaseModel):
     card_id: str
     event_id: str
     created_at: str | None = None
+    # When the source event happened (for a conversation: its latest message).
+    # created_at is when Laya made the card.
+    event_timestamp: str | None = None
     priority: str
     persona: str
     category: str

@@ -56,3 +56,19 @@ export function timeAgo(
 	if (opts?.weeks && days >= 7) return `${Math.floor(days / 7)}w ago`;
 	return `${days}d ago`;
 }
+
+/**
+ * Tooltip text for a card's time: when the source event happened (a
+ * conversation's latest message) and when Laya made the card. A card without
+ * a source time shows the card time alone.
+ */
+export function cardTimeTooltip(
+	eventTimestamp: string | null | undefined,
+	createdAt: string | null | undefined,
+	format: (dateStr: string) => string
+): string {
+	const created = createdAt ? format(createdAt) : '';
+	if (!eventTimestamp) return created;
+	const source = `Last message: ${format(eventTimestamp)}`;
+	return created ? `${source} · Card created: ${created}` : source;
+}

@@ -549,6 +549,8 @@ export interface ActionCard {
 	card_id: string;
 	event_id: string;
 	created_at?: string;
+	/** When the source event happened (a conversation's latest message); created_at is when Laya made the card. */
+	event_timestamp?: string;
 	priority: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 	persona: 'ENGINEER' | 'COMMS' | 'OPS' | 'SALES' | 'HR' | 'FINANCE';
 	category: string;

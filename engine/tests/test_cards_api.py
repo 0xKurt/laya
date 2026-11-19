@@ -87,6 +87,19 @@ class TestCardsAPI:
         assert data["staged_output"]["type"] == "code_fix"
         assert len(data["suggested_actions"]) == 1
 
+    async def test_cards_carry_source_event_timestamp(self, db):
+        """Card responses expose the source event's time next to created_at."""
+        await insert_test_card(db)
+
+        from laya.main import app
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            detail = (await client.get("/cards/card_test")).json()
+            listed = (await client.get("/cards")).json()["cards"][0]
+
+        assert detail["event_timestamp"] == "2026-02-22T14:30:00Z"
+        assert listed["event_timestamp"] == "2026-02-22T14:30:00Z"
+
     async def test_get_card_404(self, db):
         """GET /cards/:card_id returns 404 for non-existent card."""
         from laya.main import app
