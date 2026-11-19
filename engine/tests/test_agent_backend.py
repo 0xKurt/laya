@@ -168,3 +168,15 @@ def test_router_defaults_to_haiku_on_bare_claude_code():
     assert ab.apply_stage_default_model("router", "agent/claude_code/claude-sonnet-4-6") == "agent/claude_code/claude-sonnet-4-6"
     assert ab.apply_stage_default_model("stager", "agent/claude_code") == "agent/claude_code"
     assert ab.apply_stage_default_model("router", "agent/codex_cli") == "agent/codex_cli"
+
+
+def test_claude_inference_uses_configured_second_account(monkeypatch):
+    monkeypatch.setattr(ab, "get_inference_config_dir", lambda agent_id: "/Users/x/.claude-laya")
+    _, env = _args("claude_code")
+    assert env["CLAUDE_CONFIG_DIR"] == "/Users/x/.claude-laya"
+
+
+def test_claude_inference_defaults_to_the_main_account(monkeypatch):
+    monkeypatch.setattr(ab, "get_inference_config_dir", lambda agent_id: None)
+    _, env = _args("claude_code")
+    assert "CLAUDE_CONFIG_DIR" not in env

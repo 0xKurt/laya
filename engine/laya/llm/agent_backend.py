@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -261,6 +262,14 @@ def _validate_against_schema(parsed: dict, response_schema: dict) -> tuple[bool,
 # ── per-agent process runner ─────────────────────────────────────────────
 
 
+def get_inference_config_dir(agent_id: str) -> str | None:
+    """`agent_config_dirs.<agent_id>` from settings, expanded; None when unset."""
+    from laya.config import load_settings
+
+    configured = (load_settings().get("agent_config_dirs") or {}).get(agent_id) or ""
+    return os.path.expanduser(configured) if configured else None
+
+
 def _build_args(
     agent_id: str,
     binary: str,
@@ -311,6 +320,13 @@ def _build_args(
         if native and response_schema:
             schema = response_schema.get("schema", response_schema)
             args += ["--json-schema", json.dumps(schema)]
+        # Inference can run on a second Claude account: a separate config dir holds its
+        # own login, so these calls draw on that account's usage limits instead of the
+        # one the user codes with. The MCP collector keeps the default account, which
+        # owns the connectors.
+        config_dir = get_inference_config_dir(agent_id)
+        if config_dir:
+            env["CLAUDE_CONFIG_DIR"] = config_dir
         return args, env
 
     if agent_id == "pi_cli":
