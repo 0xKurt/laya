@@ -7,6 +7,7 @@ import type {
 	Settings,
 	ReposConfig,
 	ActionCard,
+	BoardLane,
 	SourceEvent,
 	CardsListResponse,
 	GroupedCardsResponse,
@@ -373,6 +374,13 @@ export const engineApi = {
 	archiveCard: (cardId: string) =>
 		request<{ status: string; card_id: string }>(`/cards/${cardId}/archive`, {
 			method: 'POST'
+		}),
+	getBoard: (spaceId?: string) =>
+		request<ActionCard[]>(spaceId ? `/board?space_id=${encodeURIComponent(spaceId)}` : '/board'),
+	setCardLane: (cardId: string, lane: BoardLane) =>
+		request<{ card_id: string; lane: BoardLane }>(`/cards/${cardId}/lane`, {
+			method: 'PUT',
+			body: JSON.stringify({ lane })
 		}),
 	reopenCard: (cardId: string) =>
 		request<{ status: string; card_id: string }>(`/cards/${cardId}/reopen`, {

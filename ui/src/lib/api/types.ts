@@ -545,12 +545,16 @@ export interface TagAssignment {
 	assigned_by: string;
 }
 
+export type BoardLane = 'backlog' | 'todo' | 'in_progress';
+
 export interface ActionCard {
 	card_id: string;
 	event_id: string;
 	created_at?: string;
 	/** When it happened in the source (last message of the conversation). */
 	event_timestamp?: string;
+	/** Board lane; null/undefined means backlog. */
+	board_lane?: BoardLane | null;
 	priority: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 	persona: 'ENGINEER' | 'COMMS' | 'OPS' | 'SALES' | 'HR' | 'FINANCE';
 	category: string;

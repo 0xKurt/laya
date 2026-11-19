@@ -114,6 +114,7 @@ class CardResponse(BaseModel):
     event_id: str
     created_at: str | None = None
     event_timestamp: str | None = None
+    board_lane: str | None = None
     priority: str
     persona: str
     category: str

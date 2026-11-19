@@ -31,6 +31,7 @@ from laya.api.connections_api import router as connections_router
 from laya.api.context_rules_api import router as context_rules_router
 from laya.api.egress_api import router as egress_router
 from laya.api.collector_api import router as collector_router
+from laya.api.board_api import router as board_router
 from laya.api.chat_api import router as chat_router
 from laya.api.dashboard_api import router as dashboard_router
 from laya.api.diagnostics_api import router as diagnostics_router
@@ -537,6 +538,7 @@ app.include_router(connections_router, dependencies=auth_deps)
 app.include_router(context_rules_router, dependencies=auth_deps)
 app.include_router(egress_router, dependencies=auth_deps)
 app.include_router(collector_router, dependencies=auth_deps)
+app.include_router(board_router, dependencies=auth_deps)
 app.include_router(chat_router, dependencies=auth_deps)
 app.include_router(dashboard_router, dependencies=auth_deps)
 app.include_router(diagnostics_router, dependencies=auth_deps)

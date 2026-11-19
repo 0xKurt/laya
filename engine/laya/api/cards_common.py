@@ -31,7 +31,7 @@ CARD_SELECT_COLUMNS = (
     "c.status_set_by, c.user_feedback, "
     "c.feedback_type, c.confidence, c.router_model, c.stager_model, c.updated_at, "
     "c.entity_id, c.source_ref, c.source_url, c.selected_action_id, "
-    "c.space_id, c.bookmarked_at, c.read_at, c.group_active_at, c.context_id, "
+    "c.space_id, c.bookmarked_at, c.read_at, c.group_active_at, c.context_id, c.board_lane, "
     "e.actor_name, e.actor_email, e.content_metadata, e.timestamp AS event_timestamp, "
     "s.name AS space_name, s.color AS space_color"
 )
@@ -92,6 +92,7 @@ def _row_to_card(row, slim: bool = False) -> CardResponse:
         # When it happened in the source (the last message of a conversation), as
         # opposed to created_at, when Laya made the card.
         event_timestamp=row["event_timestamp"] if "event_timestamp" in row.keys() else None,
+        board_lane=row["board_lane"] if "board_lane" in row.keys() else None,
         priority=row["priority"],
         persona=row["persona"],
         category=row["category"],
