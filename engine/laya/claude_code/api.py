@@ -93,6 +93,19 @@ async def put_config(platform: str, config: dict[str, Any] = Body(...)) -> dict[
     return platform_status(platform, discover_mod.cached(), await store.get_source(platform))
 
 
+@router.put("/{platform}/enabled")
+async def put_enabled(platform: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """Pause or resume a connected platform's sweeps without disconnecting it."""
+    _check_platform(platform)
+    if await store.get_source(platform) is None:
+        raise HTTPException(status_code=404, detail=f"{store.LABELS[platform]} is not connected")
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=422, detail="'enabled' must be true or false")
+    await store.upsert_source(platform, enabled=enabled)
+    return platform_status(platform, discover_mod.cached(), await store.get_source(platform))
+
+
 @router.post("/{platform}/sync")
 async def sync_platform(platform: str) -> dict[str, Any]:
     _check_platform(platform)

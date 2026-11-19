@@ -456,6 +456,13 @@ async def test_api_status_connect_config_sync_disconnect(db, files):
         assert resp.status_code == 200 and resp.json()["config"]["interval_minutes"] == 15
         assert (await client.put("/claude-code/slack/config", json={"bogus": 1})).status_code == 422
 
+        resp = await client.put("/claude-code/slack/enabled", json={"enabled": False})
+        assert resp.status_code == 200 and resp.json()["enabled"] is False
+        assert (await client.put("/claude-code/slack/enabled", json={"enabled": "no"})).status_code == 422
+        assert (await client.put("/claude-code/gmail/enabled", json={"enabled": True})).status_code == 404
+        resp = await client.put("/claude-code/slack/enabled", json={"enabled": True})
+        assert resp.json()["enabled"] is True
+
         with patch.object(service, "sweep", new_callable=AsyncMock, return_value={"events": 3, "error": None}):
             resp = await client.post("/claude-code/slack/sync")
         assert resp.json() == {"events": 3, "error": None}

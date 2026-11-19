@@ -88,6 +88,7 @@ On connect the module inserts (replacing a row auto-registered for the same work
 | POST | `/claude-code/{platform}/connect` | `{space_id?}` → creates the source, identity and rules, returns the platform status |
 | DELETE | `/claude-code/{platform}` | disconnects: source row, module rows, the platform's seeded rules |
 | PUT | `/claude-code/{platform}/config` | the full config object for the platform |
+| PUT | `/claude-code/{platform}/enabled` | `{enabled: bool}` → pauses or resumes the platform's sweeps, returns the platform status |
 | POST | `/claude-code/{platform}/sync` | sweeps now, returns `{events, error}` |
 
 ### Seeded rules (idempotent by name, through the rules API)
