@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from laya.api.websocket import manager
 from laya.db.sqlite import get_db
 from laya.db.timeutil import db_now
+from laya.sessions.effort import staged_output_keeping_effort
 from laya.tasks import create_task as create_tracked_task
 
 log = structlog.get_logger()
@@ -123,7 +124,12 @@ async def _run_agent_session_stream(
             staged_type = "agent_plan" if agent_plan else "agent_result"
             await db_fin.execute(
                 "UPDATE action_cards SET staged_output = ?, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
-                (json.dumps({"type": staged_type, "content": staged_content}), broadcast_card_id),
+                (
+                    await staged_output_keeping_effort(
+                        db_fin, broadcast_card_id, {"type": staged_type, "content": staged_content}
+                    ),
+                    broadcast_card_id,
+                ),
             )
 
         has_unanswered = await session_manager.has_unanswered_questions(session_id)

@@ -17,11 +17,30 @@ from pydantic import BaseModel, Field
 PROCESSING_PLACEHOLDER_SUMMARY = "Researching\u2026"
 
 
+class Effort(BaseModel):
+    """Estimated effort of a card's work, split by who spends it.
+
+    `you_minutes` is the user's own time: deciding, reviewing, testing,
+    talking. `agent_minutes` is the time a coding session (Claude Code) spends
+    on the work it can do alone (code, tests, write-ups); it does not count
+    against the user's hours.
+    """
+
+    you_minutes: int = Field(ge=0)
+    agent_minutes: int = Field(ge=0)
+    # One short phrase saying what the estimate rests on.
+    basis: str = ""
+    # "stager" for the pipeline's estimate, "user" once the user corrected it.
+    set_by: str = "stager"
+
+
 class StagedOutput(BaseModel):
     """Primary deliverable attached to an action card."""
 
     type: str  # "draft_reply", "code_fix", "briefing", "summary", "status_update"
     content: str
+    # Stored inside the staged_output JSON so the card table needs no column.
+    effort: Effort | None = None
 
 
 class SuggestedAction(BaseModel):
@@ -153,6 +172,9 @@ class CardResponse(BaseModel):
     context_id: str | None = None
     last_error: str | None = None
     source_context: str | None = None
+    # Copy of staged_output.effort. It is filled on the slim list payload too,
+    # which leaves staged_output out, so lists and the board can show it.
+    effort: Effort | None = None
     tags: list[TagAssignment] = Field(default_factory=list)
 
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 
-from laya.models.card import CardResponse, StagedOutput, SuggestedAction
+from laya.models.card import CardResponse, Effort, StagedOutput, SuggestedAction
 
 # Canonical column projection for a card row destined for _row_to_card. It was
 # hand-copied into five SELECTs (grouped + list + get_card + trace + trace_api)
@@ -62,9 +62,15 @@ def _row_to_card(row, slim: bool = False) -> CardResponse:
             intelligence = None
 
     staged_output = None
-    if not slim and row["staged_output"]:
+    effort = None
+    if row["staged_output"]:
         try:
-            staged_output = StagedOutput(**json.loads(row["staged_output"]))
+            raw_staged = json.loads(row["staged_output"])
+            if not slim:
+                staged_output = StagedOutput(**raw_staged)
+                effort = staged_output.effort
+            elif isinstance(raw_staged, dict) and isinstance(raw_staged.get("effort"), dict):
+                effort = Effort(**raw_staged["effort"])
         except (json.JSONDecodeError, Exception):
             staged_output = None
 
@@ -125,4 +131,5 @@ def _row_to_card(row, slim: bool = False) -> CardResponse:
         context_id=row["context_id"] if "context_id" in row.keys() else None,
         last_error=row["last_error"] if "last_error" in row.keys() else None,
         source_context=source_context,
+        effort=effort,
     )

@@ -25,6 +25,7 @@ from laya.models.workspace import (
     WorkspaceEventActor,
     WorkspaceEventType,
 )
+from laya.sessions.effort import staged_output_keeping_effort
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -344,7 +345,12 @@ async def _run_resumed_session(
                 staged_type = "agent_plan" if agent_plan else "agent_result"
                 await db.execute(
                     "UPDATE action_cards SET staged_output = ?, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
-                    (json.dumps({"type": staged_type, "content": staged_content}), card_id),
+                    (
+                        await staged_output_keeping_effort(
+                            db, card_id, {"type": staged_type, "content": staged_content}
+                        ),
+                        card_id,
+                    ),
                 )
 
             # If there are unanswered questions, keep card as awaiting_input
