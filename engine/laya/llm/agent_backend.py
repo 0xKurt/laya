@@ -22,25 +22,34 @@ Capability tiers (validated against the real CLIs):
     a text instruction (the same one client.py uses for local providers), parse the
     JSON out of the reply, validate it, and retry on failure.
 
-Out of scope (handled on the LiteLLM/local path): streaming chat + Coherence, which
-need a multi-round tool loop the agents can't run for us.
+Streaming chat + Coherence (Claude Code only): :func:`agent_llm_stream` runs one
+``claude -p`` turn with partial messages and yields Laya ``StreamEvent``s. When the
+caller offers tools, the agent runs the tool loop itself against Laya's own MCP
+endpoint, with a short-lived token limited to the read tools the caller offered
+(:mod:`laya.mcp.turn_tokens`); tool use is reported as ``tool_status`` events and
+the turn ends with no tool calls left for the caller to execute.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import tempfile
 import time
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from laya.agents.subprocess_helper import AgentProcess
 from laya.config import detect_agent_paths, get_agent_binary
+
+if TYPE_CHECKING:
+    from laya.llm.client import LLMResponse, StreamEvent
 
 log = structlog.get_logger()
 
@@ -659,4 +668,485 @@ async def agent_llm_call(
         effective_model=last_extra.get("effective_model", ""),
         cost_usd=last_extra.get("cost_usd"),
         rate_limit_info=last_extra.get("rate_limit_info"),
+    )
+
+
+# ── streaming turn (chat / Coherence) ────────────────────────────────────
+
+# Name of Laya's own MCP server in a turn's --mcp-config; Claude Code exposes its tools
+# as ``mcp__laya__<tool>``.
+LAYA_MCP_SERVER_NAME = "laya"
+_LAYA_TOOL_PREFIX = f"mcp__{LAYA_MCP_SERVER_NAME}__"
+
+# Directive ahead of a streaming turn's own system prompt (chat / Coherence). The chat
+# prompt is conversational, so this directive keeps the reply addressed to the user
+# instead of the non-interactive "inference engine" framing used for pipeline stages.
+_STREAM_DIRECTIVE = (
+    "You are the language model behind Laya, a desktop app, answering inside its chat "
+    "or narrative view. Reply to the user directly, following the instructions below. "
+    "You have no filesystem, shell or web access."
+)
+_STREAM_TOOLS_DIRECTIVE = (
+    " Laya's tools are available to you as MCP tools named `mcp__laya__<tool>` (for "
+    "example `mcp__laya__search_cards` for the tool the instructions call "
+    "`search_cards`). Only Laya's read tools are available in this session: you cannot "
+    "change cards, settings or rules, or prepare outbound messages here; when the user "
+    "asks for that, say it must be done in Laya's UI."
+)
+
+
+def laya_read_tool_names(tools: list[dict] | None) -> set[str]:
+    """Names of the read-scope tools among OpenAI-format tool definitions."""
+    if not tools:
+        return set()
+    from laya.llm.tools.definitions import read_tool_names
+
+    offered = {
+        (t.get("function") or {}).get("name")
+        for t in tools
+        if isinstance(t, dict)
+    }
+    return {n for n in offered if n} & read_tool_names()
+
+
+def build_turn_mcp_config(token: str, space_id: str | None) -> dict[str, Any]:
+    """MCP config for one turn: only Laya's Streamable HTTP endpoint, with a turn token."""
+    from urllib.parse import quote
+
+    from laya.config import ENGINE_HOST, ENGINE_PORT
+
+    url = f"http://{ENGINE_HOST}:{ENGINE_PORT}/mcp/"
+    if space_id:
+        url += f"?space_id={quote(space_id, safe='')}"
+    return {
+        "mcpServers": {
+            LAYA_MCP_SERVER_NAME: {
+                "type": "http",
+                "url": url,
+                "headers": {"Authorization": f"Bearer {token}"},
+            }
+        }
+    }
+
+
+def _write_private_json(data: dict[str, Any]) -> str:
+    """Write ``data`` to an owner-only temp file and return its path.
+
+    The MCP config carries a bearer token; a file argument keeps it out of the
+    process list, where an inline ``--mcp-config '<json>'`` would show it.
+    """
+    fd, path = tempfile.mkstemp(prefix="laya_agent_mcp_", suffix=".json")
+    try:
+        os.write(fd, json.dumps(data).encode("utf-8"))
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return path
+
+
+def _claude_stream_args(
+    binary: str,
+    system_text: str,
+    user_prompt: str,
+    model_string: str | None,
+    mcp_config_path: str | None = None,
+    allowed_tools: list[str] | None = None,
+) -> list[str]:
+    """argv for a streaming turn: the inference flags plus partial messages, and for a
+    tool turn Laya's MCP server with an allowlist of its tools."""
+    args, _ = _build_args(
+        "claude_code", binary, system_text, user_prompt, model_string, None, True
+    )
+    args.append("--include-partial-messages")
+    if mcp_config_path:
+        # --safe-mode also disables servers given through --mcp-config, so a tool turn
+        # runs without it. --strict-mcp-config (already set) keeps every other MCP
+        # server out, the empty --setting-sources keeps user/project settings and hooks
+        # out, and --tools "" removes all built-in tools.
+        args.remove("--safe-mode")
+        args += ["--tools", "", "--mcp-config", mcp_config_path]
+        for name in allowed_tools or []:
+            args += ["--allowedTools", f"{_LAYA_TOOL_PREFIX}{name}"]
+    return args
+
+
+def _short_tool_name(name: str) -> str:
+    return name[len(_LAYA_TOOL_PREFIX):] if name.startswith(_LAYA_TOOL_PREFIX) else name
+
+
+def _tool_result_text(content: Any) -> str:
+    if isinstance(content, list):
+        return "\n".join(
+            str(b.get("text", "")) for b in content if isinstance(b, dict)
+        )
+    return str(content or "")
+
+
+class ClaudeStreamParser:
+    """Turn ``claude -p --output-format stream-json --include-partial-messages`` lines
+    into stream items.
+
+    ``feed`` returns a list of items:
+      - ``("text", str)``: a piece of reply text;
+      - ``("tool", "calling", id, name, arguments)``: the agent called a tool;
+      - ``("tool", "done", id, name, arguments, result_text, is_error)``: its result.
+
+    Text comes from ``text_delta`` partial events. A message whose text arrived only as
+    a complete ``assistant`` event (no partial events) is emitted from that event, so
+    no text is lost or doubled. Text of consecutive assistant messages (before and after
+    a tool call) is separated by a blank line. Thinking blocks are not emitted.
+    """
+
+    def __init__(self) -> None:
+        self.result: dict | None = None
+        self.rate_limit_info: dict | None = None
+        self._current_msg: str | None = None
+        self._streamed_msgs: set[str] = set()
+        self._last_text_msg: str | None = None
+        self._pending_tools: dict[str, tuple[str, dict]] = {}
+        self.tools_used: list[str] = []
+
+    def _text(self, msg_id: str | None, text: str) -> tuple:
+        if self._last_text_msg is not None and msg_id != self._last_text_msg:
+            text = "\n\n" + text
+        self._last_text_msg = msg_id
+        return ("text", text)
+
+    def feed(self, line: str) -> list[tuple]:
+        line = line.strip()
+        if not line.startswith("{"):
+            return []
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            return []
+        etype = ev.get("type")
+        out: list[tuple] = []
+
+        if etype == "stream_event":
+            if ev.get("parent_tool_use_id"):
+                return []
+            inner = ev.get("event") or {}
+            itype = inner.get("type")
+            if itype == "message_start":
+                self._current_msg = (inner.get("message") or {}).get("id")
+            elif itype == "content_block_delta":
+                delta = inner.get("delta") or {}
+                if delta.get("type") == "text_delta" and delta.get("text"):
+                    if self._current_msg:
+                        self._streamed_msgs.add(self._current_msg)
+                    out.append(self._text(self._current_msg, delta["text"]))
+
+        elif etype == "assistant":
+            if ev.get("parent_tool_use_id"):
+                return []
+            msg = ev.get("message") or {}
+            msg_id = msg.get("id")
+            for block in msg.get("content") or []:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text" and block.get("text") and msg_id not in self._streamed_msgs:
+                    out.append(self._text(msg_id, block["text"]))
+                elif btype == "tool_use" and block.get("id"):
+                    tid = block["id"]
+                    if tid in self._pending_tools:
+                        continue
+                    name = _short_tool_name(str(block.get("name") or ""))
+                    args = block.get("input") if isinstance(block.get("input"), dict) else {}
+                    self._pending_tools[tid] = (name, args)
+                    self.tools_used.append(name)
+                    out.append(("tool", "calling", tid, name, args))
+
+        elif etype == "user":
+            if ev.get("parent_tool_use_id"):
+                return []
+            for block in (ev.get("message") or {}).get("content") or []:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                tid = block.get("tool_use_id")
+                name, args = self._pending_tools.pop(tid, ("", {}))
+                if not name:
+                    continue
+                out.append((
+                    "tool", "done", tid, name, args,
+                    _tool_result_text(block.get("content")), bool(block.get("is_error")),
+                ))
+
+        elif etype == "rate_limit_event":
+            self.rate_limit_info = ev.get("rate_limit_info")
+
+        elif etype == "result":
+            self.result = ev
+
+        return out
+
+
+async def _account_stream_turn(
+    model_id: str,
+    step: str,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    latency_ms: int,
+    success: bool,
+    error: str | None = None,
+    cost_usd: float | None = None,
+    rate_limit_info: dict | None = None,
+    tools_used: list[str] | None = None,
+    event_id: str | None = None,
+    card_id: str | None = None,
+) -> None:
+    """Audit + budget side effects of one streaming turn, matching llm_call's agent path:
+    the audit row (which also counts toward the daily agent call cap), the $ budget
+    check, the native rate-limit record and the window-budget evaluation."""
+    from laya.llm.client import log_to_audit
+
+    meta: dict[str, Any] = {"backend": "agent", "agent_model": model_id, "streaming": True}
+    if cost_usd is not None:
+        meta["cost_usd"] = cost_usd
+    if tools_used:
+        meta["agent_tools"] = tools_used
+    await log_to_audit(
+        event_id=event_id,
+        card_id=card_id,
+        step=step,
+        model=model_id,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        latency_ms=latency_ms,
+        success=success,
+        error=error,
+        metadata=meta,
+    )
+    if not success:
+        return
+    try:
+        from laya.pipeline.budget import check_budget
+        from laya.tasks import create_task as create_tracked_task
+
+        create_tracked_task(check_budget())
+    except Exception:
+        pass
+    try:
+        from laya.pipeline.agent_budget import evaluate_agent_budget, record_rate_limit
+        from laya.tasks import create_task as create_tracked_task
+
+        if rate_limit_info:
+            await record_rate_limit(parse_agent_model_id(model_id)[0], rate_limit_info)
+        create_tracked_task(evaluate_agent_budget())
+    except Exception:
+        pass
+
+
+async def agent_llm_stream(
+    model_id: str,
+    messages: list[dict[str, Any]],
+    *,
+    step: str = "chat",
+    tools: list[dict] | None = None,
+    space_id: str | None = None,
+    event_id: str | None = None,
+    card_id: str | None = None,
+) -> AsyncGenerator["StreamEvent", None]:
+    """Run one streaming turn on an agent model and yield Laya ``StreamEvent``s.
+
+    Yields ``chunk`` events for reply text, ``tool_status`` events (``tool_status`` =
+    "calling" / "done", the call in ``tool_calls``, the result text in ``content`` on
+    "done") when the agent uses one of Laya's tools, then one ``done`` event with
+    usage, or one ``error`` event. It never yields ``tool_calls``: the agent runs the
+    tool loop itself, so there is nothing left for the caller to execute.
+
+    ``tools`` are the OpenAI-format definitions the caller would have offered; the turn
+    gets the read-scope ones through Laya's MCP endpoint (see the module docstring).
+    """
+    from laya.llm.client import StreamEvent, ToolCall
+    from laya.pipeline.agent_budget import AgentBudgetRefused, enforce_daily_call_limit
+
+    agent_id, model_string = parse_agent_model_id(model_id)
+    if agent_id != "claude_code":
+        yield StreamEvent(
+            type="error",
+            model=model_id,
+            content=(
+                "Streaming chat and Coherence on an agent backend need Claude Code. "
+                "Choose Claude Code or an API/local model for the chat and trace roles."
+            ),
+        )
+        return
+
+    try:
+        await enforce_daily_call_limit()
+    except AgentBudgetRefused as e:
+        # The turn never ran, so there is no call to audit.
+        yield StreamEvent(type="error", content=str(e), model=model_id)
+        return
+
+    from laya.pipeline.queue import get_model_timeout
+
+    idle_timeout = float(get_model_timeout())
+    # A tool turn runs several model rounds; the idle timeout bounds each silence and
+    # this deadline bounds the whole turn.
+    deadline_s = idle_timeout * 3
+    binary = get_agent_binary(agent_id)
+    system_text, user_prompt = _split_messages(messages)
+
+    allowed = sorted(laya_read_tool_names(tools))
+    directive = _STREAM_DIRECTIVE + (_STREAM_TOOLS_DIRECTIVE if allowed else "")
+    full_system = (directive + ("\n\n" + system_text if system_text else "")).strip()
+
+    token: str | None = None
+    config_path: str | None = None
+    tmpdir = tempfile.mkdtemp(prefix="laya-agent-stream-")
+    proc = AgentProcess()
+    finished = False
+    start = time.monotonic()
+    parser = ClaudeStreamParser()
+    output_text = ""
+    try:
+        if allowed:
+            from laya.mcp import turn_tokens
+
+            token = turn_tokens.mint(set(allowed), ttl_seconds=deadline_s + 60)
+            config_path = _write_private_json(build_turn_mcp_config(token, space_id))
+        args = _claude_stream_args(
+            binary, full_system, user_prompt, model_string, config_path, allowed,
+        )
+
+        async with _get_semaphore():
+            try:
+                await proc.spawn(args=args, cwd=tmpdir)
+            except FileNotFoundError as e:
+                raise RuntimeError(
+                    f"Agent '{agent_id}' binary not found ({binary}). Is it installed?"
+                ) from e
+            async for line in proc.read_lines(idle_timeout=idle_timeout):
+                for item in parser.feed(line):
+                    if item[0] == "text":
+                        output_text += item[1]
+                        yield StreamEvent(type="chunk", content=item[1], model=model_id)
+                    else:
+                        _, status, tid, name, targs = item[:5]
+                        yield StreamEvent(
+                            type="tool_status",
+                            tool_status=status,
+                            tool_calls=[ToolCall(id=tid, name=name, arguments=targs)],
+                            content=item[5] if status == "done" else "",
+                            model=model_id,
+                        )
+                if time.monotonic() - start > deadline_s:
+                    raise TimeoutError(f"agent '{agent_id}' turn exceeded {int(deadline_s)}s")
+            await proc.wait()
+            finished = True
+
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        data = parser.result
+        if data is None:
+            stderr_tail = proc.stderr_output
+            raise RuntimeError(
+                f"Agent '{agent_id}' ended without a result"
+                + (f" | stderr: {stderr_tail[-500:]}" if stderr_tail else "")
+            )
+        if data.get("is_error"):
+            raise RuntimeError(
+                f"Agent '{agent_id}' error: "
+                f"{data.get('result') or data.get('error') or 'claude error'}"
+            )
+        if not output_text and data.get("result"):
+            # No text arrived as events (e.g. an older CLI); emit the final answer whole.
+            output_text = str(data["result"])
+            yield StreamEvent(type="chunk", content=output_text, model=model_id)
+
+        usage = data.get("usage") or {}
+        input_tokens = weighted_input_tokens(usage)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        finish_reason = "length" if data.get("stop_reason") == "max_tokens" else "stop"
+        log.info(
+            "agent_llm_stream_complete",
+            agent_id=agent_id, step=step, latency_ms=elapsed_ms,
+            output_tokens=output_tokens, tools=parser.tools_used,
+        )
+        yield StreamEvent(
+            type="done",
+            content=output_text,
+            model=model_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=elapsed_ms,
+            finish_reason=finish_reason,
+        )
+        await _account_stream_turn(
+            model_id, step,
+            input_tokens=input_tokens, output_tokens=output_tokens, latency_ms=elapsed_ms,
+            success=True, cost_usd=data.get("total_cost_usd"),
+            rate_limit_info=parser.rate_limit_info, tools_used=parser.tools_used,
+            event_id=event_id, card_id=card_id,
+        )
+    except Exception as e:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        log.error("agent_llm_stream_failed", agent_id=agent_id, step=step, error=str(e))
+        yield StreamEvent(type="error", content=str(e), model=model_id, latency_ms=elapsed_ms)
+        await _account_stream_turn(
+            model_id, step, input_tokens=0, output_tokens=0, latency_ms=elapsed_ms,
+            success=False, error=str(e), event_id=event_id, card_id=card_id,
+        )
+    finally:
+        if not finished:
+            await proc.terminate()
+        if token:
+            from laya.mcp import turn_tokens
+
+            turn_tokens.revoke(token)
+        if config_path:
+            try:
+                os.unlink(config_path)
+            except OSError:
+                pass
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+async def agent_tool_turn(
+    model_id: str,
+    messages: list[dict[str, Any]],
+    *,
+    step: str,
+    tools: list[dict] | None,
+    space_id: str | None = None,
+    event_id: str | None = None,
+    card_id: str | None = None,
+) -> "LLMResponse":
+    """Non-streaming ``llm_call(..., tools=...)`` on an agent model.
+
+    Runs the same turn as :func:`agent_llm_stream` (the agent calls Laya's read tools
+    itself) and returns the final text with no tool calls, so a caller's tool loop ends
+    after this one call. Raises on error, like ``llm_call``.
+    """
+    from laya.llm.client import LLMResponse
+
+    content = ""
+    done = None
+    async for ev in agent_llm_stream(
+        model_id, messages, step=step, tools=tools, space_id=space_id,
+        event_id=event_id, card_id=card_id,
+    ):
+        if ev.type == "error":
+            raise RuntimeError(ev.content)
+        if ev.type == "done":
+            done = ev
+        elif ev.type == "chunk":
+            content += ev.content
+    if done is None:
+        raise RuntimeError(f"Agent turn on {model_id} ended without a result")
+    return LLMResponse(
+        content=done.content or content,
+        model=model_id,
+        input_tokens=done.input_tokens,
+        output_tokens=done.output_tokens,
+        latency_ms=done.latency_ms,
+        finish_reason=done.finish_reason or "stop",
+        truncated=done.finish_reason == "length",
+        tool_calls=None,
     )

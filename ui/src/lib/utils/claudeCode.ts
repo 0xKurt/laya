@@ -276,13 +276,14 @@ export function selfMemberFromIdentities(
 }
 
 /**
- * Stage models that run on the user's Claude subscription through Claude Code.
- * Only the roles ModelConfig lets an agent serve (AGENT_ROLES): the engine's
- * streaming path (chat, Coherence/trace) rejects agent models, so those keep
- * their provider model.
+ * Models that run every Laya role on the user's Claude subscription through
+ * Claude Code. Chat and Coherence (trace) stream through Claude Code with
+ * Laya's read-only tools over MCP.
  */
 export const CLAUDE_SUBSCRIPTION_MODELS = {
 	router: 'agent/claude_code/haiku',
 	omni: 'agent/claude_code/haiku',
-	stager: 'agent/claude_code/sonnet'
+	stager: 'agent/claude_code/sonnet',
+	chat: 'agent/claude_code/sonnet',
+	trace: 'agent/claude_code/sonnet'
 } as const;

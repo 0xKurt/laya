@@ -890,8 +890,8 @@
 					<div>
 						<div class="text-sm font-medium">Also run Laya's models on your Claude subscription</div>
 						<div class="text-xs text-surface-400">
-							Router and Omni use Haiku, the Stager uses Sonnet, through Claude Code. No API key needed for them;
-							chat and Coherence keep their model.
+							Router and Omni use Haiku; the Stager, chat and Coherence use Sonnet, through Claude Code.
+							No API key needed for them.
 						</div>
 					</div>
 				</label>

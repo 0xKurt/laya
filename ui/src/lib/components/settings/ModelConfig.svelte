@@ -59,13 +59,20 @@
 	});
 
 	// --- Agent inference backend (use an installed CLI agent as the LLM) ---
-	// Only the structured, non-streaming roles can run on an agent. Chat + Coherence need
-	// a streaming tool-loop the agents can't run for us, so they stay on a model/local
-	// provider (keep their dropdowns) even when the agent backend is selected.
+	// Every agent can serve the structured stages. Chat + Coherence stream and use Laya's
+	// tools, which the engine runs through Claude Code only (it streams and calls Laya's
+	// read tools over MCP), so with another agent they keep a model/local provider.
 	const AGENT_ROLES = ['router', 'stager', 'omni'];
+	const STREAMING_AGENT_ROLES = ['chat', 'trace'];
+	const ALL_AGENT_ROLES = [...AGENT_ROLES, ...STREAMING_AGENT_ROLES];
+	const STREAMING_AGENTS = ['claude_code'];
 	const DEFAULT_MODELS: Record<string, string> = {
-		router: 'claude-haiku-4-5', stager: 'claude-sonnet-4-6', omni: 'claude-sonnet-4-6'
+		router: 'claude-haiku-4-5', stager: 'claude-sonnet-4-6', omni: 'claude-sonnet-4-6',
+		chat: 'claude-sonnet-4-6', trace: 'claude-sonnet-4-6'
 	};
+	function agentRolesFor(agentId: string): string[] {
+		return STREAMING_AGENTS.includes(agentId) ? ALL_AGENT_ROLES : AGENT_ROLES;
+	}
 	const AGENT_LABELS: Record<string, string> = Object.fromEntries(
 		CODING_AGENTS.filter((a) => a.value !== 'none').map((a) => [a.value, a.label])
 	);
@@ -343,7 +350,7 @@
 			customProviders = providersResp.providers;
 			loaded = true;
 			// Infer agent-backend mode from the saved structured-role values.
-			const inferred = AGENT_ROLES
+			const inferred = ALL_AGENT_ROLES
 				.map((r) => parseAgentModel(models[r as keyof typeof models]))
 				.find((p) => p);
 			if (inferred) {
@@ -410,15 +417,15 @@
 		if (on === agentMode) return;
 		agentMode = on;
 		if (on) {
-			// Switch structured roles to the agent; stash their provider model so we can restore it.
-			for (const r of AGENT_ROLES) {
+			// Switch the agent's roles to it; stash their provider model so we can restore it.
+			for (const r of agentRolesFor(selectedAgent)) {
 				if (!parseAgentModel(models[r as keyof typeof models])) {
 					providerBackup[r] = models[r as keyof typeof models];
 					models[r as keyof typeof models] = `agent/${selectedAgent}`;
 				}
 			}
 		} else {
-			for (const r of AGENT_ROLES) {
+			for (const r of ALL_AGENT_ROLES) {
 				if (parseAgentModel(models[r as keyof typeof models])) {
 					models[r as keyof typeof models] = providerBackup[r] || DEFAULT_MODELS[r];
 				}
@@ -429,10 +436,18 @@
 
 	function selectAgent(agentId: string) {
 		selectedAgent = agentId;
-		// Re-point every structured role at the new agent, preserving each typed model string.
-		for (const r of AGENT_ROLES) {
-			const ms = agentModelString(r);
-			models[r as keyof typeof models] = ms ? `agent/${agentId}/${ms}` : `agent/${agentId}`;
+		// Re-point every role the new agent serves at it, preserving each typed model string;
+		// roles it can't serve go back to their provider model.
+		const roles = agentRolesFor(agentId);
+		for (const r of ALL_AGENT_ROLES) {
+			const key = r as keyof typeof models;
+			if (roles.includes(r)) {
+				if (!parseAgentModel(models[key])) providerBackup[r] = models[key];
+				const ms = agentModelString(r);
+				models[key] = ms ? `agent/${agentId}/${ms}` : `agent/${agentId}`;
+			} else if (parseAgentModel(models[key])) {
+				models[key] = providerBackup[r] || DEFAULT_MODELS[r];
+			}
 		}
 		saveModels();
 	}
@@ -944,7 +959,7 @@
 				</div>
 				<p class="mt-2 text-laya-micro text-surface-500">
 					{#if agentMode}
-						Structured stages run through an installed CLI agent on its own subscription — no API key or local VRAM. Chat &amp; Coherence keep using a model provider.
+						Stages run through an installed CLI agent on its own subscription — no API key or local VRAM. Chat &amp; Coherence run on Claude Code too (with Laya's read-only tools); with other agents they keep using a model provider.
 					{:else}
 						Use cloud or local-provider models for every stage.
 					{/if}
@@ -994,7 +1009,7 @@
 								<circle cx="12" cy="12" r="10" stroke-width="2" />
 							</svg>
 						</div>
-						{#if agentMode && AGENT_ROLES.includes(role.id)}
+						{#if agentMode && agentRolesFor(selectedAgent).includes(role.id)}
 							<input
 								id="{role.id}-model"
 								type="text"

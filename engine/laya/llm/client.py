@@ -797,6 +797,19 @@ async def llm_call(
     # effects and LLMResponse shape so the contract is identical to the API path.
     from laya.llm import agent_backend
 
+    if agent_backend.is_agent_model(model) and tools:
+        # The agent runs the tool loop itself (Laya's read tools over MCP) and returns
+        # the final text with no tool calls, so the caller's loop ends here.
+        return await agent_backend.agent_tool_turn(
+            model,
+            _inject_current_datetime(messages),
+            step=step,
+            tools=tools,
+            space_id=space_id,
+            event_id=event_id,
+            card_id=card_id,
+        )
+
     if agent_backend.is_agent_model(model):
         from laya.pipeline.agent_budget import AgentBudgetRefused
 
@@ -1191,7 +1204,7 @@ async def llm_call(
 class StreamEvent:
     """A single event from the streaming LLM response."""
 
-    type: str  # "chunk" | "tool_calls" | "done" | "error"
+    type: str  # "chunk" | "tool_calls" | "tool_status" | "done" | "error"
     content: str = ""
     tool_calls: list[ToolCall] | None = None
     raw_message_dict: dict | None = None
@@ -1200,6 +1213,9 @@ class StreamEvent:
     output_tokens: int = 0
     latency_ms: int = 0
     finish_reason: str = ""
+    # "tool_status" events only (agent models, which run the tool loop themselves):
+    # "calling" | "done" for the call in tool_calls; on "done", content is its result.
+    tool_status: str = ""
 
 
 async def llm_call_streaming(
@@ -1228,21 +1244,23 @@ async def llm_call_streaming(
         if space_model:
             model = _add_provider_prefix(space_model)
 
-    # The agent inference backend can't drive a streaming tool-loop (chat / Coherence),
-    # so those roles must stay on an API or local model. The Models UI keeps chat/trace as
-    # dropdowns (not agent text inputs) to prevent this; this guard is a defensive backstop.
+    # Agent inference backend: the agent streams the reply and, when tools are offered,
+    # runs the tool loop itself against Laya's MCP endpoint (read tools only). It yields
+    # tool_status events instead of tool_calls and does its own audit + budget accounting.
     from laya.llm import agent_backend
 
     if agent_backend.is_agent_model(model):
-        msg = (
-            "The selected agent backend doesn't support streaming chat/Coherence yet. "
-            "Choose an API or local model for the chat and trace roles."
-        )
-        log.error("llm_stream_agent_unsupported", role=role, model=model)
-        yield StreamEvent(type="error", content=msg, model=model)
+        async for event in agent_backend.agent_llm_stream(
+            model,
+            _inject_current_datetime(messages),
+            step=step,
+            tools=tools,
+            space_id=space_id,
+        ):
+            yield event
         return
 
-    # Shared prep — model already resolved above; agent backend rejected. This is
+    # Shared prep — model already resolved above; agent backend handled. This is
     # the same seam llm_call uses, so streaming now also gets the max_tokens clamp
     # it was silently missing (it was sending DEFAULT_MAX_TOKENS to strict vLLM
     # servers → 400) plus consistent provider/timeout handling (review §5.6 — P7-5).
