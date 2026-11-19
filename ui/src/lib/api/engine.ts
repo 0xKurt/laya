@@ -1355,5 +1355,22 @@ export const engineApi = {
 		}),
 	// The Linear half runs a `claude -p` turn when its cache is stale.
 	getMyWork: (refresh = false) =>
-		request<MyWork>(`/claude-code/my-work?refresh=${refresh}`, { signal: AbortSignal.timeout(600_000) })
+		request<MyWork>(`/claude-code/my-work?refresh=${refresh}`, { signal: AbortSignal.timeout(600_000) }),
+	// My work actions: each call is one user click; the engine never retries them.
+	getLinearStates: (team: string, refresh = false) =>
+		request<{ team: string; states: import('$lib/work/actions').LinearState[] }>(
+			`/claude-code/my-work/linear/states?team=${encodeURIComponent(team)}&refresh=${refresh}`,
+			{ signal: AbortSignal.timeout(300_000) }
+		),
+	runLinearAction: (identifier: string, action: import('$lib/work/actions').LinearAction, value?: unknown) =>
+		request<import('$lib/work/actions').LinearActionResult>(
+			`/claude-code/my-work/linear/${encodeURIComponent(identifier)}/action`,
+			{ method: 'POST', body: JSON.stringify({ action, value }), signal: AbortSignal.timeout(600_000) }
+		),
+	runPrAction: (body: import('$lib/work/actions').PrActionRequest) =>
+		request<import('$lib/work/actions').PrActionResult>('/claude-code/my-work/github/action', {
+			method: 'POST',
+			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(300_000)
+		})
 };

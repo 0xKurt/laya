@@ -5,6 +5,9 @@
 	import { engineApi } from '$lib/api/engine';
 	import PlatformIcon from '$lib/components/settings/PlatformIcon.svelte';
 	import { timeAgo } from '$lib/utils/datetime';
+	import LinearRowActions from '$lib/components/work/LinearRowActions.svelte';
+	import PrRowActions from '$lib/components/work/PrRowActions.svelte';
+	import { applyIssueResult, applyPrResult } from '$lib/work/actions';
 	import {
 		ISSUE_FILTERS,
 		ciStatus,
@@ -217,10 +220,10 @@
 							{#each group.issues as issue (issue.identifier)}
 								{@const overdue = isOverdue(issue.due_date)}
 								{@const other = otherAssignee(issue)}
-								<li>
+								<li class="mx-1.5 flex items-center gap-1.5 rounded-md pr-2 transition-colors hover:bg-surface-800/60">
 									<a
 										href={issue.url ?? undefined}
-										class="group mx-1.5 flex items-center gap-2.5 rounded-md px-2.5 py-1.5 transition-colors hover:bg-surface-800/60"
+										class="group flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-2.5 py-1.5"
 										title={`${issue.identifier} · ${issue.state}${issue.labels.length ? ' · ' + issue.labels.join(', ') : ''}`}
 									>
 										{@render priorityIcon(issue.priority)}
@@ -240,6 +243,7 @@
 										{/if}
 										<span class="w-12 shrink-0 text-right text-laya-micro text-surface-600" title={issue.updated_at ?? ''}>{ago(issue.updated_at)}</span>
 									</a>
+									<LinearRowActions {issue} onresult={(r) => data && (data = applyIssueResult(data, issue.identifier, r))} />
 								</li>
 							{/each}
 						</ul>
@@ -281,6 +285,7 @@
 											class="min-w-0 flex-1 truncate text-laya-secondary text-surface-200 after:absolute after:inset-0 group-hover:text-surface-50"
 											title={pr.title}
 										>{pr.title}</a>
+										<PrRowActions {pr} onresult={(r) => data && (data = applyPrResult(data, pr.repo, pr.number, r))} />
 										<span class="w-12 shrink-0 text-right text-laya-micro text-surface-600" title={pr.updated_at ?? ''}>{ago(pr.updated_at)}</span>
 									</div>
 									<div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 pl-4 text-laya-micro">

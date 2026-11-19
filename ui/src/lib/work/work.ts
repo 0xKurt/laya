@@ -32,7 +32,16 @@ export interface WorkPr {
 	unresolved_threads: number;
 	checks: WorkCheckSummary;
 	linear_key: string | null;
+	author?: string;
+	head_sha?: string;
+	/** GitHub mergeStateStatus: CLEAN, BEHIND, BLOCKED, DIRTY, UNSTABLE, HAS_HOOKS, DRAFT, UNKNOWN. */
+	merge_state?: string;
+	/** The merge methods the repository allows, as `gh pr merge` flags. */
+	merge_methods?: MergeMethod[];
+	delete_branch_on_merge?: boolean;
 }
+
+export type MergeMethod = 'squash' | 'merge' | 'rebase';
 
 export interface WorkIssue {
 	identifier: string;
