@@ -131,7 +131,7 @@ _STATES_SCHEMA = {
 }
 
 # Order of the state types in the state menu.
-_TYPE_ORDER = {"triage": 0, "backlog": 1, "unstarted": 2, "started": 3, "completed": 4, "canceled": 5}
+_TYPE_ORDER = {"triage": 0, "backlog": 1, "unstarted": 2, "started": 3, "completed": 4, "canceled": 5, "duplicate": 6}
 
 
 def team_of(identifier: str) -> str:
@@ -384,7 +384,7 @@ async def linear_action(identifier: str, action: str, value: Any = None,
         for k in ("project", "due_date", "labels", "url"):
             if not issue.get(k) and previous.get(k):
                 issue[k] = previous[k]
-        removed = issue["state_type"] in ("completed", "canceled", "cancelled")
+        removed = issue["state_type"] in ("completed", "canceled", "cancelled", "duplicate")
         await my_work.replace_cached_item("linear", identifier, None if removed else issue)
         return {"ok": True, "issue": issue, "removed": removed,
                 "result": {"id": out.get("id"), "url": out.get("url") or None}}
