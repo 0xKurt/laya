@@ -26,6 +26,7 @@ This document is the contract between the parts of the integration. Code that im
 | `service.py` | background loop, `start_service()` / `stop_service()` |
 | `connect.py` | connect / disconnect / configure a platform |
 | `egress.py` | `ClaudeCodeBackend(EgressBackend)` for sending |
+| `my_work.py` | the "My work" view's data: open Linear issues and the user's own open pull requests (section "My work" below) |
 | `api.py` | REST endpoints below |
 
 ### Tables (module-owned)
@@ -118,6 +119,7 @@ Linked documents:
 | PUT | `/claude-code/{platform}/config` | the full config object for the platform |
 | PUT | `/claude-code/{platform}/enabled` | `{enabled: bool}` → pauses or resumes the platform's sweeps, returns the platform status |
 | POST | `/claude-code/{platform}/sync` | sweeps now, returns `{events, error}` |
+| GET | `/claude-code/my-work?refresh=false` | `{github: {prs, connected, error, note, fetched_at, cached}, linear: {issues, …same}}` (section "My work") |
 
 ### Seeded rules (idempotent by name, through the rules API)
 
@@ -145,6 +147,15 @@ Linked documents:
 Routing (`egress/router._resolve_backend`): a request naming `claude_code:<platform>` goes to `ClaudeCodeBackend`; a request without a connection goes there only when its source event was collected through Claude Code (`events.source_connection_id = claude_code:<platform>`), the send connection exists and the action is one the backend performs. Requests naming any other connection, and events ingested by n8n, stay with n8n. Chat's connection pick (`tool_handlers._resolve_connection_id`) takes the Claude Code row only when the platform has no other connected row.
 
 A send turn: `--allowedTools` = the one tool (Slack `send` role, Gmail `draft` role, which must be `create_draft`), `--disallowedTools` = every other discovered MCP tool, `--tools ""`; the prompt holds the arguments as JSON to copy verbatim (Slack `channel_id`/`message`/`thread_ts` for `reply_thread`; Gmail `to`/`cc`/`bcc`/`subject`/`body`/`threadId`); `--json-schema` asks for `{ok, permalink, ts, error}` (Slack) / `{ok, draft_id, thread_id, url, error}` (Gmail). A result without `ok`, without a link/ts or draft id, or with permission denials is a failure; failures are not retryable because the tool may have run. Health, `test_connection` (fresh discovery) and `remove_connection` (removes only the send row; collecting stays) are delegated to `claude_code/egress.py`.
+
+## My work
+
+`/work` (`ui/src/routes/work/+page.svelte`, pure logic in `ui/src/lib/work/work.ts`) shows the user's open Linear issues and open GitHub pull requests from `GET /claude-code/my-work` (`claude_code/my_work.py`).
+
+- GitHub, only while the github source is connected: the pull requests the user authored (`is:pr is:open author:@me archived:false`, plus `org:<o>` per configured org; no review requests, no other people's PRs), read with one `gh api graphql` search per 25 PRs (at most 4 pages): repository, draft, base and head branch, mergeable state, review decision, requested reviewers, latest reviews, the status-check rollup with failing / running counts, unresolved review threads, and the first Linear key in the title or branch (`TRAD-123`; `ERC-20`-style words are skipped).
+- Linear, only while the linear source is connected: one `claude -p` turn (step `claude_code_linear_my_work`, the source's `model`) that may call only the discovered `list_issues` tool, every other MCP tool denied. It lists the issues assigned to the user and the issues the user created in the open state types (`started`, `unstarted`, `backlog`, `triage`); the code merges them into one row per issue with `assigned_to_me` / `created_by_me`, drops completed / canceled ones, and keeps the assignee. Cycle names are not read (`list_issues` returns only a cycle id).
+- Each section is cached in `claude_code_state` (platform `my_work`, keys `github` / `linear`) for 10 minutes; `refresh=true` skips the cache. While the agent budget is paused the Linear turn does not run and the cached issues come back with a `note`. A failure is reported in the section's `error` next to its last cached data; the endpoint does not fail.
+- UI: Linear grouped In progress → Todo → Backlog → Triage, sorted by priority, due date, update; filter "Assigned to me" · "Created by me" · "All" (default assigned, `localStorage` `laya.work.linearFilter`); issues the user created for someone else show the assignee or "Unassigned". Pull requests grouped Needs your action (changes requested, failing checks, conflicts) → Waiting on review → Ready to merge (approved and green) → Drafts.
 
 ## Board
 
