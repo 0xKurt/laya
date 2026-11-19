@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Body, HTTPException
 
 from laya.claude_code import connect as connect_mod
+from laya.claude_code import egress as _egress  # noqa: F401  registers the send connection hooks
 from laya.claude_code import discover as discover_mod
 from laya.claude_code import service, store
 from laya.claude_code.discover import SEND_ROLES, Discovery, PlatformDiscovery
