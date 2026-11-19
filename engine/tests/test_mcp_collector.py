@@ -236,3 +236,41 @@ def test_gmail_repeated_alerts_in_a_thread_are_one_event():
     assert e.content.metadata["gmail_message_count"] == 3
     assert "fired 0" in e.content.body and "fired 2" in e.content.body
     assert e.event_id == mc._event_id("gmail", "m2")
+
+
+def test_is_mine_keeps_dms_mentions_own_and_my_threads_only():
+    mine = set()
+    assert mc._is_mine(_slack(channel_type="dm"), ME, mine)
+    assert mc._is_mine(_slack(channel_type="group_dm"), ME, mine)
+    assert mc._is_mine(_slack(user_id=ME), ME, mine)
+    assert mc._is_mine(_slack(text=f"hey <@{ME}>"), ME, mine)
+    other_thread = _slack(thread_ts="1794999999.000001", text="unrelated chatter")
+    assert not mc._is_mine(other_thread, ME, mine)
+    assert mc._is_mine(other_thread, ME, {"C1:1794999999.000001"})
+    assert not mc._is_mine(_slack(channel_name="general", text="link"), ME, mine)
+
+
+def test_slack_prompt_reads_known_threads_and_no_broad_thread_search():
+    prompt = mc._slack_prompt(ME, datetime(2026, 11, 19, tzinfo=timezone.utc), [("C1", "1794999999.000001")])
+    assert "slack_read_thread" in prompt and "channel_id=C1 thread_ts=1794999999.000001" in prompt
+    assert "is:thread" not in prompt
+    assert "slack_read_thread" not in mc._slack_prompt(ME, datetime(2026, 11, 19, tzinfo=timezone.utc), [])
+
+
+@pytest.mark.asyncio
+async def test_my_slack_threads_expire_after_14_days(db):
+    fresh = datetime.now(timezone.utc).isoformat()
+    stale = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
+    await mc._set_my_slack_threads({"C1:1": fresh, "C2:2": stale})
+    assert await mc._get_my_slack_threads() == {"C1:1": fresh}
+
+
+def test_linear_review_requests_and_issueless_items_are_dropped():
+    base = {"id": "n", "created_at": "2026-11-19T10:00:00Z", "kind": "other",
+            "issue_title": "x", "issue_url": "https://linear/x"}
+    events = mc._linear_events([
+        {**base, "id": "1", "issue_identifier": "", "text": "Dave requested a review"},
+        {**base, "id": "2", "issue_identifier": "TRAD-1", "text": "Dave Johnston requested markets-team review of PR"},
+        {**base, "id": "3", "issue_identifier": "TRAD-2", "kind": "comment", "text": "can you check the owner?"},
+    ], set())
+    assert [e.subject.id for e in events] == ["TRAD-2"]

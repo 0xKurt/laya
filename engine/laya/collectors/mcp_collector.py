@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import tempfile
 import time
@@ -134,6 +135,32 @@ async def _set_cursor(source: str, value: datetime) -> None:
         """INSERT INTO metadata (key, value, space_id) VALUES (?, ?, 'default')
            ON CONFLICT(key, space_id) DO UPDATE SET value = excluded.value""",
         (_cursor_key(source), json.dumps(value.isoformat())),
+    )
+    await db.commit()
+
+
+_SLACK_THREADS_KEY = "mcp_collector:slack_threads"
+_SLACK_THREADS_TTL = timedelta(days=14)
+_SLACK_THREADS_READ = 15  # most recently active threads re-read per sweep
+
+
+async def _get_my_slack_threads() -> dict[str, str]:
+    """Channel threads the user wrote in during the last 14 days: key -> last seen."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT value FROM metadata WHERE key = ? AND space_id = 'default'", (_SLACK_THREADS_KEY,)
+    )
+    threads = json.loads(rows[0]["value"]) if rows else {}
+    cutoff = (datetime.now(timezone.utc) - _SLACK_THREADS_TTL).isoformat()
+    return {k: v for k, v in threads.items() if v >= cutoff}
+
+
+async def _set_my_slack_threads(threads: dict[str, str]) -> None:
+    db = await get_db()
+    await db.execute(
+        """INSERT INTO metadata (key, value, space_id) VALUES (?, ?, 'default')
+           ON CONFLICT(key, space_id) DO UPDATE SET value = excluded.value""",
+        (_SLACK_THREADS_KEY, json.dumps(threads)),
     )
     await db.commit()
 
@@ -264,22 +291,40 @@ _SLACK_SCHEMA = {
 }
 
 
-def _slack_prompt(me: str, since: datetime) -> str:
+def _slack_prompt(me: str, since: datetime, my_threads: list[tuple[str, str]]) -> str:
     after = int(since.timestamp())
+    threads = "\n".join(f"   - channel_id={c} thread_ts={t}" for c, t in my_threads)
+    thread_step = f"""
+4. Read each of these threads with mcp__claude_ai_Slack__slack_read_thread (oldest="{after}")
+   and take its messages posted after unix time {after}:
+{threads}""" if my_threads else ""
     return f"""You are a data collector. Copy data exactly; do not summarize or judge.
-My Slack user id is {me}. Collect every Slack message posted after unix time {after}
-that is relevant to me, using mcp__claude_ai_Slack__slack_search_public_and_private
-(pass after="{after}", sort="timestamp", include_bots=false, include_context=false,
-response_format="detailed", limit=20; follow the cursor up to 3 pages per query).
-Run these queries:
+My Slack user id is {me}. Collect Slack messages posted after unix time {after} using
+mcp__claude_ai_Slack__slack_search_public_and_private (pass after="{after}",
+sort="timestamp", include_bots=false, include_context=false, response_format="detailed",
+limit=20; follow the cursor up to 3 pages per query). Run exactly these queries:
 1. All direct and group DMs: channel_types="im,mpim", filters="".
 2. Messages that mention me: filters="<@{me}>".
-3. Thread messages in threads I take part in: filters="with:<@{me}> is:thread".
-4. My own messages anywhere: filters="from:<@{me}>".
-Deduplicate by channel_id + ts. For each message return channel_id, channel_name,
-channel_type (dm, group_dm, public or private), ts, thread_ts (the thread root ts, or
-null if not in a thread), user_id, user_name, the full message text and its permalink.
+3. My own messages anywhere: filters="from:<@{me}>".{thread_step}
+Do not add messages from any other search. Deduplicate by channel_id + ts. For each
+message return channel_id, channel_name, channel_type (dm, group_dm, public or
+private), ts, thread_ts (the thread root ts, or null if not in a thread), user_id,
+user_name, the full message text and its permalink.
 Return {{"messages": []}} if there is nothing."""
+
+
+def _is_mine(m: dict, me: str, my_threads: set[str]) -> bool:
+    """Whether a message concerns the user: their DMs, mentions, own messages, threads.
+
+    Applied in code to whatever the collector returns, so a model that collects too
+    widely cannot put other people's channel chatter into the feed.
+    """
+    return (
+        m.get("channel_type") in ("dm", "group_dm")
+        or m.get("user_id") == me
+        or f"<@{me}>" in (m.get("text") or "")
+        or _slack_conversation(m) in my_threads
+    )
 
 
 def _slack_conversation(m: dict) -> str:
@@ -491,9 +536,16 @@ def _linear_prompt(since: datetime) -> str:
 Return {{"items": []}} if there is nothing."""
 
 
+_REVIEW_REQUEST = re.compile(r"requested\b.*\breview", re.IGNORECASE)
+
+
 def _linear_events(items: list[dict], my_emails: set[str]) -> list[LayaEvent]:
     events = []
     for it in items:
+        # Review requests (Linear's PR reviews, mostly to a team) and items without an
+        # issue are not asks to the user.
+        if not it.get("issue_identifier") or _REVIEW_REQUEST.search(it.get("text") or ""):
+            continue
         actor_email = (it.get("actor_email") or "").lower()
         events.append(_make_event(
             platform="linear", native_id=it["id"], timestamp=_parse_ts(it["created_at"]),
@@ -612,8 +664,19 @@ async def _collect_source(source: str, since: datetime, settings: dict) -> list[
         me = identity.get("slack_user_id")
         if not me:
             raise RuntimeError("identity.slack_user_id is not set")
-        out = await _claude_collect("slack", _slack_prompt(me, since), _SLACK_SCHEMA, model, timeout)
-        return _slack_events(out.get("messages", []), me)
+        known = await _get_my_slack_threads()
+        recent = sorted(known.items(), key=lambda kv: kv[1], reverse=True)[:_SLACK_THREADS_READ]
+        to_read = [tuple(key.split(":", 1)) for key, _ in recent]
+        prompt = _slack_prompt(me, since, to_read)
+        out = await _claude_collect("slack", prompt, _SLACK_SCHEMA, model, timeout)
+        messages = out.get("messages", [])
+        # Threads the user writes in become theirs; replies there count from now on.
+        now = datetime.now(timezone.utc).isoformat()
+        for m in messages:
+            if m.get("user_id") == me and m.get("channel_type") not in ("dm", "group_dm"):
+                known[_slack_conversation(m)] = now
+        await _set_my_slack_threads(known)
+        return _slack_events([m for m in messages if _is_mine(m, me, set(known))], me)
     if source == "gmail":
         from laya.config import get_self_user
 
