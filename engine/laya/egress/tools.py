@@ -28,13 +28,12 @@ def get_egress_tool_definitions() -> list[dict]:
         _pr_action(),
         _send_slack_message(),
         _open_compose(),
-        _confirm_egress(),
         _find_contact(),
     ]
 
 
-# Tools that go through the preview/confirm/execute flow via handle_egress_tool.
-# open_compose, confirm_egress, and find_contact have dedicated handlers.
+# Tools that return a preview via handle_egress_tool; none of them sends.
+# open_compose and find_contact have dedicated handlers.
 PREVIEWABLE_EGRESS_TOOLS = frozenset({
     "send_email",
     "comment_on_ticket",
@@ -387,28 +386,3 @@ def _find_contact() -> dict:
 def get_find_contact_tool() -> dict:
     """Return the find_contact tool definition (used by ai-assist endpoint)."""
     return _find_contact()
-
-
-def _confirm_egress() -> dict:
-    return {
-        "type": "function",
-        "function": {
-            "name": "confirm_egress",
-            "description": (
-                "Execute a previously previewed egress action after the user has confirmed. "
-                "Only call this AFTER you have shown the user a preview and they have said "
-                "'yes', 'go ahead', 'confirm', 'do it', or similar affirmative response. "
-                "The execute_token comes from the preview response of a prior egress tool call."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "execute_token": {
-                        "type": "string",
-                        "description": "Signed execution token from the preview response.",
-                    },
-                },
-                "required": ["execute_token"],
-            },
-        },
-    }

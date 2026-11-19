@@ -1193,9 +1193,9 @@ def _rules_write_tools() -> list[dict]:
                                 'bookmark ({"type":"bookmark"}), '
                                 'add_tag ({"type":"add_tag","tag_name":"my-tag","create_if_missing":true}), '
                                 'send_notification ({"type":"send_notification","title_template":"...","body_template":"..."}), '
-                                'run_entity_agent ({"type":"run_entity_agent","prompt_template":"..."}), '
-                                'execute_egress ({"type":"execute_egress","platform":"slack","action_type":"send_message","payload_template":{...}}). '
-                                "Templates support {{field.path}} placeholders."
+                                'run_entity_agent ({"type":"run_entity_agent","prompt_template":"..."}). '
+                                "Templates support {{field.path}} placeholders. "
+                                "Rules cannot send messages: outbound actions always need the user's approval."
                             ),
                         },
                         "space_id": {

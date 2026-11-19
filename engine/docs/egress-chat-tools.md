@@ -327,6 +327,8 @@ tool loop in `pipeline/chat.py`.
 
 ### 2.8 confirm_egress
 
+> **Not exposed.** Chat cannot send: `confirm_egress` is not in the toolset and its handler refuses. Previews carry no execute token; the user sends from the compose editor or the card (`POST /egress/execute`, card executor). The flows below that call `confirm_egress` describe the original design.
+
 ```python
 {
     "name": "confirm_egress",

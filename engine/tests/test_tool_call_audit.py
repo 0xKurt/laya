@@ -9,6 +9,7 @@ audit_log, mirroring the existing UI/REST audit trail.
 """
 
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -72,60 +73,51 @@ class TestChatCardMutationAudit:
 
 
 @pytest.mark.asyncio
-class TestChatEgressAudit:
-    async def _prime_pending(self, action_type="send_email", platform="gmail"):
-        """Insert a pending egress request and return its token."""
-        import time
-
+class TestChatCannotSend:
+    async def test_confirm_egress_refuses_and_never_executes(self, db, monkeypatch):
         from laya.egress import tool_handlers
-        from laya.egress.models import EgressRequest
 
-        request = EgressRequest(
-            platform=platform, action_type=action_type, payload={}, space_id=None
-        )
-        token = "egr_testtoken"
-        tool_handlers._pending_requests[token] = (request, time.time() + 300)
-        return token
-
-    async def test_successful_egress_is_audited(self, db, monkeypatch):
-        from laya.egress import tool_handlers
-        from laya.egress.models import EgressResult
+        calls = []
 
         async def fake_execute(request):
-            return EgressResult(success=True, result_url="https://x/1")
+            calls.append(request)
 
         monkeypatch.setattr("laya.egress.execute", fake_execute)
-        token = await self._prime_pending(action_type="send_email", platform="gmail")
+        out = json.loads(await tool_handlers.handle_confirm_egress({"execute_token": "egr_x"}, None))
+        assert out["status"] == "refused"
+        assert calls == []
+        assert await _audit_rows(db, step="execute") == []
 
-        out = json.loads(await tool_handlers.handle_confirm_egress({"execute_token": token}, None))
-        assert out["status"] == "done"
-
-        rows = await _audit_rows(db, step="execute")
-        assert len(rows) == 1
-        assert rows[0]["success"]
-        assert rows[0]["metadata"]["action_type"] == "send_email"
-        assert rows[0]["metadata"]["target_platform"] == "gmail"
-        assert rows[0]["metadata"]["source"] == "chat"
-        assert rows[0]["metadata"]["result_url"] == "https://x/1"
-
-    async def test_failed_egress_is_audited(self, db, monkeypatch):
-        from laya.egress import tool_handlers
-        from laya.egress.models import EgressResult
+    async def test_executor_routes_confirm_egress_to_refusal(self, db, monkeypatch):
+        from laya.llm.tools import executor
 
         async def fake_execute(request):
-            return EgressResult(success=False, error="boom", retryable=True)
+            raise AssertionError("chat must never execute egress")
 
         monkeypatch.setattr("laya.egress.execute", fake_execute)
-        token = await self._prime_pending(action_type="comment", platform="jira")
+        out = json.loads(await executor.execute_tool("confirm_egress", {"execute_token": "egr_x"}))
+        assert out["status"] == "refused"
 
-        out = json.loads(await tool_handlers.handle_confirm_egress({"execute_token": token}, None))
-        assert out["status"] == "failed"
+    async def test_egress_preview_has_no_execute_token(self, db, monkeypatch):
+        from laya.egress import tool_handlers
+        from laya.egress.models import EgressPreview
 
-        rows = await _audit_rows(db, step="execute")
-        assert len(rows) == 1
-        assert not rows[0]["success"]  # SQLite stores bool as 0/1
-        assert rows[0]["error"] == "boom"
-        assert rows[0]["metadata"]["action_type"] == "comment"
+        async def fake_preview(request):
+            return EgressPreview(platform="gmail", action_type="send_email", summary="Email to a@b.c")
+
+        async def fake_execute(request):
+            raise AssertionError("preview must never execute")
+
+        monkeypatch.setattr("laya.egress.preview", fake_preview)
+        monkeypatch.setattr("laya.egress.execute", fake_execute)
+        monkeypatch.setattr(tool_handlers, "_resolve_connection_id", AsyncMock(return_value=None))
+        out = json.loads(await tool_handlers.handle_egress_tool(
+            "send_email", {"to": "a@b.c", "subject": "s", "body": "b"}, None,
+        ))
+        assert out["status"] == "preview"
+        assert out["sent"] is False
+        assert "execute_token" not in out
+
 
 
 @pytest.mark.asyncio
@@ -168,3 +160,10 @@ class TestRestMarkDoneAudit:
         assert rows[0]["card_id"] == "card_done"
         assert rows[0]["metadata"]["action"] == "done"
         assert rows[0]["metadata"]["previous_status"] == "pending"
+
+
+def test_confirm_egress_not_offered_to_llm():
+    from laya.llm.tools.definitions import get_all_tool_definitions, select_chat_tools
+
+    for defs in (get_all_tool_definitions(), select_chat_tools("send an email reply to bob")):
+        assert "confirm_egress" not in {d["function"]["name"] for d in defs}

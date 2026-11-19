@@ -130,6 +130,10 @@ def test_claude_args_are_noninteractive_and_toolless():
     # Must NOT use plan mode (it pollutes output with plan-and-wait framing).
     assert args[args.index("--permission-mode") + 1] == "default"
     assert "--mcp-config" not in args                     # no Laya tools / lower tax
+    # Isolated from the user's Claude Code setup: no CLAUDE.md, plugins, hooks, MCP.
+    assert "--safe-mode" in args
+    assert "--strict-mcp-config" in args
+    assert args[args.index("--setting-sources") + 1] == ""
     assert "--json-schema" in args                        # native structured output
     assert args[args.index("--model") + 1] == "m"
 
@@ -155,3 +159,12 @@ def test_codex_args_exec_readonly_never_approve():
 def test_unknown_agent_rejected():
     with pytest.raises(ValueError):
         _args("bogus_cli")
+
+
+def test_router_defaults_to_haiku_on_bare_claude_code():
+    assert ab.apply_stage_default_model("router", "agent/claude_code") == "agent/claude_code/claude-haiku-4-5"
+    assert ab.apply_stage_default_model("group_summary", "agent/claude_code") == "agent/claude_code/claude-haiku-4-5"
+    # An explicit model, another stage, or another agent stays as configured.
+    assert ab.apply_stage_default_model("router", "agent/claude_code/claude-sonnet-4-6") == "agent/claude_code/claude-sonnet-4-6"
+    assert ab.apply_stage_default_model("stager", "agent/claude_code") == "agent/claude_code"
+    assert ab.apply_stage_default_model("router", "agent/codex_cli") == "agent/codex_cli"

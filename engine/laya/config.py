@@ -55,9 +55,25 @@ DEFAULT_SETTINGS = {
     # Usage-limit budgeting for the agent inference backend. Per-agent token budget over a
     # rolling window (agents bill against usage limits, not $). agents maps agent_id ->
     # {window_token_limit, window_hours, pause_at_percent}. Runtime pause state lives in DB.
+    #
+    # On by default so a busy inbox cannot drain a subscription unattended. The
+    # claude_code budget is 2M tokens per 5h window, pausing at 85% (1.7M). Tokens
+    # include cache reads, and one stage call measures ~20-30K, so this allows roughly
+    # 60-85 calls per window: a modest share of a Max window.
+    #
+    # daily_call_limit is a hard cap on agent inference calls (all agents) per local
+    # day, applied even when enabled is false; 0 turns it off. Reaching it refuses
+    # further calls and pauses ingestion until local midnight.
     "agent_budgets": {
-        "enabled": False,
-        "agents": {},
+        "enabled": True,
+        "daily_call_limit": 400,
+        "agents": {
+            "claude_code": {
+                "window_token_limit": 2_000_000,
+                "window_hours": 5,
+                "pause_at_percent": 85,
+            },
+        },
     },
     "privacy": {
         "tier3_sources": ["gmail", "outlook", "slack_dm"],

@@ -111,6 +111,22 @@ def is_agent_model(model: str | None) -> bool:
     return bool(model) and model.startswith("agent/")
 
 
+# Cheaper models for high-volume stages when a stage is set to Claude Code without
+# a model (``agent/claude_code``), which would otherwise run on the user's Claude
+# Code default model. group_summary shares the router's model.
+_CLAUDE_STAGE_DEFAULT_MODELS = {
+    "router": "claude-haiku-4-5",
+    "group_summary": "claude-haiku-4-5",
+}
+
+
+def apply_stage_default_model(role: str, model: str) -> str:
+    """Pin the stage's default model on a bare ``agent/claude_code`` model id."""
+    if model == "agent/claude_code" and role in _CLAUDE_STAGE_DEFAULT_MODELS:
+        return f"{model}/{_CLAUDE_STAGE_DEFAULT_MODELS[role]}"
+    return model
+
+
 def parse_agent_model_id(model_id: str) -> tuple[str, str | None]:
     """Split ``agent/<agent_id>/<model_string>`` → (agent_id, model_string|None).
 
@@ -268,8 +284,14 @@ def _build_args(
 
     if agent_id == "claude_code":
         # -p = one-shot print mode (exits, never waits). All built-in tools denied = pure
-        # inference, nothing to request approval for. NO --mcp-config (keeps the per-call
-        # system-prompt tax down and avoids loading Laya's tools).
+        # inference, nothing to request approval for.
+        #
+        # --safe-mode skips the user's CLAUDE.md, skills, plugins, hooks and MCP servers
+        # while keeping the subscription login; --strict-mcp-config (with no --mcp-config)
+        # and an empty --setting-sources also keep MCP servers and user/project settings
+        # out. Without these every inference call carries the user's whole Claude Code
+        # setup in its prompt and runs their hooks. Measured on claude 2.1.311, haiku,
+        # "say ok": 27.5K input tokens -> 10.9K; with --json-schema 55.3K -> 22.0K.
         #
         # permission-mode=default (NOT plan): in plan mode Claude wraps the answer in
         # "I'm in plan mode … once plan mode is exited I can help you …" preamble — a
@@ -280,7 +302,8 @@ def _build_args(
         # rate_limit_event (window reset + status) for agent usage-budgeting; the final
         # `result` event still carries structured_output + usage + total_cost_usd.
         args = [binary, "-p", user_prompt, "--output-format", "stream-json", "--verbose",
-                "--permission-mode", "default", "--disallowedTools", _CLAUDE_BUILTIN_TOOLS]
+                "--permission-mode", "default", "--disallowedTools", _CLAUDE_BUILTIN_TOOLS,
+                "--safe-mode", "--strict-mcp-config", "--setting-sources", ""]
         if system_text:
             args += ["--append-system-prompt", system_text]
         if model_string:
@@ -547,6 +570,11 @@ async def agent_llm_call(
     agent_id, model_string = parse_agent_model_id(model_id)
     if agent_id not in AGENT_TIERS:
         raise ValueError(f"Unknown agent backend: {agent_id!r}")
+
+    # Hard daily cap: raises (and pauses ingestion) once today's calls hit the limit.
+    from laya.pipeline.agent_budget import enforce_daily_call_limit
+
+    await enforce_daily_call_limit()
 
     binary = get_agent_binary(agent_id)
     native = AGENT_TIERS[agent_id] == "native"

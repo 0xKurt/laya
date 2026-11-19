@@ -8,7 +8,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # --- Extended operators (superset of filter rule operators) ---
@@ -86,6 +86,11 @@ class RunEntityAgentAction(BaseModel):
 
 
 class ExecuteEgressAction(BaseModel):
+    """Outbound send from a rule. Kept only so rules stored with it still load:
+    new rules cannot contain it (``reject_auto_send_actions``) and the engine
+    skips it at fire time, because every outbound message needs the user's
+    explicit approval on a card."""
+
     type: Literal["execute_egress"] = "execute_egress"
     platform: str
     action_type: str
@@ -117,6 +122,20 @@ ProcessingRuleAction = Annotated[
     ],
     Field(discriminator="type"),
 ]
+
+
+def reject_auto_send_actions(actions: list | None) -> list | None:
+    """Refuse actions that would send a message without the user's approval."""
+    if actions and any(
+        isinstance(a, ExecuteEgressAction)
+        or (isinstance(a, dict) and a.get("type") == "execute_egress")
+        for a in actions
+    ):
+        raise ValueError(
+            "execute_egress is not allowed: rules cannot send messages; "
+            "outbound actions need the user's approval on a card"
+        )
+    return actions
 
 
 # --- Rule model ---
@@ -152,6 +171,8 @@ class CreateProcessingRuleRequest(BaseModel):
     cooldown_secs: int = 0
     max_daily: int = 0
 
+    _no_auto_send = field_validator("actions")(reject_auto_send_actions)
+
 
 class UpdateProcessingRuleRequest(BaseModel):
     name: str | None = None
@@ -163,3 +184,5 @@ class UpdateProcessingRuleRequest(BaseModel):
     rate_limit: int | None = None
     cooldown_secs: int | None = None
     max_daily: int | None = None
+
+    _no_auto_send = field_validator("actions")(reject_auto_send_actions)
