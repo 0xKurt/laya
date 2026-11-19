@@ -274,3 +274,38 @@ def test_linear_review_requests_and_issueless_items_are_dropped():
         {**base, "id": "3", "issue_identifier": "TRAD-2", "kind": "comment", "text": "can you check the owner?"},
     ], set())
     assert [e.subject.id for e in events] == ["TRAD-2"]
+
+
+def _notification(reason, *, type_="PullRequest", nid="1"):
+    return {
+        "id": nid, "reason": reason, "updated_at": "2026-11-19T10:00:00Z",
+        "repository": {"full_name": "somnia-chain/x", "owner": {"login": "somnia-chain"}},
+        "subject": {"type": type_, "title": "t", "url": f"https://api.github.com/repos/somnia-chain/x/pulls/{nid}",
+                    "latest_comment_url": None},
+    }
+
+
+@pytest.mark.asyncio
+async def test_github_keeps_own_prs_and_mentions_but_not_others_reviews():
+    notes = [
+        _notification("author", nid="1"),         # my PR → keep
+        _notification("comment", nid="2"),        # I reviewed someone's PR → drop
+        _notification("mention", nid="3"),        # @-mentioned on someone's PR → keep
+        _notification("review_requested", nid="4"),
+        _notification("comment", nid="5", type_="Issue"),  # issue thread → keep
+    ]
+
+    async def fake_gh(*args):
+        if args[:2] == ("api", "--paginate"):
+            return [notes]
+        if args[0] == "api" and args[1].startswith("https://api.github.com/repos/somnia-chain/x/pulls/"):
+            return {"user": {"login": "someone-else"}}
+        return {"items": []}
+
+    settings = mc.get_collector_settings() | {
+        "identity": {"github_login": "me", "slack_user_id": "", "emails": []},
+        "github_orgs": ["somnia-chain"],
+    }
+    with patch.object(mc, "_gh_json", side_effect=fake_gh):
+        events = await mc._collect_github(datetime(2026, 11, 19, tzinfo=timezone.utc), settings)
+    assert sorted(e.subject.id for e in events) == ["somnia-chain/x#1", "somnia-chain/x#3", "somnia-chain/x#5"]

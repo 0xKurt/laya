@@ -46,7 +46,7 @@ _last_sweep: dict[str, datetime] = {}
 # source -> {"at", "ok", "events", "error", "duration_ms"} for GET /collector/status
 _status: dict[str, dict[str, Any]] = {}
 
-SOURCES = ("slack", "gmail", "linear", "github")
+SOURCES = ("slack", "gmail", "linear", "github", "notion")
 
 DEFAULT_COLLECTOR_SETTINGS: dict[str, Any] = {
     "enabled": False,
@@ -57,7 +57,7 @@ DEFAULT_COLLECTOR_SETTINGS: dict[str, Any] = {
     "model": "haiku",
     "timeout_seconds": 600,
     "initial_lookback_hours": 12,
-    "sources": {"slack": True, "gmail": True, "linear": True, "github": True},
+    "sources": {"slack": True, "gmail": True, "linear": True, "github": True, "notion": True},
     "identity": {
         "slack_user_id": "",
         "github_login": "",
@@ -85,6 +85,15 @@ ALLOWED_TOOLS: dict[str, list[str]] = {
         "mcp__claude_ai_Gmail__search_threads",
         "mcp__claude_ai_Gmail__get_thread",
         "mcp__claude_ai_Gmail__get_message",
+        # Gemini notes link a Google Doc; reading it gives decisions and owners.
+        "mcp__claude_ai_Google_Drive__read_file_content",
+        "mcp__claude_ai_Google_Drive__get_file_metadata",
+    ],
+    "notion": [
+        "mcp__notion__notion-search",
+        "mcp__notion__notion-fetch",
+        "mcp__notion__notion-get-comments",
+        "mcp__notion__notion-get-self",
     ],
     "linear": [
         "mcp__linear-server__get_notifications",
@@ -438,10 +447,14 @@ mcp__claude_ai_Gmail__get_thread and return each message dated after unix time {
 message_id, thread_id, date (ISO 8601), from_name, from_email, to, cc, subject, the
 plain-text body (newest part only, without quoted history, at most 2000 characters),
 labels and the message's viewUrl as url. Set kind="email".
-Mails from gemini-notes@google.com are meeting notes: set kind="meeting_notes" and put
-into body only the meeting title, date and the action items or next steps assigned to
-{my_name} (or to everyone), each on its own line; if none concern {my_name}, body is
-"No action items for {my_name}."
+Mails from gemini-notes@google.com are meeting notes: set kind="meeting_notes". Open
+the notes document the mail links to with mcp__claude_ai_Google_Drive__read_file_content
+(the notes, not the transcript; fall back to the mail text if it can't be read). Put into
+body: the meeting title and date; "Action items for {my_name}:" with every action item or
+next step assigned to {my_name} or to everyone, one per line, with its due date if given;
+"Decisions:" with the decisions taken, one per line; "Waiting on others:" with items
+{my_name} asked others for. Leave a heading out when it has no lines. If nothing concerns
+{my_name}, body is "No action items for {my_name}." Use the document's link as url.
 Return {{"messages": []}} if there is nothing."""
 
 
@@ -562,6 +575,70 @@ def _linear_events(items: list[dict], my_emails: set[str]) -> list[LayaEvent]:
     return events
 
 
+# ── Notion ───────────────────────────────────────────────────────────────
+
+_NOTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "created_at": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["comment", "mention"]},
+                    "page_id": {"type": "string"},
+                    "page_title": {"type": "string"},
+                    "page_url": {"type": "string"},
+                    "discussion_id": {"type": ["string", "null"]},
+                    "author_name": {"type": "string"},
+                    "author_email": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+                "required": ["id", "created_at", "kind", "page_id", "page_title", "page_url", "author_name", "text"],
+            },
+        },
+    },
+    "required": ["items"],
+}
+
+
+def _notion_prompt(since: datetime, my_name: str) -> str:
+    day = since.strftime("%Y-%m-%d")
+    iso = since.isoformat()
+    return f"""You are a data collector. Copy data exactly; do not summarize or judge.
+I am {my_name} (call mcp__notion__notion-get-self for my user id and email).
+1. mcp__notion__notion-search with query "", filters {{"created_by_user_ids": ["me"],
+   "last_edited_date_range": {{"start_date": "{day}"}}}}, sort "last_edited", page_size 25.
+2. mcp__notion__notion-search with query "{my_name}", filters {{"last_edited_date_range":
+   {{"start_date": "{day}"}}}}, sort "last_edited", page_size 15.
+For every page found, call mcp__notion__notion-get-comments and return each comment
+created after {iso}: kind="comment", id = the comment id, discussion_id, author_name,
+author_email, text, created_at, page_id, page_title, page_url.
+For pages from step 2 that @-mention me in their content (fetch them with
+mcp__notion__notion-fetch), return one item kind="mention" with id = page id + ":" +
+the page's last edited time, created_at = that time, author = who last edited it, and
+text = the paragraph that mentions me.
+Return {{"items": []}} if there is nothing."""
+
+
+def _notion_events(items: list[dict], my_emails: set[str]) -> list[LayaEvent]:
+    events = []
+    for it in items:
+        author_email = (it.get("author_email") or "").lower()
+        conversation = f"{it['page_id']}:{it['discussion_id']}" if it.get("discussion_id") else it["page_id"]
+        events.append(_make_event(
+            platform="notion", native_id=it["id"], timestamp=_parse_ts(it["created_at"]),
+            raw_event_type=f"page_{it['kind']}", actor_name=it.get("author_name", ""),
+            actor_email=author_email, actor_handle=None, subject_type="page",
+            subject_id=conversation, subject_title=it["page_title"],
+            subject_url=it.get("page_url"), body=it.get("text", ""),
+            metadata={"notion_page_id": it["page_id"], "is_self": author_email in my_emails},
+        ))
+    return events
+
+
 # ── GitHub (gh CLI, no LLM) ──────────────────────────────────────────────
 
 
@@ -588,6 +665,16 @@ def _html_url(api_url: str | None) -> str | None:
     return url.replace("/pulls/", "/pull/")
 
 
+async def _is_own_pr(api_url: str | None, me: str) -> bool:
+    if not api_url:
+        return False
+    try:
+        pr = await _gh_json("api", api_url)
+    except RuntimeError:
+        return False
+    return ((pr or {}).get("user") or {}).get("login", "").lower() == me.lower()
+
+
 async def _collect_github(since: datetime, settings: dict) -> list[LayaEvent]:
     me = settings["identity"].get("github_login") or (await _gh_json("api", "user"))["login"]
     orgs = {o.lower() for o in settings.get("github_orgs") or []}
@@ -607,6 +694,12 @@ async def _collect_github(since: datetime, settings: dict) -> list[LayaEvent]:
                 continue
             subject = n["subject"]
             number = (subject.get("url") or "").rstrip("/").rsplit("/", 1)[-1]
+            # Code review of other people's PRs runs through CodeRabbit, so their PRs
+            # only matter when someone @-mentions the user there. The user's own PRs
+            # (and issues) keep every comment and review from a person.
+            if subject.get("type") == "PullRequest" and n.get("reason") != "mention":
+                if n.get("reason") != "author" and not await _is_own_pr(subject.get("url"), me):
+                    continue
             body, actor, url = "", "", _html_url(subject.get("url"))
             if subject.get("latest_comment_url") and subject["latest_comment_url"] != subject.get("url"):
                 try:
@@ -684,6 +777,12 @@ async def _collect_source(source: str, since: datetime, settings: dict) -> list[
         prompt = _gmail_prompt(since, settings["gmail_exclude_senders"], my_name)
         out = await _claude_collect("gmail", prompt, _GMAIL_SCHEMA, model, timeout)
         return _gmail_events(out.get("messages", []), my_emails)
+    if source == "notion":
+        from laya.config import get_self_user
+
+        my_name = (get_self_user() or {}).get("name") or "me"
+        out = await _claude_collect("notion", _notion_prompt(since, my_name), _NOTION_SCHEMA, model, timeout)
+        return _notion_events(out.get("items", []), my_emails)
     if source == "linear":
         out = await _claude_collect("linear", _linear_prompt(since), _LINEAR_SCHEMA, model, timeout)
         return _linear_events(out.get("items", []), my_emails)
