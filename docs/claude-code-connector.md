@@ -27,6 +27,7 @@ This document is the contract between the parts of the integration. Code that im
 | `connect.py` | connect / disconnect / configure a platform |
 | `egress.py` | `ClaudeCodeBackend(EgressBackend)` for sending |
 | `my_work.py` | the "My work" view's data: open Linear issues and the user's own open pull requests (section "My work" below) |
+| `work_actions.py` | direct actions on My work rows, each on the user's click (section "My work actions" below) |
 | `api.py` | REST endpoints below |
 
 ### Tables (module-owned)
@@ -120,6 +121,9 @@ Linked documents:
 | PUT | `/claude-code/{platform}/enabled` | `{enabled: bool}` → pauses or resumes the platform's sweeps, returns the platform status |
 | POST | `/claude-code/{platform}/sync` | sweeps now, returns `{events, error}` |
 | GET | `/claude-code/my-work?refresh=false` | `{github: {prs, connected, error, note, fetched_at, cached}, linear: {issues, …same}}` (section "My work") |
+| GET | `/claude-code/my-work/linear/states?team=TRAD&refresh=false` | `{team, states: [{id, name, type}]}` |
+| POST | `/claude-code/my-work/linear/{identifier}/action` | `{action: state\|assign_me\|priority\|comment, value, dry_run?}` → `{ok, issue, removed, result}` |
+| POST | `/claude-code/my-work/github/action` | `{repo, number, action: ready\|draft\|reviewers\|comment\|update_branch\|merge, reviewers?, body?, method?, head_sha?, delete_branch?, dry_run?}` → `{ok, pr, removed, state, output}` |
 
 ### Seeded rules (idempotent by name, through the rules API)
 
@@ -156,6 +160,15 @@ A send turn: `--allowedTools` = the one tool (Slack `send` role, Gmail `draft` r
 - Linear, only while the linear source is connected: one `claude -p` turn (step `claude_code_linear_my_work`, the source's `model`) that may call only the discovered `list_issues` tool, every other MCP tool denied. It lists the issues assigned to the user and the issues the user created in the open state types (`started`, `unstarted`, `backlog`, `triage`); the code merges them into one row per issue with `assigned_to_me` / `created_by_me`, drops completed / canceled ones, and keeps the assignee. Cycle names are not read (`list_issues` returns only a cycle id).
 - Each section is cached in `claude_code_state` (platform `my_work`, keys `github` / `linear`) for 10 minutes; `refresh=true` skips the cache. While the agent budget is paused the Linear turn does not run and the cached issues come back with a `note`. A failure is reported in the section's `error` next to its last cached data; the endpoint does not fail.
 - UI: Linear grouped In progress → Todo → Backlog → Triage, sorted by priority, due date, update; filter "Assigned to me" · "Created by me" · "All" (default assigned, `localStorage` `laya.work.linearFilter`); issues the user created for someone else show the assignee or "Unassigned". Pull requests grouped Needs your action (changes requested, failing checks, conflicts) → Waiting on review → Ready to merge (approved and green) → Drafts.
+
+## My work actions
+
+`claude_code/work_actions.py`, endpoints above. Every action runs only from its endpoint, which the UI calls on the user's click; nothing runs on a schedule and nothing is retried. Refusals and failures come back as HTTP errors with a readable `detail` (400 invalid input, 403 not the user's PR, 404 not connected, 409 the row changed or an action on it is already running, 502 the tool or `gh` failed). `dry_run: true` validates and returns the command without running it.
+
+- **Linear** (change state, assign to me, set priority, comment). Discovery maps the roles `save_issue`, `save_comment` (`discover.WRITE_ROLES`, never in `READ_ROLES`) and `list_issue_statuses`. An action is one write turn whose `--allowedTools` is exactly that tool, every other discovered MCP tool in `--disallowedTools`, `--tools ""`; the prompt holds the arguments as JSON to copy verbatim: `save_issue` `{id, state | assignee: "me" | priority}` (always `id`, which makes it an update), `save_comment` `{issueId, body}` (never `id`, which would edit a comment). `--json-schema` asks for `{ok, id, url, error}`; permission denials or `ok=false` fail the action. A second turn that may use only `get_issue` reads the issue back, and the action succeeds only when Linear reports the new state / priority / the user as assignee. A state must be one of the team's workflow states, read with one `list_issue_statuses` turn per team and cached in `claude_code_state` (platform `work_actions`, key `states:<TEAM>`) for 24 h.
+- **GitHub** (ready for review, back to draft, request reviewers, comment, update branch, merge), with `gh` and no model turn: `gh pr ready N -R o/r [--undo]`, `gh pr edit --add-reviewer`, `gh pr comment --body-file -` (body on stdin), `gh pr update-branch`, `gh pr merge N -R o/r --squash|--merge|--rebase --match-head-commit <sha> [--delete-branch]`. `--admin` and `--auto` are never built. Before each command the PR is read live (one GraphQL call with `viewer`): the author must be the viewer, the PR open, and for a merge the method one the repository allows, the PR not a draft and its head the commit the user confirmed. `gh` runs in an empty temp directory with `GH_PROMPT_DISABLED=1`, so it never touches a local checkout.
+- After an action the row's fresh data replaces it in the My work cache (`my_work.replace_cached_item`); a completed / canceled issue or a merged / closed PR is dropped. The PR query also reads `headRefOid`, `mergeStateStatus`, the author and the repository's `mergeCommitAllowed` / `squashMergeAllowed` / `rebaseMergeAllowed` / `deleteBranchOnMerge`.
+- UI: `lib/components/work/LinearRowActions.svelte` (state picker + menu) and `PrRowActions.svelte` (inline Ready for review / Merge + menu, merge confirm dialog with repo#number, title, method, head commit, checks, review, merge state and delete-branch checkbox); pure logic in `lib/work/actions.ts`.
 
 ## Board
 
