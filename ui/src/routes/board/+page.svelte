@@ -179,18 +179,51 @@
 		await load();
 	}
 
-	function onDragStart(e: DragEvent, card: ActionCard) {
-		dragging = card;
-		e.dataTransfer?.setData('text/plain', card.card_id);
-		if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+	// Drag with pointer events, not HTML5 drag and drop: in the Tauri window on
+	// macOS the native file-drop handler swallows HTML5 drag events, so cards
+	// could not be dropped on a lane. A drag starts after a few pixels of
+	// movement, so a plain click still opens the card or hits its buttons.
+	const DRAG_THRESHOLD_PX = 6;
+	let pointer = $state<{ card: ActionCard; startX: number; startY: number; x: number; y: number } | null>(null);
+	let suppressClick = false;
+
+	function onPointerDown(e: PointerEvent, card: ActionCard) {
+		if (e.button !== 0) return;
+		pointer = { card, startX: e.clientX, startY: e.clientY, x: e.clientX, y: e.clientY };
+		window.addEventListener('pointermove', onPointerMove);
+		window.addEventListener('pointerup', onPointerUp, { once: true });
 	}
 
-	function onDrop(e: DragEvent, target: DropTarget) {
-		e.preventDefault();
+	function onPointerMove(e: PointerEvent) {
+		if (!pointer) return;
+		pointer = { ...pointer, x: e.clientX, y: e.clientY };
+		if (!dragging) {
+			if (Math.hypot(e.clientX - pointer.startX, e.clientY - pointer.startY) < DRAG_THRESHOLD_PX) return;
+			dragging = pointer.card;
+			document.body.style.userSelect = 'none';
+		}
+		const target = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>('[data-drop]');
+		dropTarget = (target?.dataset.drop as DropTarget | undefined) ?? null;
+	}
+
+	function onPointerUp() {
+		window.removeEventListener('pointermove', onPointerMove);
+		document.body.style.userSelect = '';
 		const card = dragging;
+		const target = dropTarget;
+		pointer = null;
 		dragging = null;
 		dropTarget = null;
-		if (card) moveTo(card, target);
+		if (!card) return;
+		suppressClick = true; // the click that ends a drag must not open the card
+		setTimeout(() => (suppressClick = false), 0);
+		if (target) moveTo(card, target);
+	}
+
+	function onClickCapture(e: MouseEvent) {
+		if (!suppressClick) return;
+		e.stopPropagation();
+		e.preventDefault();
 	}
 
 	// Reload on card and tag changes pushed by the engine (new cards, status changes, lane tags).
@@ -270,9 +303,7 @@
 				<section
 					class="flex {view === 'detailed' ? 'w-[340px] min-w-[300px]' : 'w-72 min-w-[16rem]'} flex-1 flex-col rounded-xl border bg-surface-900/40 transition-colors
 						{dropTarget === column.id ? 'border-laya-orange/60 bg-laya-orange/5' : 'border-surface-800'}"
-					ondragover={(e) => { e.preventDefault(); dropTarget = column.id; }}
-					ondragleave={() => { if (dropTarget === column.id) dropTarget = null; }}
-					ondrop={(e) => onDrop(e, column.id as Lane)}
+					data-drop={column.id}
 					aria-label={column.title}
 				>
 					<header class="flex items-center gap-2 px-3 pb-2 pt-3">
@@ -304,9 +335,8 @@
 									<!-- The Pulse card itself: summary, actor, source, quick actions. -->
 									<div
 										role="listitem"
-										draggable="true"
-										ondragstart={(e) => onDragStart(e, card)}
-										ondragend={() => { dragging = null; dropTarget = null; }}
+										onpointerdown={(e) => onPointerDown(e, card)}
+										onclickcapture={onClickCapture}
 										class="cursor-grab active:cursor-grabbing {dragging?.card_id === card.card_id ? 'opacity-40' : ''}"
 									>
 										<ActionCardComponent
@@ -319,9 +349,8 @@
 								{:else}
 								<button
 									type="button"
-									draggable="true"
-									ondragstart={(e) => onDragStart(e, card)}
-									ondragend={() => { dragging = null; dropTarget = null; }}
+									onpointerdown={(e) => onPointerDown(e, card)}
+									onclickcapture={onClickCapture}
 									onclick={() => openCard(card)}
 									class="group w-full rounded-lg border px-3 py-2 text-left transition-colors
 										{selected?.card_id === card.card_id
@@ -380,9 +409,7 @@
 			<section
 				class="flex w-28 shrink-0 flex-col items-center justify-center gap-2 rounded-xl border border-dashed text-laya-micro transition-colors
 					{dropTarget === 'archive' ? 'border-laya-orange/60 bg-laya-orange/5 text-laya-orange' : 'border-surface-700 text-surface-500'}"
-				ondragover={(e) => { e.preventDefault(); dropTarget = 'archive'; }}
-				ondragleave={() => { if (dropTarget === 'archive') dropTarget = null; }}
-				ondrop={(e) => onDrop(e, 'archive')}
+				data-drop="archive"
 				aria-label="Archive"
 			>
 				<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -404,3 +431,11 @@
 		</aside>
 	{/if}
 </div>
+
+{#if dragging && pointer}
+	<!-- Follows the pointer while a card is dragged. -->
+	<div
+		class="pointer-events-none fixed z-[10000] max-w-[260px] truncate rounded-lg border border-laya-orange/60 bg-surface-800/95 px-3 py-2 text-laya-secondary text-surface-100 shadow-lg"
+		style="left:{pointer.x + 12}px; top:{pointer.y + 12}px"
+	>{dragging.header}</div>
+{/if}
