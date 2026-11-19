@@ -23,7 +23,12 @@ export interface FileDropHandlers {
 
 /** Register the drop listeners; returns a combined unsubscribe. */
 export function subscribeFileDrop(h: FileDropHandlers): () => void {
+	// Only file drags are ours. Dragging an element inside the app (a card on the
+	// board) must not raise the drop overlay, which would cover the drop target.
+	const carriesFiles = (e: DragEvent) => !!e.dataTransfer?.types?.includes('Files');
+
 	function handleDrop(e: DragEvent) {
+		if (!carriesFiles(e)) return;
 		e.preventDefault();
 		e.stopPropagation();
 		h.onLeave?.();
@@ -32,6 +37,7 @@ export function subscribeFileDrop(h: FileDropHandlers): () => void {
 	}
 
 	function handleDragOver(e: DragEvent) {
+		if (!carriesFiles(e)) return;
 		e.preventDefault();
 		e.stopPropagation();
 		if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
@@ -48,6 +54,7 @@ export function subscribeFileDrop(h: FileDropHandlers): () => void {
 	window.addEventListener('dragleave', handleDragLeave);
 
 	let unlistenTauri: (() => void) | undefined;
+	let nativeFileDrag = false;
 	let disposed = false;
 	(async () => {
 		try {
@@ -55,13 +62,20 @@ export function subscribeFileDrop(h: FileDropHandlers): () => void {
 			const w = getCurrentWebviewWindow();
 			const unlisten = await w.onDragDropEvent((event) => {
 				const p = event.payload;
-				if (p.type === 'enter' || p.type === 'over') {
-					h.onOver?.();
+				// The native events also fire for drags inside the page; only a drag
+				// that entered with file paths is a file drop.
+				if (p.type === 'enter') {
+					nativeFileDrag = p.paths.length > 0;
+					if (nativeFileDrag) h.onOver?.();
+				} else if (p.type === 'over') {
+					if (nativeFileDrag) h.onOver?.();
 				} else if (p.type === 'drop') {
-					h.onLeave?.();
+					if (nativeFileDrag) h.onLeave?.();
+					nativeFileDrag = false;
 					if (p.paths.length > 0) h.onPaths?.(p.paths);
 				} else {
-					h.onLeave?.();
+					if (nativeFileDrag) h.onLeave?.();
+					nativeFileDrag = false;
 				}
 			});
 			// The subscriber may have gone away while the import resolved.
