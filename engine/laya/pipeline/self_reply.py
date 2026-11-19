@@ -43,6 +43,7 @@ RESOLVED_IN_SOURCE_REASON = "Resolved in the source"
 
 # filter_rule broadcast for the user's own event, which is marked filtered.
 SELF_EVENT_FILTER = "Your own message"
+ALREADY_ANSWERED_FILTER = "You already replied later in this conversation"
 
 
 def is_self_event(event: LayaEvent, self_user: dict | None) -> bool:
@@ -145,4 +146,74 @@ async def close_answered_cards(db, event: LayaEvent) -> list[dict]:
             platform=event.source.platform,
             closed_count=len(closed),
         )
+    return closed
+
+
+async def later_self_reply(db, event: LayaEvent, self_user: dict | None) -> LayaEvent | None:
+    """The user's first message in the event's conversation after the event, if any.
+
+    Events of one sweep are processed in parallel, so the user's reply can be
+    processed before the card for the message it answers exists, and
+    close_answered_cards then has nothing to close. Checking from the other side
+    when a card is about to be made closes that gap.
+    """
+    key = conversation_key(event.source.platform, event.subject.id, event.content.metadata)
+    if key is None:
+        return None
+    rows = await db.execute_fetchall(
+        """SELECT raw_json FROM events
+           WHERE source_platform = ? AND event_id != ? AND timestamp > ?
+           ORDER BY timestamp ASC LIMIT 200""",
+        (event.source.platform, event.event_id, db_ts(event.timestamp)),
+    )
+    for row in rows:
+        try:
+            later = LayaEvent.model_validate_json(row["raw_json"])
+        except (TypeError, ValueError):
+            continue
+        if (
+            conversation_key(later.source.platform, later.subject.id, later.content.metadata) == key
+            and is_self_event(later, self_user)
+        ):
+            return later
+    return None
+
+
+async def close_cards_answered_later(db, self_user: dict | None) -> int:
+    """Close open cards whose conversation the user has already answered.
+
+    Run once at startup to repair cards made before the user's reply was seen.
+    """
+    placeholders = ", ".join("?" for _ in _ANSWERABLE_STATUSES)
+    rows = await db.execute_fetchall(
+        f"""SELECT c.card_id, e.raw_json FROM action_cards c JOIN events e ON e.event_id = c.event_id
+            WHERE c.status IN ({placeholders})
+              AND (c.status_set_by IS NULL OR c.status_set_by != ?)""",
+        (*_ANSWERABLE_STATUSES, SET_BY_USER),
+    )
+    closed = 0
+    for row in rows:
+        try:
+            event = LayaEvent.model_validate_json(row["raw_json"])
+        except (TypeError, ValueError):
+            continue
+        reply = await later_self_reply(db, event, self_user)
+        if reply is None:
+            continue
+        reason = (
+            RESOLVED_IN_SOURCE_REASON if reply.content.metadata.get("resolved_in_source")
+            else SELF_REPLY_REASON
+        )
+        if reply.subject.url:
+            reason = f"{reason}: {reply.subject.url}"
+        try:
+            await transition_card_status(
+                row["card_id"], "done", actor="pipeline",
+                extra_fields={"status_reason": reason, "status_set_by": SET_BY_LAYA},
+            )
+            closed += 1
+        except ValueError:
+            continue
+    if closed:
+        log.info("self_reply_closed_answered_cards", closed_count=closed)
     return closed

@@ -334,6 +334,16 @@ async def lifespan(app: FastAPI):
     # Start briefing scheduler
     start_scheduler()
 
+    # Close cards whose conversation the user already answered (repairs cards made
+    # before the reply was seen, e.g. during a backlog run).
+    try:
+        from laya.config import get_self_user
+        from laya.db.sqlite import get_db as _get_db
+        from laya.pipeline.self_reply import close_cards_answered_later
+        await close_cards_answered_later(await _get_db(), get_self_user())
+    except Exception as e:
+        log.warning("close_cards_answered_later_failed", error=str(e))
+
     # Start the MCP collector (no-op until mcp_collector.enabled is set)
     from laya.collectors.mcp_collector import start_collector
     start_collector()

@@ -302,7 +302,9 @@ async def process_event(event_id: str) -> None:
     from laya.pipeline.ingest import run_ingest
     from laya.pipeline.router import run_router
     from laya.pipeline.rules import run_rules
-    from laya.pipeline.self_reply import SELF_EVENT_FILTER, close_answered_cards, is_self_event
+    from laya.pipeline.self_reply import (
+        ALREADY_ANSWERED_FILTER, SELF_EVENT_FILTER, close_answered_cards, is_self_event, later_self_reply,
+    )
     from laya.pipeline.space_resolution import resolve_space
     from laya.pipeline.stager import run_stager
     from laya.pipeline.emit import run_emit
@@ -343,6 +345,20 @@ async def process_event(event_id: str) -> None:
                         "filter_rule": SELF_EVENT_FILTER,
                         "closed_card_ids": [c["card_id"] for c in closed],
                     },
+                }
+            )
+            return
+
+        # ALREADY ANSWERED — the user replied later in this conversation (that
+        # reply may have been processed first). No card, no LLM call.
+        reply = await later_self_reply(await get_db(), event, user_identity)
+        if reply is not None:
+            await _mark_filtered(event_id)
+            await manager.broadcast(
+                {
+                    "type": "event_classified",
+                    "event_id": event.event_id,
+                    "payload": {"filtered": True, "filter_rule": ALREADY_ANSWERED_FILTER},
                 }
             )
             return

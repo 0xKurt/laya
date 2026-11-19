@@ -294,3 +294,58 @@ async def test_process_event_non_self_untouched(db):
     router.assert_awaited_once()
     assert status == "completed"
     assert (await _card(db, "card_ask"))["status"] == "ready"
+
+
+# ---------------------------------------------------------------------------
+# Reply processed before the card it answers (backlog runs in parallel)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_event_answered_later_makes_no_card_and_no_llm_call(db):
+    dm = {"slack_channel_id": "D1", "slack_channel_type": "dm"}
+    # The user's reply at 10:00 is already stored (and processed) ...
+    await _store(db, _event("evt_me", hour=10, subject_id="D1", handle="U_KIM", metadata=dm))
+    # ... when Dave's 09:00 message gets its turn.
+    ask = _event("evt_ask", hour=9, subject_id="D1", metadata=dm)
+    await _store(db, ask)
+
+    status, router = await _process(db, ask, SELF_TEAM)
+
+    assert status == "filtered"
+    router.assert_not_called()
+    assert await db.execute_fetchall("SELECT 1 FROM action_cards WHERE event_id = 'evt_ask'") == []
+
+
+@pytest.mark.asyncio
+async def test_later_self_reply_ignores_other_conversations_and_earlier_messages(db):
+    from laya.pipeline.self_reply import later_self_reply
+
+    dm = {"slack_channel_id": "D1", "slack_channel_type": "dm"}
+    other_dm = {"slack_channel_id": "D2", "slack_channel_type": "dm"}
+    await _store(db, _event("evt_me_before", hour=8, subject_id="D1", handle="U_KIM", metadata=dm))
+    await _store(db, _event("evt_me_elsewhere", hour=10, subject_id="D2", handle="U_KIM", metadata=other_dm))
+    ask = _event("evt_ask", hour=9, subject_id="D1", metadata=dm)
+    await _store(db, ask)
+
+    assert await later_self_reply(db, ask, SELF_USER) is None
+
+
+@pytest.mark.asyncio
+async def test_startup_sweep_closes_cards_answered_later(db):
+    from laya.pipeline.self_reply import close_cards_answered_later
+
+    dm = {"slack_channel_id": "D1", "slack_channel_type": "dm"}
+    await _ask(db, _event("evt_ask", hour=9, subject_id="D1", metadata=dm), "card_ask")
+    await _ask(db, _event("evt_open", hour=11, subject_id="D1", metadata=dm), "card_open")
+    await _store(db, _event("evt_me", hour=10, subject_id="D1", handle="U_KIM", metadata=dm,
+                            url="https://slack/p10"))
+    await _ask(db, _event("evt_kept", hour=9, subject_id="D1", metadata=dm), "card_kept", set_by="user")
+
+    with patch("laya.models.card_lifecycle.manager.broadcast", new_callable=AsyncMock):
+        closed = await close_cards_answered_later(db, SELF_USER)
+
+    assert closed == 1
+    assert (await _card(db, "card_ask"))["status"] == "done"
+    assert "https://slack/p10" in (await _card(db, "card_ask"))["status_reason"]
+    assert (await _card(db, "card_open"))["status"] == "ready"   # came after the reply
+    assert (await _card(db, "card_kept"))["status"] == "ready"   # user reopened it
