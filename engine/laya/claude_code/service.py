@@ -8,7 +8,9 @@ Every minute the loop sweeps each connected, enabled platform that is due:
 - due: no cursor yet, or the cursor (start of the last successful sweep,
   stored in the database, so a restart does not trigger a fresh sweep of
   every platform) is at least `interval_minutes` old;
-- inside the platform's `active_hours` (in its `timezone`);
+- inside the platform's `active_hours` (in its `timezone`), except the first
+  sweep after connecting, which runs at once so a new source shows its
+  cards right away;
 - the agent budget is not paused (pipeline/agent_budget.py);
 - the space of the platform's `sources` row is not paused.
 
@@ -156,7 +158,9 @@ async def run_due_sweeps(now: datetime | None = None) -> list[str]:
         platform = source["platform"]
         if platform not in COLLECTORS or not source["enabled"]:
             continue
-        if not within_active_hours(source["config"], now) or not is_due(source, now):
+        if not is_due(source, now):
+            continue
+        if source.get("cursor") and not within_active_hours(source["config"], now):
             continue
         if await blocked_reason(platform):
             continue

@@ -26,7 +26,7 @@ import structlog
 from laya.claude_code import store
 from laya.claude_code.discover import Discovery, PlatformDiscovery, discover
 from laya.claude_code.service import source_id
-from laya.config import load_rules, load_team, save_rules, save_team
+from laya.config import load_rules, load_settings, load_team, save_rules, save_settings, save_team
 from laya.db.sqlite import get_db
 from laya.models.rules import RulesConfig
 from laya.models.team import TeamConfig
@@ -194,6 +194,45 @@ async def ensure_source_row(platform: str, space_id: str | None) -> str:
 # ── connect / disconnect / configure ─────────────────────────────────────
 
 
+# Stage models on the Claude subscription, used when no API key is configured:
+# without a key an API model cannot process a single event, so a user who
+# connects through Claude Code would get no cards at all.
+SUBSCRIPTION_MODELS = {
+    "router": "agent/claude_code/haiku",
+    "stager": "agent/claude_code/sonnet",
+    "omni": "agent/claude_code/haiku",
+}
+
+
+def _has_llm_key() -> bool:
+    from laya.security.keychain import has_api_key
+
+    providers = ("anthropic", "openai", "google", "openrouter")
+    return any(has_api_key(p) for p in providers) or bool(load_settings().get("custom_providers"))
+
+
+def use_subscription_models() -> list[str]:
+    """Point the stage models at the Claude subscription when there is no API key.
+
+    Only roles still on an API model change; agent and local models the user
+    chose stay. Returns the roles changed (visible in Settings → Models).
+    """
+    if _has_llm_key():
+        return []
+    settings = load_settings()
+    models = dict(settings.get("models") or {})
+    changed = [
+        role for role in SUBSCRIPTION_MODELS
+        if not str(models.get(role, "")).startswith(("agent/", "ollama/", "lm_studio/"))
+    ]
+    if changed:
+        models.update({role: SUBSCRIPTION_MODELS[role] for role in changed})
+        settings["models"] = models
+        save_settings(settings)
+        log.info("claude_code_subscription_models_set", roles=changed)
+    return changed
+
+
 async def connect(platform: str, space_id: str | None = None, found: Discovery | None = None) -> None:
     if platform not in store.PLATFORMS:
         raise ConnectError(f"Unknown platform '{platform}'")
@@ -212,6 +251,7 @@ async def connect(platform: str, space_id: str | None = None, found: Discovery |
     await store.upsert_source(platform, **fields)
     write_identity(pd.identity)
     seed_rules(platform)
+    use_subscription_models()
     for hook in CONNECT_HOOKS:
         await hook(platform, pd)
     log.info("claude_code_connected", platform=platform)

@@ -65,8 +65,17 @@ class Files:
              "action": "drop"},
         ]}
 
+    settings = None
+    has_key = False
+
     def patches(self):
+        if self.settings is None:
+            self.settings = {"models": {"router": "claude-haiku-4-5", "stager": "claude-sonnet-4-6",
+                                        "omni": "ollama/llama3", "chat": "claude-sonnet-4-6"}}
         return [
+            patch.object(connect, "load_settings", side_effect=lambda: copy.deepcopy(self.settings)),
+            patch.object(connect, "save_settings", side_effect=lambda st: setattr(self, "settings", copy.deepcopy(st))),
+            patch.object(connect, "_has_llm_key", side_effect=lambda: self.has_key),
             patch.object(connect, "load_team", side_effect=lambda: copy.deepcopy(self.team)),
             patch.object(connect, "save_team", side_effect=lambda t: setattr(self, "team", copy.deepcopy(t))),
             patch.object(connect, "load_rules", side_effect=lambda: copy.deepcopy(self.rules)),
@@ -519,3 +528,35 @@ async def test_sweep_after_restart_uses_refreshed_tool_names(db, files):
         await service.sweep("slack")
     assert seen["tools"]["search"] == "mcp__new__search"
     assert seen["deny_tools"] == fresh.all_tools
+
+
+@pytest.mark.asyncio
+async def test_first_sweep_runs_outside_active_hours(db, files):
+    await connect.connect("slack")
+    await connect.configure("slack", {"timezone": "UTC"})
+    evening = datetime(2026, 2, 23, 22, tzinfo=timezone.utc)  # Monday, after active hours
+    with patch.object(service, "sweep", new_callable=AsyncMock):
+        # Just connected: no cursor yet, so it sweeps at once.
+        assert await service.run_due_sweeps(evening) == ["slack"]
+        # After that first sweep the active hours apply again.
+        await store.upsert_source("slack", cursor=(evening - timedelta(hours=2)).isoformat())
+        assert await service.run_due_sweeps(evening) == []
+
+
+
+@pytest.mark.asyncio
+async def test_connect_without_api_key_uses_subscription_models(db, files):
+    await connect.connect("slack")
+    models = files.settings["models"]
+    assert models["router"] == "agent/claude_code/haiku"
+    assert models["stager"] == "agent/claude_code/sonnet"
+    assert models["omni"] == "ollama/llama3"          # a local model the user chose stays
+    assert models["chat"] == "claude-sonnet-4-6"      # roles outside the subscription set stay
+
+
+@pytest.mark.asyncio
+async def test_connect_with_api_key_keeps_models(db, files):
+    files.has_key = True
+    before = copy.deepcopy(files.settings)
+    await connect.connect("slack")
+    assert files.settings == before
