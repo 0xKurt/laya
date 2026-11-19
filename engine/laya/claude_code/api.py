@@ -12,7 +12,7 @@ from fastapi import APIRouter, Body, HTTPException
 from laya.claude_code import connect as connect_mod
 from laya.claude_code import egress as _egress  # noqa: F401  registers the send connection hooks
 from laya.claude_code import discover as discover_mod
-from laya.claude_code import my_work, service, store
+from laya.claude_code import my_work, service, store, work_actions
 from laya.claude_code.discover import SEND_ROLES, Discovery, PlatformDiscovery
 
 router = APIRouter(prefix="/claude-code", tags=["claude-code"])
@@ -65,6 +65,47 @@ async def get_status() -> dict[str, Any]:
 async def get_my_work(refresh: bool = False) -> dict[str, Any]:
     """The user's open Linear issues and own open GitHub pull requests."""
     return await my_work.get_my_work(refresh=refresh)
+
+
+def _action_error(e: work_actions.ActionError) -> HTTPException:
+    return HTTPException(status_code=e.status, detail=str(e))
+
+
+@router.get("/my-work/linear/states")
+async def get_linear_states(team: str, refresh: bool = False) -> dict[str, Any]:
+    """A Linear team's workflow states, for the state menu of My work."""
+    try:
+        return {"team": team.upper(), "states": await work_actions.team_states(team, refresh=refresh)}
+    except work_actions.ActionError as e:
+        raise _action_error(e) from e
+
+
+@router.post("/my-work/linear/{identifier}/action")
+async def post_linear_action(identifier: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """One Linear action on the user's click: `{action: state|assign_me|priority|comment,
+    value, dry_run?}`. Returns the issue as Linear reports it afterwards."""
+    try:
+        return await work_actions.linear_action(
+            identifier, str(body.get("action") or ""), body.get("value"),
+            dry_run=bool(body.get("dry_run")),
+        )
+    except work_actions.ActionError as e:
+        raise _action_error(e) from e
+
+
+@router.post("/my-work/github/action")
+async def post_github_action(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """One action on the user's own pull request: `{repo, number, action:
+    ready|draft|reviewers|comment|update_branch|merge, reviewers?, body?, method?,
+    head_sha?, delete_branch?, dry_run?}`. Returns the PR as GitHub reports it afterwards."""
+    try:
+        return await work_actions.github_action(
+            str(body.get("repo") or ""), body.get("number"), str(body.get("action") or ""),
+            {k: body.get(k) for k in ("reviewers", "body", "method", "head_sha", "delete_branch")},
+            dry_run=bool(body.get("dry_run")),
+        )
+    except work_actions.ActionError as e:
+        raise _action_error(e) from e
 
 
 @router.post("/discover")
