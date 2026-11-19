@@ -33,8 +33,10 @@ from dataclasses import dataclass, field
 import structlog
 
 from laya.config import load_settings
+from laya.db.timeutil import db_ts
 from laya.models.card import CardStatusVerdict
 from laya.models.card_lifecycle import INACTIVE_STATUSES, transition_card_status
+from laya.models.event import LayaEvent
 
 log = structlog.get_logger()
 
@@ -48,6 +50,18 @@ SET_BY_USER = "user"
 # Stored as status_reason on a late card when the later card that concluded the
 # work item has no reason of its own.
 _LATER_EVENT_REASON = "A later event concluded this work item."
+
+# Reasons recorded by apply_conclusion. The reason (with the event's URL
+# appended) is stored as the conclusion event's `events.filter_rule`; the
+# prefixes let _later_conclusion_reason find those events again.
+SELF_REPLY_REASON = "You replied in this conversation"
+RESOLVED_IN_SOURCE_REASON = "Resolved in the source"
+_CONCLUSION_PREFIXES = (SELF_REPLY_REASON, RESOLVED_IN_SOURCE_REASON)
+
+# Statuses of a card that waits on the user. A conclusion (the user's own reply,
+# or the item resolved in its source) closes these. A card that runs an agent,
+# executes an action or waits for agent input is left alone.
+CONCLUDABLE_STATUSES = ("ready", "requires_approval")
 
 
 def llm_card_status_enabled() -> bool:
@@ -188,9 +202,44 @@ async def _later_conclusion_reason(
            LIMIT 1""",
         (entity_id, exclude_event_id, event_ts),
     )
-    if not rows:
+    if rows:
+        return rows[0]["status_reason"] or _LATER_EVENT_REASON
+    return await _later_recorded_conclusion(db, entity_id, event_ts, exclude_event_id)
+
+
+def _split_entity_id(entity_id: str) -> tuple[str, str, str] | None:
+    """(platform, subject_type, subject_id) of an entity id built by
+    LayaEvent.entity_id. Neither the platform nor the subject type contains a
+    colon, so everything after the second colon is the subject id."""
+    parts = entity_id.split(":", 2)
+    return (parts[0], parts[1], parts[2]) if len(parts) == 3 else None
+
+
+async def _later_recorded_conclusion(
+    db, entity_id: str, event_ts: str, exclude_event_id: str
+) -> str | None:
+    """Reason of a conclusion recorded by apply_conclusion at or after `event_ts`.
+
+    A conclusion event (the user's own reply, an item resolved in its source)
+    produces no card, so its trace is the `filter_rule` apply_conclusion wrote
+    on its event row. Without this lookup, a card for an older event that
+    finished processing after the user's reply would stay open.
+    """
+    parts = _split_entity_id(entity_id)
+    if parts is None:
         return None
-    return rows[0]["status_reason"] or _LATER_EVENT_REASON
+    platform, subject_type, subject_id = parts
+    like = " OR ".join("filter_rule LIKE ?" for _ in _CONCLUSION_PREFIXES)
+    rows = await db.execute_fetchall(
+        f"""SELECT filter_rule FROM events
+            WHERE source_platform = ? AND subject_type = ? AND subject_id = ?
+              AND event_id != ? AND timestamp >= ? AND ({like})
+            ORDER BY timestamp ASC
+            LIMIT 1""",
+        (platform, subject_type, subject_id, exclude_event_id, event_ts,
+         *(f"{p}%" for p in _CONCLUSION_PREFIXES)),
+    )
+    return rows[0]["filter_rule"] if rows else None
 
 
 async def _user_reopened(db, event_id: str) -> bool:
@@ -254,6 +303,15 @@ async def decide_card_status(
                 decision.status = "done"
                 decision.status_reason = later_reason
                 decision.status_set_by = SET_BY_LAYA
+    elif base_status in CONCLUDABLE_STATUSES:
+        # A card waiting for approval is closed by a recorded conclusion (the
+        # user already answered, or the item was resolved in its source) just
+        # as apply_conclusion would have closed it had it existed then.
+        later_reason = await _later_recorded_conclusion(db, entity_id, event_ts, event_id)
+        if later_reason is not None:
+            decision.status = "done"
+            decision.status_reason = later_reason
+            decision.status_set_by = SET_BY_LAYA
 
     if verdict:
         if effect == "concludes":
@@ -285,13 +343,16 @@ async def close_earlier_cards(
     event_id: str,
     event_ts: str,
     decision: StatusDecision,
+    statuses: tuple[str, ...] = ("ready",),
 ) -> list[dict]:
     """Set to `done` the earlier cards that `decision` says the event settles.
 
     Only cards that meet all of these are closed:
     - same entity, and not the card of the event being processed;
-    - status `ready` (a card that is waiting for approval, running an agent,
-      failed, dismissed or archived is never touched);
+    - status in `statuses`, by default `ready` only (a card that is waiting
+      for approval, running an agent, failed, dismissed or archived is not
+      touched by the stager's answer; apply_conclusion also passes
+      `requires_approval`);
     - event time at or before `event_ts`;
     - not reopened by the user after Laya closed it.
 
@@ -304,11 +365,12 @@ async def close_earlier_cards(
     if not decision.closes_earlier_cards:
         return []
 
-    sql = """SELECT card_id, header FROM action_cards
-             WHERE entity_id = ? AND event_id != ? AND status = 'ready'
-               AND created_at <= ?
-               AND (status_set_by IS NULL OR status_set_by != ?)"""
-    params: list = [entity_id, event_id, event_ts, SET_BY_USER]
+    status_marks = ", ".join("?" for _ in statuses)
+    sql = f"""SELECT card_id, header FROM action_cards
+              WHERE entity_id = ? AND event_id != ? AND status IN ({status_marks})
+                AND created_at <= ?
+                AND (status_set_by IS NULL OR status_set_by != ?)"""
+    params: list = [entity_id, event_id, *statuses, event_ts, SET_BY_USER]
     if not decision.close_all_earlier:
         placeholders = ", ".join("?" for _ in decision.settled_card_ids)
         sql += f" AND card_id IN ({placeholders})"
@@ -342,3 +404,77 @@ async def close_earlier_cards(
             all_earlier=decision.close_all_earlier,
         )
     return closed
+
+
+def conclusion_reason(event: LayaEvent) -> str:
+    """The status_reason for cards a conclusion event closes, with its URL."""
+    resolved = event.content.metadata.get("resolved_in_source") is True
+    reason = RESOLVED_IN_SOURCE_REASON if resolved else SELF_REPLY_REASON
+    if event.subject.url:
+        reason = f"{reason}: {event.subject.url}"
+    return reason
+
+
+async def apply_conclusion(event: LayaEvent, actor_relationship: str | None = None) -> list[dict]:
+    """Conclude the event's work item without a card and without an LLM call.
+
+    Called for the user's own message (`actor_relationship == "self"`) and for
+    an event whose source reports the item resolved
+    (`content.metadata.resolved_in_source`). Under the entity's status lock it
+
+    - records the conclusion on the event row (`events.filter_rule` holds the
+      reason), so a card created later for an earlier event of the same
+      entity is created `done` (see _later_recorded_conclusion), and
+    - closes the entity's open cards (`ready`, `requires_approval`) whose
+      event is at or before this one, with `status_set_by='laya'` and a
+      reason that carries the event's URL.
+
+    Cards the user reopened are left alone. Returns the closed cards as dicts
+    with `card_id` and `header`.
+    """
+    from laya.db.sqlite import get_db
+
+    db = await get_db()
+    entity_id = event.entity_id
+    event_ts = db_ts(event.timestamp)
+    reason = conclusion_reason(event)
+    async with entity_status_lock(entity_id):
+        await db.execute(
+            "UPDATE events SET filter_rule = ? WHERE event_id = ?",
+            (reason, event.event_id),
+        )
+        await db.commit()
+        closed = await close_earlier_cards(
+            db,
+            entity_id=entity_id,
+            event_id=event.event_id,
+            event_ts=event_ts,
+            decision=StatusDecision(
+                status="done", close_all_earlier=True, closing_reason=reason
+            ),
+            statuses=CONCLUDABLE_STATUSES,
+        )
+    if closed:
+        from laya.pipeline.summarize import trigger_summary_status_update
+        from laya.tasks import create_task
+
+        # Tell the daily summary about each closed card, as emit does.
+        for card in closed:
+            create_task(
+                trigger_summary_status_update(card["card_id"], card["header"], "done"),
+                name=f"summary_status_{card['card_id']}",
+            )
+    log.info(
+        "conclusion_applied",
+        event_id=event.event_id,
+        entity_id=entity_id,
+        actor_relationship=actor_relationship,
+        resolved_in_source=event.content.metadata.get("resolved_in_source") is True,
+        closed_count=len(closed),
+    )
+    return closed
+
+
+def is_conclusion(event: LayaEvent, actor_relationship: str | None) -> bool:
+    """True for the user's own event and for an item resolved in its source."""
+    return actor_relationship == "self" or event.content.metadata.get("resolved_in_source") is True
