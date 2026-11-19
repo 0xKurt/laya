@@ -47,6 +47,7 @@ from laya.api.omni_api import router as omni_router
 from laya.api.health import router as health_router
 from laya.api.processing_rules_api import router as processing_rules_router
 from laya.api.rules_api import router as rules_router
+from laya.api.session_prep_api import router as session_prep_router
 from laya.api.settings_api import router as settings_router
 from laya.api.spaces_api import router as spaces_router
 from laya.api.board_api import router as board_router
@@ -551,6 +552,7 @@ app.include_router(omni_router, dependencies=auth_deps)
 app.include_router(team_router, dependencies=auth_deps)
 app.include_router(processing_rules_router, dependencies=auth_deps)
 app.include_router(rules_router, dependencies=auth_deps)
+app.include_router(session_prep_router, dependencies=auth_deps)
 app.include_router(settings_router, dependencies=auth_deps)
 app.include_router(spaces_router, dependencies=auth_deps)
 app.include_router(tags_router, dependencies=auth_deps)
