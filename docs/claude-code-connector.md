@@ -29,6 +29,7 @@ This document is the contract between the parts of the integration. Code that im
 | `my_work.py` | the "My work" view's data: open Linear issues and the user's own open pull requests (section "My work" below) |
 | `work_actions.py` | direct actions on My work rows, each on the user's click (section "My work actions" below) |
 | `terminal.py` | the Claude terminal: plain `claude` sessions in a PTY (section "Claude terminal" below) |
+| `accounts.py` | Claude accounts: registry, routing of inference stages and chat, per-account usage, sign-in in a PTY, connector matrix (section "Claude accounts" below) |
 | `api.py` | REST endpoints below |
 
 ### Tables (module-owned)
@@ -47,6 +48,11 @@ CREATE TABLE IF NOT EXISTS claude_code_sources (
 CREATE TABLE IF NOT EXISTS claude_code_state (
     platform TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,  -- e.g. slack thread memory, links cache
     PRIMARY KEY (platform, key)
+);
+CREATE TABLE IF NOT EXISTS claude_code_accounts (        -- accounts.py; the default account has no row
+    id TEXT PRIMARY KEY, config_dir TEXT NOT NULL,         -- ~/.laya/claude-accounts/<id>/ (0700)
+    email TEXT, plan TEXT, org_name TEXT, logged_in INTEGER NOT NULL DEFAULT 0,
+    status_checked_at TEXT, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS claude_code_terminal_sessions (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, cwd TEXT NOT NULL,
@@ -137,6 +143,16 @@ Linked documents:
 | POST | `/claude-code/terminal/{id}/resize` | `{cols, rows}` |
 | POST | `/claude-code/terminal/{id}/input` | `{text}` → inserted as one bracketed paste, control characters stripped, no Enter |
 | WS | `/claude-code/terminal/{id}/pty` | PTY stream (section "Claude terminal") |
+| GET | `/claude-code/accounts?refresh=false` | `{accounts: [{id, default, email, plan, logged_in, problem, usage: {windows, as_of}, connectors}], current, thresholds, login, connectors_url}` |
+| POST | `/claude-code/accounts` | starts signing in a new account → the sign-in `{id, kind, account_id, server, platform, state, url, error, started_at}` |
+| POST | `/claude-code/accounts/{id}/login` | signs an added account in again → the sign-in |
+| POST | `/claude-code/accounts/{id}/code` | `{code}` → written to the waiting CLI; never logged or returned |
+| GET | `/claude-code/accounts/{id}/status` | `{login}` (poll while `state` is `starting` / `waiting_code` / `verifying`) |
+| POST | `/claude-code/accounts/{id}/cancel` | ends the sign-in |
+| DELETE | `/claude-code/accounts/{id}` | `claude mcp logout` per server, `claude auth logout`, deletes the directory and the rows |
+| POST | `/claude-code/accounts/{id}/connectors/check` | lists the account's connectors (init message, no model call) → the matrix |
+| POST | `/claude-code/accounts/{id}/connectors/{linear\|notion}/add` | registers the default login's server (type and URL only) in the account |
+| POST | `/claude-code/accounts/{id}/connectors/{linear\|notion}/login` | `claude mcp login <server> --no-browser` in a PTY → the sign-in |
 
 ### Seeded rules (idempotent by name, through the rules API)
 
@@ -157,6 +173,9 @@ Linked documents:
 | `claude_code/api.py` | imports `claude_code.egress`, which registers the connect/disconnect hooks |
 | `security/engine_auth.py` | `require_engine_auth` authenticates a websocket route on a REST router with `require_ws_engine_auth` (the terminal's `/pty` socket) |
 | `mcp/turn_tokens.py` | `mint(..., ttl_seconds=None)` mints a token without expiry (a terminal session's, revoked on close) |
+| `llm/agent_backend.py` | Claude accounts: `_run_agent` takes the account's environment and records its rate-limit signal (per account) before raising; `_run_agent_routed` picks the account and retries once after a rejection; `agent_llm_stream` picks the account and retries once before anything was yielded |
+| `llm/client.py` | the agent path adds `claude_account` to the audit metadata and leaves recording Claude Code's rate limit to `agent_backend` |
+| `pipeline/agent_budget.py` | `rate_limit_windows` / `get_rate_limit_raw`; `evaluate_agent_budget` asks `accounts.native_block` for `claude_code`; `maybe_resume_agent_budget` ends an accounts-only pause once an account has room |
 | UI | `IntegrationsConfig.svelte` injects a "via Claude Code" entry per platform (the SMTP injection pattern) using `/claude-code/status`; `ClaudeCodeSource.svelte` is the detail panel; the setup wizard's step 3 includes `SetupClaudeCode.svelte`; `RulesEditor.svelte` accepts a free field path |
 
 ## Sending (Claude Code egress)
@@ -214,3 +233,13 @@ Implementation:
 | Prepare session | `POST /cards/{id}/session-prep` → `{prompt, topic, repo, worktree_path, commands, notes, llm_error}` (`sessions/prep.py`). One LLM call on the stager's model (override key `session_prep`); without it a template prompt from the card. Repository: GitHub entity id, event `github_repo`, a github.com URL on the card, or a `repos.json` entry the card names. Checkout: the `repos.json` path, else `<root>/<repo>` under settings `sessions.checkout_roots` (default `~/git/somnia`), else a clone command first. After the worktree command: `cp` of untracked env files and the install command of the checkout's lock file. |
 | Claims | `GET /cards/{id}/session-claims` (`sessions/verify.py`): merged / green / deployed claims in the card's text, grouped per PR, checked with `gh pr view --json state,statusCheckRollup`; each `confirmed`, `contradicted` or `unverified`. The UI (`SessionClaims.svelte`, card detail and workspace) shows only confirmed claims as facts. |
 
+## Claude accounts
+
+Settings → **Claude accounts** (`lib/components/settings/ClaudeAccountsConfig.svelte`, pure logic in `lib/utils/claudeAccounts.ts`); engine `claude_code/accounts.py`.
+
+- **Accounts.** The default account is the user's normal Claude Code login (no `CLAUDE_CONFIG_DIR`); it has no row. An added account is a Claude Code configuration directory `~/.laya/claude-accounts/<id>/` (0700); every `claude` call for it runs with `CLAUDE_CONFIG_DIR=<dir>`. Logins and MCP OAuth tokens stay in the CLI's own storage. Email and plan come from `claude auth status --json`. An account is eligible when it is logged in and is not the same Claude account (email) as the default or an earlier one.
+- **Add account.** `claude auth login --claudeai` runs in a PTY (cwd and config dir = the account directory). The CLI prints the authorize URL (OSC 8 link) and `Paste code here if prompted >`; the UI offers "Open login page" / "Copy link" and a paste field; the code is written to the PTY followed by a carriage return. Exit code 0 and `loggedIn` in `auth status` mean success; a wrong code prints `Login failed: …` and exits 1. A sign-in that ends with the email of an existing account is logged out again and refused. One sign-in runs at a time; it ends after 10 minutes. A new account whose sign-in fails, is cancelled or times out is deleted.
+- **Remove.** `claude mcp logout <server>` for each user-scope server in the directory's `.claude.json`, `claude auth logout`, then the directory (only inside `~/.laya/claude-accounts/`), the row, its rate-limit row and its connector matrix are deleted.
+- **Routing (inference stages and chat only).** `accounts.pick()` before each `claude` turn of `agent_llm_call` and `agent_llm_stream`. Preference order: default, then added accounts by creation. Sticky: the current account is kept until a window reaches its threshold (agent budget `pause_at_utilization`, default 5h 90 %, 7d 80 %); after a minimum dwell of 10 minutes (at once on a rejection) the account with most headroom that is under its thresholds takes over. A preferred account is returned to after the dwell once all its windows are 10 points below their thresholds. While every account is over, the current one stays. A turn rejected by the usage limit is retried once on the next account with room (a stream only while it has not yielded anything). Collectors, sending, My work, discovery, links and the terminal always run on the default account: a sweep on an account without the platform's connector would advance the cursor and lose data.
+- **Usage.** Every turn records its `rate_limit_info` in `agent_rate_limit_state` under `claude_code` (default) or `claude_code@<id>`; `cli.py` turns run in `stream-json` so collector, send and My work turns record theirs for the default account. Windows come from `unifiedWindows` (top-level fields fill a missing one); a window whose `resetsAt` has passed counts as reset; a rejection without a signal blocks the account for 30 minutes. The audit model id stays `agent/claude_code/<model>`, the account is in the metadata (`claude_account`). The agent budget pauses for Claude Code only when every eligible account is over its threshold, until the first of them recovers.
+- **Connector matrix** (read-only, stored in `claude_code_state` platform `accounts`, key `connectors:<id>`, refreshed by "Re-check" and after a sign-in): Slack, Gmail, Google Drive (claude.ai connectors; "Connect" opens `https://claude.ai/customize/connectors` for whichever account the browser is logged in to), Linear and Notion (when the default login has them as URL servers: "Add" runs `claude mcp add --scope user --transport <type> <name> <url>` in the account, copying only type and URL; "Log in" runs `claude mcp login <server> --no-browser` in a PTY with the same open / paste flow; the redirect address is pasted), GitHub (`gh`, the same for every account). States: connected, needs sign-in (`needs-auth`), failed, starting (`pending`), not connected.

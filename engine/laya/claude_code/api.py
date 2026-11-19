@@ -14,7 +14,7 @@ from fastapi import APIRouter, Body, HTTPException, WebSocket, WebSocketDisconne
 from laya.claude_code import connect as connect_mod
 from laya.claude_code import egress as _egress  # noqa: F401  registers the send connection hooks
 from laya.claude_code import discover as discover_mod
-from laya.claude_code import my_work, service, store, terminal, work_actions
+from laya.claude_code import accounts, my_work, service, store, terminal, work_actions
 from laya.claude_code.discover import SEND_ROLES, Discovery, PlatformDiscovery
 from laya.security.engine_auth import WS_SUBPROTOCOL, offered_subprotocols
 
@@ -116,6 +116,91 @@ async def run_discover() -> dict[str, Any]:
     found = await discover_mod.discover(force=True, with_identity=True)
     await discover_mod.refresh_stored_tools(found)
     return await build_status(found)
+
+
+# ── Claude accounts (claude_code/accounts.py) ─────────────────────────────
+
+
+def _account_error(e: accounts.AccountError) -> HTTPException:
+    return HTTPException(status_code=e.status, detail=str(e))
+
+
+@router.get("/accounts")
+async def get_accounts(refresh: bool = False) -> dict[str, Any]:
+    """The Claude accounts, their usage, connectors and the running sign-in."""
+    return await accounts.overview(refresh=refresh)
+
+
+@router.post("/accounts")
+async def add_account() -> dict[str, Any]:
+    """Start signing in a new account; returns the sign-in (poll its status)."""
+    try:
+        return await accounts.start_login()
+    except accounts.AccountError as e:
+        raise _account_error(e) from e
+
+
+@router.post("/accounts/{account_id}/login")
+async def login_account(account_id: str) -> dict[str, Any]:
+    try:
+        return await accounts.start_login(account_id)
+    except accounts.AccountError as e:
+        raise _account_error(e) from e
+
+
+@router.post("/accounts/{account_id}/code")
+async def submit_account_code(account_id: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """The code from the sign-in page; it is passed to the CLI and never stored."""
+    try:
+        return await accounts.submit_code(account_id, str(body.get("code") or ""))
+    except accounts.AccountError as e:
+        raise _account_error(e) from e
+
+
+@router.get("/accounts/{account_id}/status")
+async def account_login_status(account_id: str) -> dict[str, Any]:
+    return {"login": accounts.flow_status(account_id)}
+
+
+@router.post("/accounts/{account_id}/cancel")
+async def cancel_account_login(account_id: str) -> dict[str, Any]:
+    try:
+        return await accounts.cancel(account_id)
+    except accounts.AccountError as e:
+        raise _account_error(e) from e
+
+
+@router.delete("/accounts/{account_id}")
+async def remove_account(account_id: str) -> dict[str, Any]:
+    try:
+        await accounts.remove(account_id)
+    except accounts.AccountError as e:
+        raise _account_error(e) from e
+    return {"status": "removed", "id": account_id}
+
+
+@router.post("/accounts/{account_id}/connectors/check")
+async def check_account_connectors(account_id: str) -> dict[str, Any]:
+    try:
+        return await accounts.check_connectors(account_id)
+    except accounts.AccountError as e:
+        raise _account_error(e) from e
+
+
+@router.post("/accounts/{account_id}/connectors/{connector}/add")
+async def add_account_connector(account_id: str, connector: str) -> dict[str, Any]:
+    try:
+        return await accounts.add_connector(account_id, connector)
+    except accounts.AccountError as e:
+        raise _account_error(e) from e
+
+
+@router.post("/accounts/{account_id}/connectors/{connector}/login")
+async def login_account_connector(account_id: str, connector: str) -> dict[str, Any]:
+    try:
+        return await accounts.start_connector_login(account_id, connector)
+    except accounts.AccountError as e:
+        raise _account_error(e) from e
 
 
 @router.post("/{platform}/connect")

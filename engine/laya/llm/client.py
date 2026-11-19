@@ -845,6 +845,8 @@ async def llm_call(
             _meta: dict[str, Any] = {"backend": "agent", "agent_model": model}
             if ar.cost_usd is not None:
                 _meta["cost_usd"] = ar.cost_usd
+            if ar.account_id:
+                _meta["claude_account"] = ar.account_id
             await log_to_audit(
                 event_id=event_id,
                 card_id=card_id,
@@ -871,7 +873,9 @@ async def llm_call(
                 from laya.tasks import create_task as create_tracked_task
 
                 agent_id = agent_backend.parse_agent_model_id(model)[0]
-                if ar.rate_limit_info:
+                # Claude Code turns record their signal per Claude account in
+                # agent_backend; only the other agents are recorded here.
+                if ar.rate_limit_info and agent_id != "claude_code":
                     await record_rate_limit(agent_id, ar.rate_limit_info)
                 create_tracked_task(evaluate_agent_budget())
             except Exception:

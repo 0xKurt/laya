@@ -16,6 +16,7 @@
 	import BriefingConfig from '$lib/components/settings/BriefingConfig.svelte';
 	import MCPConfig from '$lib/components/settings/MCPConfig.svelte';
 	import AboutConfig from '$lib/components/settings/AboutConfig.svelte';
+	import ClaudeAccountsConfig from '$lib/components/settings/ClaudeAccountsConfig.svelte';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import { glassTheme } from '$lib/stores/glassTheme';
@@ -25,8 +26,8 @@
 	import { hasIntegrationErrors } from '$lib/stores/integrationErrors';
 	import { fade } from 'svelte/transition';
 
-	type TabId = 'team' | 'rules' | 'models' | 'repos' | 'agent' | 'integrations' | 'spaces' | 'scheduling' | 'mcp' | 'audit' | 'appearance' | 'keybindings' | 'data' | 'about';
-	const validTabs = new Set<string>(['team', 'rules', 'models', 'repos', 'agent', 'integrations', 'spaces', 'scheduling', 'mcp', 'audit', 'appearance', 'keybindings', 'data', 'about']);
+	type TabId = 'team' | 'rules' | 'models' | 'repos' | 'agent' | 'claude-accounts' | 'integrations' | 'spaces' | 'scheduling' | 'mcp' | 'audit' | 'appearance' | 'keybindings' | 'data' | 'about';
+	const validTabs = new Set<string>(['team', 'rules', 'models', 'repos', 'agent', 'claude-accounts', 'integrations', 'spaces', 'scheduling', 'mcp', 'audit', 'appearance', 'keybindings', 'data', 'about']);
 	const SETTINGS_TAB_KEY = 'laya-settings-tab';
 	let activeTab = $state<TabId>('team');
 
@@ -68,6 +69,7 @@
 		{ id: 'models',  label: 'Models' },
 		{ id: 'repos',   label: 'Repos' },
 		{ id: 'agent',   label: 'Agent' },
+		{ id: 'claude-accounts', label: 'Claude accounts' },
 		{ id: 'integrations', label: 'Integrations' },
 		{ id: 'spaces',       label: 'Spaces' },
 		{ id: 'scheduling',   label: 'Features' },
@@ -257,6 +259,8 @@
 		<RepoConfig />
 	{:else if activeTab === 'agent'}
 		<AgentConfig />
+	{:else if activeTab === 'claude-accounts'}
+		<ClaudeAccountsConfig />
 	{:else if activeTab === 'integrations'}
 		<IntegrationsConfig />
 	{:else if activeTab === 'spaces'}

@@ -101,6 +101,12 @@ import type {
 	ClaudeTerminalList,
 	ClaudeTerminalSession
 } from './types';
+import type {
+	ClaudeAccountConnectors,
+	ClaudeAccountLogin,
+	ClaudeAccountsOverview,
+	ClaudeConnectorKey
+} from './types';
 import { getEngineToken, getEngineUrl } from '$lib/config';
 
 const ENGINE_URL = getEngineUrl();
@@ -1404,7 +1410,42 @@ export const engineApi = {
 		request<ClaudeTerminalSession>(`/claude-code/terminal/${encodeURIComponent(id)}/input`, {
 			method: 'POST',
 			body: JSON.stringify({ text })
-		})
+		}),
+	// Claude accounts (Settings → Claude accounts).
+	getClaudeAccounts: (refresh = false) =>
+		request<ClaudeAccountsOverview>(`/claude-code/accounts?refresh=${refresh}`, { signal: AbortSignal.timeout(120_000) }),
+	addClaudeAccount: () => request<ClaudeAccountLogin>('/claude-code/accounts', { method: 'POST' }),
+	signInClaudeAccount: (id: string) =>
+		request<ClaudeAccountLogin>(`/claude-code/accounts/${encodeURIComponent(id)}/login`, { method: 'POST' }),
+	submitClaudeAccountCode: (id: string, code: string) =>
+		request<ClaudeAccountLogin>(`/claude-code/accounts/${encodeURIComponent(id)}/code`, {
+			method: 'POST',
+			body: JSON.stringify({ code })
+		}),
+	getClaudeAccountLogin: (id: string) =>
+		request<{ login: ClaudeAccountLogin | null }>(`/claude-code/accounts/${encodeURIComponent(id)}/status`),
+	cancelClaudeAccountLogin: (id: string) =>
+		request<ClaudeAccountLogin>(`/claude-code/accounts/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+	removeClaudeAccount: (id: string) =>
+		request<{ status: string; id: string }>(`/claude-code/accounts/${encodeURIComponent(id)}`, {
+			method: 'DELETE',
+			signal: AbortSignal.timeout(120_000)
+		}),
+	checkClaudeAccountConnectors: (id: string) =>
+		request<ClaudeAccountConnectors>(`/claude-code/accounts/${encodeURIComponent(id)}/connectors/check`, {
+			method: 'POST',
+			signal: AbortSignal.timeout(180_000)
+		}),
+	addClaudeAccountConnector: (id: string, connector: ClaudeConnectorKey) =>
+		request<ClaudeAccountConnectors>(
+			`/claude-code/accounts/${encodeURIComponent(id)}/connectors/${connector}/add`,
+			{ method: 'POST', signal: AbortSignal.timeout(180_000) }
+		),
+	signInClaudeAccountConnector: (id: string, connector: ClaudeConnectorKey) =>
+		request<ClaudeAccountLogin>(
+			`/claude-code/accounts/${encodeURIComponent(id)}/connectors/${connector}/login`,
+			{ method: 'POST' }
+		)
 };
 
 /** WebSocket URL of a Claude terminal session's PTY stream. */

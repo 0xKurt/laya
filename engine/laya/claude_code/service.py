@@ -199,9 +199,10 @@ async def start_service() -> None:
 
 async def stop_service() -> None:
     global _task
-    from laya.claude_code import terminal
+    from laya.claude_code import accounts, terminal
 
     await terminal.shutdown_all()
+    await accounts.shutdown()
     if _task is not None:
         _task.cancel()
         try:

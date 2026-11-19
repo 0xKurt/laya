@@ -2007,3 +2007,63 @@ export interface ClaudeTerminalCreate {
 	cols?: number;
 	rows?: number;
 }
+
+/** One usage window of a Claude account (`five_hour`, `seven_day`), from the CLI's rate-limit signal. */
+export interface ClaudeAccountWindow {
+	/** 0..1; null when the CLI did not report it. */
+	utilization: number | null;
+	/** Unix seconds. */
+	resets_at: number | null;
+	status: string | null;
+}
+
+export type ClaudeConnectorKey = 'slack' | 'gmail' | 'drive' | 'linear' | 'notion' | 'github';
+
+export interface ClaudeAccountConnector {
+	label: string;
+	/** claude_ai: a claude.ai connector; mcp: an MCP server in the account; gh: the GitHub CLI. */
+	kind: 'claude_ai' | 'mcp' | 'gh';
+	state: 'connected' | 'needs_login' | 'failed' | 'pending' | 'disabled' | 'missing';
+	server: string | null;
+	detail: string | null;
+	can_add: boolean;
+}
+
+export interface ClaudeAccountConnectors {
+	connectors: Record<ClaudeConnectorKey, ClaudeAccountConnector>;
+	checked_at: string;
+	error: string | null;
+}
+
+export interface ClaudeAccount {
+	id: string;
+	default: boolean;
+	email: string | null;
+	plan: string | null;
+	logged_in: boolean;
+	problem: string | null;
+	usage: { windows: Record<string, ClaudeAccountWindow>; as_of: string | null };
+	connectors: ClaudeAccountConnectors | null;
+}
+
+/** A sign-in Laya runs for an account (`kind: account`) or one of its connectors. */
+export interface ClaudeAccountLogin {
+	id: string;
+	kind: 'account' | 'connector';
+	account_id: string;
+	server: string | null;
+	platform: string | null;
+	state: 'starting' | 'waiting_code' | 'verifying' | 'done' | 'failed' | 'cancelled' | 'timed_out';
+	url: string | null;
+	error: string | null;
+	started_at: string;
+}
+
+export interface ClaudeAccountsOverview {
+	accounts: ClaudeAccount[];
+	/** The account Laya's processing uses now. */
+	current: string;
+	thresholds: Record<string, number>;
+	login: ClaudeAccountLogin | null;
+	connectors_url: string;
+}
