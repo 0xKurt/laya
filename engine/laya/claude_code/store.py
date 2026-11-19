@@ -116,20 +116,19 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# The connection whose tables were already created. Tests open a fresh
-# in-memory connection per test, so the check is per connection object.
-_ensured_for: int | None = None
-
-
 async def ensure_tables(db=None) -> None:
-    global _ensured_for
+    """Create the module's tables once per connection.
+
+    Tests open a fresh in-memory connection per test, so the mark lives on the
+    connection object itself (an id() of a closed connection can be reused).
+    """
     db = db or await get_db()
-    if _ensured_for == id(db):
+    if getattr(db, "_laya_claude_code_tables", False):
         return
     for sql in _SCHEMA:
         await db.execute(sql)
     await db.commit()
-    _ensured_for = id(db)
+    db._laya_claude_code_tables = True
 
 
 async def _db():

@@ -109,17 +109,15 @@ class AccountError(Exception):
 
 # ── table ────────────────────────────────────────────────────────────────
 
-_ensured_for: int | None = None
-
-
 async def _db():
-    global _ensured_for
     db = await get_db()
-    if _ensured_for != id(db):
+    # The mark lives on the connection object: an id() of an earlier, closed
+    # connection can be reused by a new one, which would then lack the table.
+    if not getattr(db, "_laya_claude_accounts_table", False):
         await store.ensure_tables(db)
         await db.execute(_TABLE)
         await db.commit()
-        _ensured_for = id(db)
+        db._laya_claude_accounts_table = True
     return db
 
 
