@@ -440,7 +440,7 @@ async def apply_conclusion(event: LayaEvent, actor_relationship: str | None = No
     reason = conclusion_reason(event)
     async with entity_status_lock(entity_id):
         await db.execute(
-            "UPDATE events SET filter_rule = ? WHERE event_id = ?",
+            "UPDATE events SET filtered = TRUE, filter_rule = ? WHERE event_id = ?",
             (reason, event.event_id),
         )
         await db.commit()
