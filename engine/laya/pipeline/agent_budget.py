@@ -314,10 +314,10 @@ async def evaluate_agent_budget() -> None:
             if usage["tokens"] >= (pause_pct / 100.0) * limit:
                 # Prefer the native reset time when known; else a full window from now
                 # (by which point the rolling window has fully turned over).
-                recovery_times.append(
-                    _ts_from_unix(rl.get("resets_at")) if rl and rl.get("resets_at")
-                    else _ts_in_hours(window_hours)
-                )
+                # Laya's own token window turns over after window_hours. The native
+                # reset belongs to the CLI's window (often the weekly one) and would
+                # pause Laya for days over a budget that frees up within hours.
+                recovery_times.append(_ts_in_hours(window_hours))
                 reasons.append(f"{agent_id}: {usage['tokens']}/{limit} tokens in {window_hours}h")
 
     if recovery_times:

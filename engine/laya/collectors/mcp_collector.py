@@ -49,7 +49,7 @@ SOURCES = ("slack", "gmail", "linear", "github")
 
 DEFAULT_COLLECTOR_SETTINGS: dict[str, Any] = {
     "enabled": False,
-    "interval_minutes": 30,
+    "interval_minutes": 60,
     # Sweeps run only inside these hours (local time) on these weekdays (0 = Monday).
     "active_hours": {"start": "08:00", "end": "19:00", "days": [0, 1, 2, 3, 4]},
     "timezone": "Europe/Berlin",
@@ -513,7 +513,9 @@ def _linear_events(items: list[dict], my_emails: set[str]) -> list[LayaEvent]:
 # ── GitHub (gh CLI, no LLM) ──────────────────────────────────────────────
 
 
-_GITHUB_CI_BOTS = {"github-actions[bot]", "vercel[bot]", "netlify[bot]", "codecov[bot]"}
+# Notifications that ask nothing of the user personally: review requests (mostly
+# CODEOWNERS team requests), state changes and CI runs.
+_GITHUB_SKIP_REASONS = {"review_requested", "state_change", "ci_activity", "security_alert"}
 
 
 async def _gh_json(*args: str) -> Any:
@@ -549,6 +551,8 @@ async def _collect_github(since: datetime, settings: dict) -> list[LayaEvent]:
             repo = n["repository"]["full_name"]
             if orgs and n["repository"]["owner"]["login"].lower() not in orgs:
                 continue
+            if n.get("reason") in _GITHUB_SKIP_REASONS:
+                continue
             subject = n["subject"]
             number = (subject.get("url") or "").rstrip("/").rsplit("/", 1)[-1]
             body, actor, url = "", "", _html_url(subject.get("url"))
@@ -558,9 +562,9 @@ async def _collect_github(since: datetime, settings: dict) -> list[LayaEvent]:
                     body = comment.get("body") or ""
                     actor = (comment.get("user") or {}).get("login", "")
                     url = comment.get("html_url") or url
-                    # CI summaries carry no ask; keep the notification, drop the comment.
-                    if actor in _GITHUB_CI_BOTS:
-                        body, actor = "", ""
+                    # Bot comments (CI summaries, review bots) carry no ask from a person.
+                    if actor.endswith("[bot]"):
+                        continue
                 except RuntimeError as e:
                     log.debug("collector_github_comment_failed", error=str(e))
             events.append(_make_event(

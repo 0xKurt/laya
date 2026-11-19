@@ -223,3 +223,25 @@ def test_native_warning_pauses_only_above_utilization_threshold():
     assert native_limit_reached({"status": "rejected", "rate_limit_type": "seven_day", "utilization": 0.5}, T)
     assert not native_limit_reached({"status": "allowed"}, T)
     assert not native_limit_reached(None, T)
+
+
+@pytest.mark.asyncio
+async def test_token_budget_pause_ends_with_the_window_not_the_weekly_reset(db):
+    # Over the token budget while the CLI reports a weekly window resetting in 5 days.
+    await _insert_audit(db, "agent/claude_code/m", 600_000, 300_000)
+    weekly_reset = int((datetime.now(timezone.utc) + timedelta(days=5)).timestamp())
+    await ab.record_rate_limit("claude_code", {
+        "status": "allowed_warning", "resetsAt": weekly_reset,
+        "rateLimitType": "seven_day", "utilization": 0.63,
+    })
+    cfg = {"enabled": True, "agents": {"claude_code": {"window_token_limit": 1_000_000, "window_hours": 5, "pause_at_percent": 85}}}
+    paused = {}
+
+    async def _fake_pause(until, reason):
+        paused["until"] = until
+
+    with patch.object(ab, "get_agent_budget_config", return_value=cfg), \
+         patch.object(ab, "pause_for_agent_budget", side_effect=_fake_pause):
+        await ab.evaluate_agent_budget()
+
+    assert paused["until"][:16] == ab._ts_in_hours(5)[:16]
