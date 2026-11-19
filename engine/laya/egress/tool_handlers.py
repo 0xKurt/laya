@@ -4,15 +4,15 @@
 """Execution handlers for egress chat tools.
 
 These handlers are called by the chat tool loop when the LLM invokes
-an egress tool. They follow a preview -> confirm -> execute pattern.
+an egress tool. Chat can only preview an action or open the compose editor:
+nothing an LLM calls sends a message. The send happens only when the user
+presses send in the UI (``POST /egress/execute`` or the card executor), so a
+prompt-injected instruction in an email or ticket cannot make Laya send.
 """
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
-import time
 from typing import Any
 
 import structlog
@@ -22,17 +22,6 @@ from laya.egress.models import EgressRequest
 
 
 log = structlog.get_logger()
-
-# In-memory store of pending egress requests awaiting user confirmation.
-# Keyed by execute_token, values are (EgressRequest, expiry_timestamp).
-_pending_requests: dict[str, tuple[EgressRequest, float]] = {}
-
-# Token TTL: 5 minutes
-_TOKEN_TTL = 300
-
-# Secret for HMAC signing (generated at startup)
-_TOKEN_SECRET = hashlib.sha256(str(time.time_ns()).encode()).hexdigest()
-
 
 # ---------------------------------------------------------------------------
 # Public handlers
@@ -44,8 +33,7 @@ async def handle_egress_tool(
 ) -> str:
     """Universal handler for egress action tools (send_email, comment_on_ticket, etc.).
 
-    Builds an EgressRequest, calls preview(), returns preview with an execute_token
-    for the LLM to show the user and await confirmation.
+    Builds an EgressRequest and returns its preview. Nothing is sent.
     """
     request = _build_request(tool_name, arguments, space_id)
 
@@ -60,15 +48,7 @@ async def handle_egress_tool(
         if conn_id:
             request.connection_id = conn_id
 
-    # Get preview
     preview = await egress.preview(request)
-
-    # Generate execute token and store pending request
-    token = _generate_token(request)
-    _pending_requests[token] = (request, time.time() + _TOKEN_TTL)
-
-    # Clean expired tokens
-    _cleanup_expired()
 
     return json.dumps({
         "status": "preview",
@@ -76,10 +56,12 @@ async def handle_egress_tool(
         "details": preview.details,
         "warnings": preview.warnings,
         "estimated_impact": preview.estimated_impact,
-        "execute_token": token,
+        "sent": False,
         "instruction": (
-            "Show this preview to the user and ask for confirmation. "
-            "If they confirm, call confirm_egress with the execute_token."
+            "Nothing was sent: chat cannot send. Show this preview to the user. "
+            "For a message, call open_compose with this content so the user can "
+            "review and send it from the editor; other actions are done by the "
+            "user in the app."
         ),
     })
 
@@ -114,62 +96,16 @@ async def handle_open_compose(
 async def handle_confirm_egress(
     arguments: dict, space_id: str | None
 ) -> str:
-    """Execute a previously previewed egress action after user confirmation."""
-    token = arguments.get("execute_token", "")
-
-    # Retrieve pending request
-    entry = _pending_requests.pop(token, None)
-    if not entry:
-        return json.dumps({
-            "status": "error",
-            "error": "Token expired or already used. Ask the user to try the action again.",
-        })
-
-    request, expiry = entry
-    if time.time() > expiry:
-        return json.dumps({
-            "status": "error",
-            "error": "Token has expired. Ask the user to try the action again.",
-        })
-
-    # Execute
-    result = await egress.execute(request)
-
-    # Audit the outbound action. This is the real send/post moment for chat-driven
-    # egress; the executor.py path audits UI-triggered actions the same way, so this
-    # closes the gap where chat egress left no persistent record. source="chat"
-    # marks the path. Local import avoids an import cycle with the LLM client.
-    from laya.llm.client import log_to_audit
-
-    await log_to_audit(
-        event_id=None, card_id=None, step="execute",
-        model="n/a", input_tokens=0, output_tokens=0, latency_ms=0,
-        success=result.success,
-        error=result.error,
-        metadata={
-            "action_type": request.action_type,
-            "target_platform": request.platform,
-            "result_url": result.result_url,
-            "source": "chat",
-        },
-    )
-
-    if result.success:
-        response: dict[str, Any] = {
-            "status": "done",
-            "message": "Action executed successfully.",
-        }
-        if result.result_url:
-            response["result_url"] = result.result_url
-        if result.result_data:
-            response["result_data"] = result.result_data
-        return json.dumps(response)
-    else:
-        return json.dumps({
-            "status": "failed",
-            "error": result.error or "Action failed",
-            "retryable": result.retryable,
-        })
+    """Refuse to execute. A model may still emit this tool name (it is not in
+    the toolset); sends happen only from the user's own click in the UI."""
+    log.warning("chat_confirm_egress_refused")
+    return json.dumps({
+        "status": "refused",
+        "error": (
+            "Chat cannot send or execute actions. Use open_compose so the user "
+            "can review and send from the editor."
+        ),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -436,18 +372,3 @@ def _parse_github_ref(ref: str) -> tuple[str, str, int]:
             number = 0
 
     return owner, repo, number
-
-
-def _generate_token(request: EgressRequest) -> str:
-    """Generate an HMAC-signed execute token for a pending request."""
-    data = f"{request.platform}:{request.action_type}:{time.time_ns()}"
-    sig = hmac.new(_TOKEN_SECRET.encode(), data.encode(), hashlib.sha256).hexdigest()[:24]
-    return f"egr_{sig}"
-
-
-def _cleanup_expired() -> None:
-    """Remove expired pending requests."""
-    now = time.time()
-    expired = [k for k, (_, exp) in _pending_requests.items() if now > exp]
-    for k in expired:
-        del _pending_requests[k]

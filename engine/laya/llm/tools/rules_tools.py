@@ -20,6 +20,7 @@ from laya.db.timeutil import db_now
 from laya.models.processing_rules import (
     ProcessingCondition,
     ProcessingRuleAction,
+    reject_auto_send_actions,
 )
 from laya.models.rules import Rule, RulesConfig
 
@@ -324,7 +325,7 @@ async def create_processing_rule(
         return {"error": f"Invalid condition: {e}"}
 
     try:
-        parsed_actions = _processing_actions_adapter.validate_python(actions)
+        parsed_actions = reject_auto_send_actions(_processing_actions_adapter.validate_python(actions))
     except Exception as e:
         return {"error": f"Invalid actions: {e}"}
 
@@ -465,7 +466,7 @@ async def update_rule(
                 return {"error": f"Invalid condition: {e}"}
         if actions is not None:
             try:
-                parsed_actions = _processing_actions_adapter.validate_python(actions)
+                parsed_actions = reject_auto_send_actions(_processing_actions_adapter.validate_python(actions))
                 updates.append("actions_json = ?")
                 params.append(json.dumps([a.model_dump() for a in parsed_actions]))
             except Exception as e:

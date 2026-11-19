@@ -103,6 +103,7 @@ async def execute_tool(
     # Egress tools — handled by the egress module
     if name == "open_compose":
         return await handle_open_compose(arguments, space_id)
+    # Not in the toolset; a model that emits it anyway gets a refusal, never a send.
     if name == "confirm_egress":
         return await handle_confirm_egress(arguments, space_id)
     if name == "find_contact":

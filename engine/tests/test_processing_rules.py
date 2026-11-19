@@ -765,11 +765,8 @@ class TestRunProcessingRules:
         """After _AUTO_DISABLE_THRESHOLD consecutive errors, the rule is auto-disabled."""
         await insert_test_card(db, "card_run5", "evt_proc_001", space_id=None)
 
-        # Action that will always fail: run_entity_agent with no entity_id in DB
-        # Use a simpler approach: an egress action that will fail on import
-        # Actually, set_status on a non-existent card won't fail — the UPDATE just matches zero rows.
-        # Use execute_egress which will fail because the egress module won't be importable in test.
-        fail_actions = json.dumps([{"type": "execute_egress", "platform": "fake", "action_type": "fake", "payload_template": {}}])
+        # Action that always fails: add_tag on a missing tag without create_if_missing.
+        fail_actions = json.dumps([{"type": "add_tag", "tag_name": "no-such-tag", "create_if_missing": False}])
 
         await self._insert_rule(
             db, rule_id=204,
@@ -1025,3 +1022,58 @@ class TestRunAgentReuse:
         assert result["reason"] == "workspace awaiting user input"
         agent_env.start.assert_not_awaited()
         agent_env.resume.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Rules never send messages
+# ---------------------------------------------------------------------------
+
+_EGRESS_ACTION = {"type": "execute_egress", "platform": "slack", "action_type": "send_message", "payload_template": {"text": "hi"}}
+_CONDITION = {"field": "event.source.platform", "operator": "equals", "value": "slack"}
+
+
+class TestNoAutoSend:
+    def test_create_request_rejects_execute_egress(self):
+        from pydantic import ValidationError
+
+        from laya.models.processing_rules import CreateProcessingRuleRequest
+
+        with pytest.raises(ValidationError, match="execute_egress is not allowed"):
+            CreateProcessingRuleRequest(name="r", condition=_CONDITION, actions=[_EGRESS_ACTION])
+
+    def test_update_request_rejects_execute_egress(self):
+        from pydantic import ValidationError
+
+        from laya.models.processing_rules import UpdateProcessingRuleRequest
+
+        with pytest.raises(ValidationError, match="execute_egress is not allowed"):
+            UpdateProcessingRuleRequest(actions=[_EGRESS_ACTION])
+        assert UpdateProcessingRuleRequest(name="x").actions is None
+
+    @pytest.mark.asyncio
+    async def test_chat_tool_rejects_execute_egress(self, db):
+        from laya.llm.tools.rules_tools import create_processing_rule
+
+        with patch("laya.llm.tools.rules_tools.manager.broadcast", new_callable=AsyncMock):
+            result = await create_processing_rule(name="r", condition=_CONDITION, actions=[_EGRESS_ACTION])
+        assert "execute_egress is not allowed" in result["error"]
+        rows = await db.execute_fetchall("SELECT COUNT(*) AS n FROM processing_rules")
+        assert rows[0]["n"] == 0
+
+    def test_chat_tool_description_omits_execute_egress(self):
+        from laya.llm.tools.definitions import get_all_tool_definitions
+
+        text = json.dumps(get_all_tool_definitions())
+        assert "execute_egress" not in text
+
+    @pytest.mark.asyncio
+    async def test_stored_egress_action_is_skipped_not_sent(self, db):
+        from laya.models.processing_rules import ExecuteEgressAction
+
+        (action,) = _parse_actions(json.dumps([_EGRESS_ACTION]))
+        assert isinstance(action, ExecuteEgressAction)
+        with patch("laya.egress.route_and_execute", new_callable=AsyncMock) as mock_send:
+            result = await _execute_action(action, "card_x", None, None, {})
+        mock_send.assert_not_called()
+        assert result["success"] is True
+        assert result["skipped"] is True
