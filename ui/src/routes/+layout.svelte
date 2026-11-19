@@ -41,6 +41,7 @@
 	import { corpusSheet, openCorpusSheetWithFiles, openCorpusSheetWithPaths } from '$lib/stores/corpusSheet';
 	import CorpusBanner from '$lib/components/corpus/CorpusBanner.svelte';
 	import { subscribeFileDrop } from '$lib/utils/fileDrop';
+	import { interceptExternalLinks } from '$lib/utils/externalLinks';
 	import { attachDroppedToChat } from '$lib/documents/chatAttach';
 	import UpdateBanner from '$lib/components/UpdateBanner.svelte';
 	import VectorStoreBanner from '$lib/components/VectorStoreBanner.svelte';
@@ -340,6 +341,8 @@
 			addToast(`${p.title}: ${p.body}`, 'info');
 		}
 	});
+
+	onMount(() => interceptExternalLinks());
 
 	onMount(() => {
 		startHealthPolling();
