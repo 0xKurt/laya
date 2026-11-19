@@ -3,6 +3,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import CardDetail from '$lib/components/feed/CardDetail.svelte';
+	import ActionCardComponent from '$lib/components/feed/ActionCard.svelte';
 	import { engineApi } from '$lib/api/engine';
 	import type { ActionCard, BoardLane } from '$lib/api/types';
 	import { lastMessage } from '$lib/stores/websocket';
@@ -27,6 +28,25 @@
 	let selected = $state<ActionCard | null>(null);
 	let dragging = $state<ActionCard | null>(null);
 	let dropTarget = $state<Column | 'archive' | null>(null);
+
+	type BoardView = 'detailed' | 'compact';
+	const VIEW_KEY = 'laya.board.view';
+	function storedView(): BoardView {
+		try {
+			return localStorage.getItem(VIEW_KEY) === 'compact' ? 'compact' : 'detailed';
+		} catch {
+			return 'detailed';
+		}
+	}
+	let view = $state<BoardView>(storedView());
+	function setView(next: BoardView) {
+		view = next;
+		try {
+			localStorage.setItem(VIEW_KEY, next);
+		} catch {
+			// private storage unavailable: the choice lasts for this session only
+		}
+	}
 
 	function columnOf(card: ActionCard): Column {
 		if (card.status === 'done') return 'done';
@@ -152,10 +172,21 @@
 			<div class="mx-4 mt-3 rounded-lg bg-rose-500/15 px-3 py-2 text-laya-secondary text-rose-300">{error}</div>
 		{/if}
 
-		<div class="flex min-h-0 flex-1 gap-3 overflow-x-auto p-4">
+		<div class="flex items-center justify-end gap-1 px-4 pt-3">
+			{#each [['detailed', 'Detailed'], ['compact', 'Compact']] as [id, label] (id)}
+				<button
+					type="button"
+					onclick={() => setView(id as BoardView)}
+					class="rounded-md px-2 py-0.5 text-laya-micro font-medium transition-colors
+						{view === id ? 'bg-laya-orange/10 text-laya-orange' : 'text-surface-400 hover:bg-surface-800 hover:text-surface-200'}"
+				>{label}</button>
+			{/each}
+		</div>
+
+		<div class="flex min-h-0 flex-1 gap-3 overflow-x-auto p-4 pt-2">
 			{#each COLUMNS as column (column.id)}
 				<section
-					class="flex w-72 min-w-[16rem] flex-1 flex-col rounded-xl border bg-surface-900/40 transition-colors
+					class="flex {view === 'detailed' ? 'w-[340px] min-w-[300px]' : 'w-72 min-w-[16rem]'} flex-1 flex-col rounded-xl border bg-surface-900/40 transition-colors
 						{dropTarget === column.id ? 'border-laya-orange/60 bg-laya-orange/5' : 'border-surface-800'}"
 					ondragover={(e) => { e.preventDefault(); dropTarget = column.id; }}
 					ondragleave={() => { if (dropTarget === column.id) dropTarget = null; }}
@@ -173,6 +204,23 @@
 						{:else}
 							{#each columns[column.id] as card (card.card_id)}
 								{@const platform = platformKey(card.entity_id ?? undefined)}
+								{#if view === 'detailed'}
+									<!-- The Pulse card itself: summary, actor, source, quick actions. -->
+									<div
+										role="listitem"
+										draggable="true"
+										ondragstart={(e) => onDragStart(e, card)}
+										ondragend={() => { dragging = null; dropTarget = null; }}
+										class="cursor-grab active:cursor-grabbing {dragging?.card_id === card.card_id ? 'opacity-40' : ''}"
+									>
+										<ActionCardComponent
+											{card}
+											onselect={openCard}
+											selectedCardId={selected?.card_id ?? ''}
+											hasSelection={!!selected}
+										/>
+									</div>
+								{:else}
 								<button
 									type="button"
 									draggable="true"
@@ -200,6 +248,7 @@
 										<p class="mt-1 truncate text-laya-micro text-surface-500">{card.actor_name}</p>
 									{/if}
 								</button>
+								{/if}
 							{:else}
 								<p class="px-2 py-6 text-center text-laya-micro text-surface-600">
 									{column.id === 'backlog' ? 'Nothing new' : 'Drop cards here'}
