@@ -13,6 +13,7 @@ the meeting's decisions and what the user waits on ride along as context.
 
 from __future__ import annotations
 
+import html
 from datetime import datetime
 from typing import Any
 
@@ -195,5 +196,9 @@ async def collect(source: dict[str, Any], since: datetime) -> list[LayaEvent]:
         my_name(source), bool(config.get("meeting_notes", True)),
     )
     out = await run_turn(source, PLATFORM, prompt, SCHEMA)
-    messages = [m for m in out.get("messages", []) if m.get("message_id") and m.get("thread_id")]
+    messages = [
+        # Mail bodies come back with HTML entities (`&quot;`) left in.
+        {**m, "body": html.unescape(m.get("body") or ""), "subject": html.unescape(m.get("subject") or "")}
+        for m in out.get("messages", []) if m.get("message_id") and m.get("thread_id")
+    ]
     return build_events(messages, my_emails(source))

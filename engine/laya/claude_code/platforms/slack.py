@@ -95,8 +95,26 @@ user_name, the full message text, its permalink and is_context.
 Return {{"messages": []}} if there is nothing."""
 
 
+def normalize_ts(ts: Any) -> str | None:
+    """Slack's `1700000000.123456` form.
+
+    Permalinks carry the ts without its dot (`p1700000000123456`), and a
+    model copying from them returns that form, which would otherwise parse as
+    a timestamp far in the future and split one message into two ids.
+    """
+    if ts is None:
+        return None
+    text = str(ts).strip()
+    if text.startswith("p") and text[1:].isdigit():
+        text = text[1:]
+    if text.isdigit() and len(text) > 10:
+        text = f"{text[:10]}.{text[10:]}"
+    return text or None
+
+
 def normalize_message(m: dict[str, Any]) -> dict[str, Any]:
-    """Map whatever channel type the model reported onto dm/group_dm/public/private."""
+    """Map whatever channel type the model reported onto dm/group_dm/public/private,
+    and bring timestamps into Slack's dotted form."""
     raw = (m.get("channel_type") or "").lower().replace("-", "_").replace(" ", "_")
     channel = str(m.get("channel_id") or "")
     if raw in ("dm", "im", "direct_message", "direct") or channel.startswith("D"):
@@ -107,9 +125,8 @@ def normalize_message(m: dict[str, Any]) -> dict[str, Any]:
         kind = "private"
     else:
         kind = "public"
-    thread_ts = m.get("thread_ts") or None
-    # Slack reports a root message's own ts as its thread_ts.
-    return {**m, "channel_type": kind, "thread_ts": thread_ts}
+    return {**m, "channel_type": kind, "ts": normalize_ts(m.get("ts")),
+            "thread_ts": normalize_ts(m.get("thread_ts") or None)}
 
 
 def conversation_of(m: dict[str, Any]) -> str:

@@ -438,3 +438,23 @@ async def test_github_collect():
 def test_github_html_url():
     assert github.html_url("https://api.github.com/repos/o/r/pulls/5") == "https://github.com/o/r/pull/5"
     assert github.html_url(None) is None
+
+
+def test_slack_ts_without_dot_is_normalized():
+    assert slack.normalize_ts("1795011351868629") == "1795011351.868629"
+    assert slack.normalize_ts("p1795011351868629") == "1795011351.868629"
+    assert slack.normalize_ts("1795011351.868629") == "1795011351.868629"
+    assert slack.normalize_ts(None) is None
+    m = _slack("1795011351868629", thread="1795011300000100")
+    assert m["ts"] == "1795011351.868629" and m["thread_ts"] == "1795011300.000100"
+    assert slack.conversation_of(m) == "C1:1795011300.000100"
+
+
+@pytest.mark.asyncio
+async def test_gmail_collect_unescapes_html(db):
+    out = {"messages": [_mail("m1", body="say &quot;hi&quot;")]}
+    source = {"config": {}, "tools": {"search": "S", "get_thread": "G"}, "identity": {}}
+    with patch.object(gmail, "run_turn", new_callable=AsyncMock, return_value=out), \
+         patch("laya.config.get_self_user", return_value=None):
+        events = await gmail.collect(source, datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert events[0].content.body == 'say "hi"'
