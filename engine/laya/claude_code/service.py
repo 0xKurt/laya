@@ -97,6 +97,10 @@ async def _with_deny_list(source: dict[str, Any]) -> dict[str, Any]:
     if found is None or not found.all_tools:
         try:
             found = await discover.discover(with_identity=False)
+            # A fresh listing also refreshes the stored tool names, so a sweep
+            # after a restart uses the connector's current names.
+            if await discover.refresh_stored_tools(found):
+                source = await store.get_source(source["platform"]) or source
         except Exception as e:  # the sweep can still run with the allowlist alone
             log.warning("claude_code_discovery_for_deny_failed", error=str(e))
             found = None

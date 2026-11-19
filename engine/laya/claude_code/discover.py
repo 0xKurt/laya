@@ -291,6 +291,33 @@ async def discover_github() -> PlatformDiscovery:
     return found
 
 
+# ── stored tool names ────────────────────────────────────────────────────
+
+
+async def refresh_stored_tools(found: Discovery) -> list[str]:
+    """Store the newly discovered tool names of every connected platform.
+
+    `claude_code_sources.tools` is what the collectors and the send turn use;
+    a connector that was re-added under another server name (or gained a
+    tool) would otherwise keep its old names until the platform is
+    reconnected. Platforms that are not available in this discovery keep
+    their stored names. Returns the platforms whose names changed.
+    """
+    from laya.claude_code import store
+
+    changed = []
+    for source in await store.list_sources():
+        platform = source["platform"]
+        pd = found.platforms.get(platform)
+        if pd is None or not pd.available or not pd.tools or pd.tools == source.get("tools"):
+            continue
+        await store.upsert_source(platform, tools=pd.tools)
+        changed.append(platform)
+    if changed:
+        log.info("claude_code_tools_refreshed", platforms=changed)
+    return changed
+
+
 # ── entry point ──────────────────────────────────────────────────────────
 
 _cache: Discovery | None = None

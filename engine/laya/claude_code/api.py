@@ -63,6 +63,7 @@ async def get_status() -> dict[str, Any]:
 @router.post("/discover")
 async def run_discover() -> dict[str, Any]:
     found = await discover_mod.discover(force=True, with_identity=True)
+    await discover_mod.refresh_stored_tools(found)
     return await build_status(found)
 
 
