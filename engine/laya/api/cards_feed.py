@@ -185,7 +185,9 @@ async def get_grouped_cards(
     if unread_only:
         conditions.append("c.read_at IS NULL")
     if not show_archived:
-        conditions.append("c.status != 'archived'")
+        # Dismissed cards are hidden like archived ones: the user said they don't
+        # matter, so they only come back with the Archived filter.
+        conditions.append("c.status NOT IN ('archived', 'dismissed')")
     # Only joined when a search is active (aggregates each card's tag names once).
     search_join = ""
     if search:

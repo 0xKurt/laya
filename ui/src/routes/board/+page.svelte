@@ -126,6 +126,19 @@
 		await load();
 	}
 
+	let archivingAll = $state(false);
+	async function archiveAllDone() {
+		const done = columns.done;
+		archivingAll = true;
+		cards = cards.filter((c) => c.status !== 'done');
+		if (selected?.status === 'done') selected = null;
+		const results = await Promise.allSettled(done.map((c) => engineApi.archiveCard(c.card_id)));
+		const failed = results.filter((r) => r.status === 'rejected').length;
+		if (failed) error = `${failed} of ${done.length} cards could not be archived`;
+		archivingAll = false;
+		await load();
+	}
+
 	async function runAgent(entityId: string) {
 		const card = selected;
 		try {
@@ -193,9 +206,17 @@
 					ondrop={(e) => onDrop(e, column.id)}
 					aria-label={column.title}
 				>
-					<header class="flex items-center justify-between px-3 pb-2 pt-3">
+					<header class="flex items-center gap-2 px-3 pb-2 pt-3">
 						<h2 class="text-laya-secondary font-semibold text-surface-200">{column.title}</h2>
 						<span class="text-laya-micro text-surface-500">{columns[column.id].length}</span>
+						{#if column.id === 'done' && columns.done.length > 0}
+							<button
+								type="button"
+								onclick={archiveAllDone}
+								disabled={archivingAll}
+								class="ml-auto rounded-md px-2 py-0.5 text-laya-micro font-medium text-surface-400 transition-colors hover:bg-surface-800 hover:text-surface-200 disabled:opacity-50"
+							>{archivingAll ? 'Archiving…' : 'Archive all'}</button>
+						{/if}
 					</header>
 
 					<div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-3">
@@ -241,6 +262,21 @@
 											<span class="ml-auto shrink-0 text-laya-micro text-laya-orange">agent</span>
 										{:else}
 											<span class="ml-auto shrink-0 text-laya-micro text-surface-500" title={activity(card)}>{timeAgo(activity(card))}</span>
+										{/if}
+										{#if card.status === 'done'}
+											<span
+												role="button"
+												tabindex="0"
+												aria-label="Archive"
+												title="Archive"
+												onclick={(e) => { e.stopPropagation(); moveTo(card, 'archive'); }}
+												onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); moveTo(card, 'archive'); } }}
+												class="shrink-0 rounded p-0.5 text-surface-500 hover:bg-surface-700 hover:text-surface-200"
+											>
+												<svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M20 7l-1 12a2 2 0 01-2 2H7a2 2 0 01-2-2L4 7m16 0H4m16 0l-1-3H5L4 7m6 4h4" />
+												</svg>
+											</span>
 										{/if}
 									</div>
 									<p class="line-clamp-2 text-laya-secondary text-surface-100 {card.status === 'done' ? 'text-surface-400 line-through decoration-surface-600' : ''}">{card.header}</p>

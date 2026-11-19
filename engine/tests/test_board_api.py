@@ -71,3 +71,20 @@ async def test_card_awaiting_draft_approval_can_be_dropped_on_done(db):
         assert (await client.post("/cards/c1/reopen")).status_code == 200
         [card] = (await client.get("/board")).json()
         assert card["status"] == "requires_approval"
+
+
+@pytest.mark.asyncio
+async def test_pulse_hides_dismissed_and_archived_unless_asked(db):
+    await insert_test_card(db, card_id="c_ready", event_id="e1", status="ready")
+    await insert_test_card(db, card_id="c_dismissed", event_id="e2", status="dismissed")
+    await insert_test_card(db, card_id="c_archived", event_id="e3", status="archived")
+
+    def ids(payload):
+        return {c["card_id"] for g in payload["groups"] for c in g["cards"]}
+
+    async with await _client() as client:
+        default = (await client.get("/cards/grouped")).json()
+        with_archived = (await client.get("/cards/grouped", params={"show_archived": "true"})).json()
+
+    assert ids(default) == {"c_ready"}
+    assert ids(with_archived) == {"c_ready", "c_dismissed", "c_archived"}
