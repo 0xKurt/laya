@@ -24,7 +24,7 @@
 	import { cardSize } from '$lib/stores/cardSize';
 	import { feedViewMode } from '$lib/stores/feedView';
 	import { fly } from 'svelte/transition';
-	import { budgetPaused, loadBudgetStatus, handleBudgetWsMessage, costAmount, budgetLabel, budgetRatio, agentBudgetPaused, loadAgentBudgetStatus, handleAgentBudgetWsMessage, agentUsageLabel, agentUsageRatio } from '$lib/stores/budget';
+	import { budgetPaused, loadBudgetStatus, handleBudgetWsMessage, costAmount, budgetLabel, budgetRatio, agentBudgetPaused, loadAgentBudgetStatus, handleAgentBudgetWsMessage, agentUsageLabel, agentUsageRatio, agentBudgetData, agentPauseBannerText } from '$lib/stores/budget';
 	import { feedFilters, loadFeedFilters, saveFeedFilters, filtersLoaded, feedDate, feedPrevDate, feedNextDate, localToday } from '$lib/stores/feedFilters';
 	import { spaces, loadSpaces } from '$lib/stores/spaces';
 	import { hasAuditFailures, loadAuditFailureSummary, handleAuditFailureWs } from '$lib/stores/auditFailures';
@@ -881,7 +881,7 @@
 				<svg class="h-3.5 w-3.5 text-red-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
 				</svg>
-				<span class="text-xs text-red-300">Agent usage limit reached — ingestion paused until the usage window resets</span>
+				<span class="text-xs text-red-300">{agentPauseBannerText($agentBudgetData?.paused_reason)}</span>
 				<a href="/settings?tab=models&section=agent-usage" class="ml-1 text-xs font-medium text-red-400 underline underline-offset-2 hover:text-red-300">Manage</a>
 			</div>
 		{/if}

@@ -147,3 +147,14 @@ export function agentPauseHeadline(reason: string | null | undefined): string {
 	if (reason.includes('tokens in')) return 'Agent token budget reached';
 	return 'Agent usage limit reached';
 }
+
+/**
+ * The global paused banner's text. A daily-cap pause lifts at local midnight,
+ * the other causes when the agent's usage window resets.
+ */
+export function agentPauseBannerText(reason: string | null | undefined): string {
+	if (reason?.includes('daily agent call limit')) {
+		return 'Daily agent call limit reached — ingestion paused until midnight';
+	}
+	return `${agentPauseHeadline(reason)} — ingestion paused until the usage window resets`;
+}
