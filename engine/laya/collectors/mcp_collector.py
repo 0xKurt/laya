@@ -284,8 +284,10 @@ _SLACK_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "channel_id": {"type": "string"},
-                    "channel_name": {"type": "string"},
-                    "channel_type": {"type": "string", "enum": ["dm", "group_dm", "public", "private"]},
+                    "channel_name": {"type": ["string", "null"]},
+                    # Free text: search results don't always say public vs private, and
+                    # a strict enum made the model refuse the whole answer.
+                    "channel_type": {"type": "string", "description": "dm, group_dm, public or private"},
                     "ts": {"type": "string"},
                     "thread_ts": {"type": ["string", "null"]},
                     "user_id": {"type": "string"},
@@ -294,7 +296,7 @@ _SLACK_SCHEMA = {
                     "permalink": {"type": "string"},
                     "is_context": {"type": "boolean"},
                 },
-                "required": ["channel_id", "channel_type", "ts", "user_id", "text", "permalink"],
+                "required": ["channel_id", "ts", "user_id", "text", "permalink"],
             },
         },
     },
@@ -328,6 +330,20 @@ For each message return channel_id, channel_name, channel_type (dm, group_dm, pu
 private), ts, thread_ts (the thread root ts, or null if not in a thread), user_id,
 user_name, the full message text, its permalink and is_context.
 Return {{"messages": []}} if there is nothing."""
+
+
+def _normalize_slack(m: dict) -> dict:
+    """Map whatever channel type the model reported onto dm/group_dm/public/private."""
+    raw = (m.get("channel_type") or "").lower().replace("-", "_").replace(" ", "_")
+    if raw in ("dm", "im", "direct_message") or str(m.get("channel_id", "")).startswith("D"):
+        kind = "dm"
+    elif raw in ("group_dm", "mpim", "group"):
+        kind = "group_dm"
+    elif raw in ("private", "private_channel", "group_channel"):
+        kind = "private"
+    else:
+        kind = "public"
+    return {**m, "channel_type": kind}
 
 
 def _is_mine(m: dict, me: str, my_threads: set[str]) -> bool:
@@ -795,7 +811,7 @@ async def _collect_source(source: str, since: datetime, settings: dict) -> list[
         to_read = [tuple(key.split(":", 1)) for key, _ in recent]
         prompt = _slack_prompt(me, since, to_read)
         out = await _claude_collect("slack", prompt, _SLACK_SCHEMA, model, timeout)
-        messages = out.get("messages", [])
+        messages = [_normalize_slack(m) for m in out.get("messages", [])]
         # Threads the user writes in become theirs; replies there count from now on.
         now = datetime.now(timezone.utc).isoformat()
         for m in messages:
@@ -880,10 +896,15 @@ async def _collector_loop() -> None:
             now = datetime.now(timezone.utc)
             interval = timedelta(minutes=max(5, int(settings["interval_minutes"])))
             if settings["enabled"] and _within_active_hours(settings, now):
-                due = [
-                    s for s in SOURCES
-                    if settings["sources"].get(s) and now - _last_sweep.get(s, datetime.min.replace(tzinfo=timezone.utc)) >= interval
-                ]
+                due = []
+                for source in SOURCES:
+                    if not settings["sources"].get(source):
+                        continue
+                    # The cursor survives restarts; the in-memory time does not. A
+                    # restart must not trigger a fresh sweep of every source.
+                    last = _last_sweep.get(source) or await _get_cursor(source, interval.total_seconds() / 3600 + 1)
+                    if now - last >= interval:
+                        due.append(source)
                 if due:
                     await run_sweep(due)
         except asyncio.CancelledError:

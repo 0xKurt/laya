@@ -3,6 +3,7 @@
 
 """Tests for the MCP collector: normalization, self flags, dedupe ids, sweep cursors."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -339,3 +340,36 @@ def test_slack_context_messages_explain_a_reply_but_trigger_nothing():
 
 def test_slack_context_only_conversation_produces_nothing():
     assert mc._slack_events([_slack(channel_type="dm", channel_id="D1", is_context=True)], ME) == []
+
+
+def test_normalize_slack_channel_types():
+    n = lambda **kw: mc._normalize_slack(_slack(**kw))["channel_type"]
+    assert n(channel_type="im") == "dm"
+    assert n(channel_type="", channel_id="D123") == "dm"
+    assert n(channel_type="mpim") == "group_dm"
+    assert n(channel_type="private_channel") == "private"
+    assert n(channel_type="channel") == "public"
+    assert n(channel_type=None) == "public"
+
+
+@pytest.mark.asyncio
+async def test_loop_does_not_resweep_after_restart(db):
+    # A cursor 10 minutes old means the source ran recently, even with no in-memory time.
+    for source in mc.SOURCES:
+        await mc._set_cursor(source, datetime.now(timezone.utc) - timedelta(minutes=10))
+    mc._last_sweep.clear()
+    settings = mc.get_collector_settings() | {"enabled": True, "interval_minutes": 60}
+    sweep = AsyncMock()
+    calls = {"n": 0}
+
+    async def stop_after_one(_):
+        calls["n"] += 1
+        raise asyncio.CancelledError
+
+    with patch.object(mc, "get_collector_settings", return_value=settings), \
+         patch.object(mc, "_within_active_hours", return_value=True), \
+         patch.object(mc, "run_sweep", sweep), \
+         patch("asyncio.sleep", side_effect=stop_after_one):
+        with pytest.raises(asyncio.CancelledError):
+            await mc._collector_loop()
+    sweep.assert_not_called()
