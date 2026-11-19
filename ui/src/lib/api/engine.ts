@@ -87,6 +87,13 @@ import type {
 	McpToken,
 	ThroughputResponse
 } from './types';
+import type {
+	ClaudeCodeConfig,
+	ClaudeCodePlatform,
+	ClaudeCodePlatformStatus,
+	ClaudeCodeStatus,
+	ClaudeCodeSyncResult
+} from './types';
 
 import { getEngineToken, getEngineUrl } from '$lib/config';
 
@@ -1315,5 +1322,34 @@ export const engineApi = {
 		request<McpConfig>('/mcp/config', { method: 'PUT', body: JSON.stringify(body) }),
 	refreshMcpToken: () => request<McpToken>('/mcp/token/refresh', { method: 'POST' }),
 	revealMcpToken: () => request<McpToken>('/mcp/token/reveal'),
-	deleteMcpToken: () => request<{ status: string }>('/mcp/token', { method: 'DELETE' })
+	deleteMcpToken: () => request<{ status: string }>('/mcp/token', { method: 'DELETE' }),
+
+	// Claude Code connector. Discovery, connect and sync run `claude -p` turns,
+	// which can take minutes, so they get a long timeout.
+	getClaudeCodeStatus: () => request<ClaudeCodeStatus>('/claude-code/status', { signal: AbortSignal.timeout(120_000) }),
+	discoverClaudeCode: () =>
+		request<ClaudeCodeStatus>('/claude-code/discover', { method: 'POST', signal: AbortSignal.timeout(600_000) }),
+	connectClaudeCode: (platform: ClaudeCodePlatform, spaceId?: string) =>
+		request<ClaudeCodePlatformStatus>(`/claude-code/${platform}/connect`, {
+			method: 'POST',
+			body: JSON.stringify(spaceId ? { space_id: spaceId } : {}),
+			signal: AbortSignal.timeout(600_000)
+		}),
+	disconnectClaudeCode: (platform: ClaudeCodePlatform) =>
+		request<{ status: string; platform: string }>(`/claude-code/${platform}`, { method: 'DELETE' }),
+	updateClaudeCodeConfig: (platform: ClaudeCodePlatform, config: ClaudeCodeConfig) =>
+		request<ClaudeCodePlatformStatus>(`/claude-code/${platform}/config`, {
+			method: 'PUT',
+			body: JSON.stringify(config)
+		}),
+	setClaudeCodeEnabled: (platform: ClaudeCodePlatform, enabled: boolean) =>
+		request<ClaudeCodePlatformStatus>(`/claude-code/${platform}/enabled`, {
+			method: 'PUT',
+			body: JSON.stringify({ enabled })
+		}),
+	syncClaudeCode: (platform: ClaudeCodePlatform) =>
+		request<ClaudeCodeSyncResult>(`/claude-code/${platform}/sync`, {
+			method: 'POST',
+			signal: AbortSignal.timeout(900_000)
+		})
 };

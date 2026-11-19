@@ -4,7 +4,9 @@
 	import PlatformIcon from './PlatformIcon.svelte';
 	import AccountCard from './AccountCard.svelte';
 	import { healthLegend, platformHealth, STATUS_STYLE } from '$lib/utils/integrationHealth';
-	import type { EgressConnection } from '$lib/api/types';
+	import ClaudeCodeSource from './ClaudeCodeSource.svelte';
+	import { isClaudeCodeConnection, isClaudeCodePlatform } from '$lib/utils/claudeCode';
+	import type { ClaudeCodePlatformStatus, ClaudeCodeStatus, EgressConnection } from '$lib/api/types';
 	import type { PlatformEntry } from './PlatformList.svelte';
 
 	let {
@@ -14,7 +16,10 @@
 		onBack,
 		onAdd,
 		onReconnect,
-		onRefresh
+		onRefresh,
+		claudeCode,
+		claudeCodeCli = false,
+		onClaudeCodeChange
 	}: {
 		platform: PlatformEntry;
 		narrow: boolean;
@@ -24,7 +29,16 @@
 		onAdd: () => void;
 		onReconnect: (conn: EgressConnection) => void;
 		onRefresh: () => void;
+		/** The platform's Claude Code status: undefined for platforms the
+		 *  connector does not cover, null while it is loading. */
+		claudeCode?: ClaudeCodePlatformStatus | null;
+		claudeCodeCli?: boolean;
+		onClaudeCodeChange?: (full?: ClaudeCodeStatus) => void;
 	} = $props();
+
+	// The n8n accounts; the Claude Code entry gets its own panel below.
+	const accounts = $derived(platform.connections.filter((c) => !isClaudeCodeConnection(c)));
+	const showClaudeCode = $derived(claudeCode !== undefined && isClaudeCodePlatform(platform.key));
 
 	// Body copy for the empty state where a platform needs more than the generic line.
 	const EMPTY_TEXT: Record<string, string> = {
@@ -75,7 +89,7 @@
 			onclick={onAdd}
 			class="rounded-lg bg-laya-orange px-3.5 py-[7px] text-integ-body font-semibold text-integ-on-accent transition-colors hover:bg-laya-gold"
 		>
-			{h.n > 0 ? '+ Add account' : `Connect ${label}`}
+			{accounts.length > 0 ? '+ Add account' : showClaudeCode ? 'Connect with n8n' : `Connect ${label}`}
 		</button>
 	</div>
 
@@ -94,9 +108,20 @@
 				{healthLegend(platform.connections)}
 			</span>
 		</div>
+	{/if}
 
+	{#if showClaudeCode && isClaudeCodePlatform(platform.key)}
+		<ClaudeCodeSource
+			platform={platform.key}
+			status={claudeCode ?? null}
+			cliFound={claudeCodeCli}
+			onChange={(full) => onClaudeCodeChange?.(full)}
+		/>
+	{/if}
+
+	{#if accounts.length > 0}
 		<div class="flex flex-col gap-2.5">
-			{#each platform.connections as conn (conn.connection_id)}
+			{#each accounts as conn (conn.connection_id)}
 				<AccountCard
 					{conn}
 					platformKey={platform.key}
@@ -107,9 +132,11 @@
 				/>
 			{/each}
 		</div>
-	{:else}
-		<div class="flex flex-1 flex-col items-start justify-center gap-2 px-1 pb-20 pt-10">
-			<span class="text-integ-name font-semibold text-integ-t2">No {label} accounts yet</span>
+	{:else if !showClaudeCode || h.n === 0}
+		<div class="flex flex-1 flex-col items-start justify-center gap-2 px-1 {showClaudeCode ? 'pb-6 pt-2' : 'pb-20 pt-10'}">
+			<span class="text-integ-name font-semibold text-integ-t2">
+				{showClaudeCode ? `Or connect ${label} through n8n` : `No ${label} accounts yet`}
+			</span>
 			<span class="max-w-[440px] text-integ-body leading-[1.6] text-integ-t3 [text-wrap:pretty]">
 				{EMPTY_TEXT[platform.key] ??
 					'Connect an account and Laya will ingest from it and offer its actions in Pulse.'}

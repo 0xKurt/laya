@@ -1901,3 +1901,67 @@ export interface OpenComposeEvent {
 	prefill: Record<string, unknown>;
 	source_card_id?: string;
 }
+
+// ── Claude Code connector (/claude-code, docs/claude-code-connector.md) ──
+
+export type ClaudeCodePlatform = 'slack' | 'gmail' | 'linear' | 'github' | 'notion';
+
+export interface ClaudeCodeActiveHours {
+	/** "HH:MM" */
+	start: string;
+	end: string;
+	/** Weekdays, 0 = Monday … 6 = Sunday. */
+	days: number[];
+}
+
+/** Per-platform config. The common keys are always present; the platform
+ *  keys only for their platform. PUT /claude-code/{p}/config takes the full object. */
+export interface ClaudeCodeConfig {
+	interval_minutes: number;
+	active_hours: ClaudeCodeActiveHours;
+	/** IANA zone; empty = the system's local time zone. */
+	timezone: string;
+	/** "haiku" | "sonnet" | "opus" */
+	model: string;
+	initial_lookback_hours: number;
+	recheck_after_hours: number;
+	// slack
+	context_messages?: number;
+	thread_memory_days?: number;
+	only_relevant?: boolean;
+	// gmail
+	exclude_senders?: string[];
+	meeting_notes?: boolean;
+	// github
+	orgs?: string[];
+	others_prs_only_on_mention?: boolean;
+}
+
+/** The user's identity on a platform, e.g. {slack_user_id, name, email} or {github_login, name, email}. */
+export type ClaudeCodeIdentity = Record<string, string>;
+
+export interface ClaudeCodePlatformStatus {
+	available: boolean;
+	connected: boolean;
+	enabled: boolean;
+	identity: ClaudeCodeIdentity;
+	/** Why the platform is not available, in words the user can act on. */
+	problem: string | null;
+	last_run_at: string | null;
+	last_ok_at: string | null;
+	last_error: string | null;
+	last_count: number | null;
+	config: ClaudeCodeConfig;
+	can_send: boolean;
+}
+
+export interface ClaudeCodeStatus {
+	cli: { found: boolean; path: string | null; version: string | null };
+	platforms: Record<ClaudeCodePlatform, ClaudeCodePlatformStatus>;
+	budget_paused: boolean;
+}
+
+export interface ClaudeCodeSyncResult {
+	events: number;
+	error: string | null;
+}

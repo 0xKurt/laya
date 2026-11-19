@@ -15,7 +15,8 @@ import {
 	agentUsageTop,
 	agentUsageLabel,
 	agentUsageRatio,
-	agentPauseHeadline
+	agentPauseHeadline,
+	agentPauseBannerText
 } from './budget';
 
 // The derived stores recompute from their source writable on every read, so
@@ -132,5 +133,24 @@ describe('agentPauseHeadline', () => {
 	it('falls back to a generic headline', () => {
 		expect(agentPauseHeadline(null)).toBe('Agent usage limit reached');
 		expect(agentPauseHeadline('something else')).toBe('Agent usage limit reached');
+	});
+});
+
+describe('agentPauseBannerText', () => {
+	it('names midnight for a daily-cap pause', () => {
+		expect(agentPauseBannerText('daily agent call limit reached (50/50)')).toBe(
+			'Daily agent call limit reached — ingestion paused until midnight'
+		);
+		expect(agentPauseBannerText('claude_code: rate limit rejected; daily agent call limit reached (5/5)')).toContain(
+			'until midnight'
+		);
+	});
+	it('names the usage window for the other causes', () => {
+		expect(agentPauseBannerText('claude_code: rate limit rejected')).toBe(
+			"The agent's own usage limit was reached — ingestion paused until the usage window resets"
+		);
+		expect(agentPauseBannerText(null)).toBe(
+			'Agent usage limit reached — ingestion paused until the usage window resets'
+		);
 	});
 });

@@ -6,6 +6,9 @@
 	import { engineApi } from '$lib/api/engine';
 	import type { CustomProvider, DiscoveredModel } from '$lib/api/types';
 	import { CODING_AGENTS } from '$lib/config';
+	import SetupClaudeCode from '$lib/components/setup/SetupClaudeCode.svelte';
+	import { CLAUDE_SUBSCRIPTION_MODELS, selfMemberFromIdentities } from '$lib/utils/claudeCode';
+	import type { ClaudeCodeIdentity, ClaudeCodePlatform } from '$lib/api/types';
 
 	interface RepoDetection {
 		path: string;
@@ -15,7 +18,7 @@
 	}
 
 	$effect(() => {
-		if (step === 3 && n8nStatus === 'checking') {
+		if (step === 3 && toolsVia === 'n8n' && n8nStatus === 'checking') {
 			checkN8n();
 		}
 	});
@@ -123,8 +126,14 @@
 	let savedRepos = $state<Array<{ name: string; path: string; platform: string; remote_id: string }>>([]);
 	let showManualRepo = $state(false);
 
+	// Step 3 via Claude Code: the identities its discovery found (prefill step 5).
+	let toolsVia = $state<'n8n' | 'claude_code'>('n8n');
+	let claudeCodeIdentities = $state<Partial<Record<ClaudeCodePlatform, ClaudeCodeIdentity>>>({});
+	// Step 4: run Laya's stages on the Claude subscription too.
+	let useClaudeSubscription = $state(false);
+
 	// Step 5: Team
-	let members = $state<Array<{ name: string; email: string; role: 'self' | 'manager' | 'teammate' | 'external' | 'bot' }>>([
+	let members = $state<Array<{ name: string; email: string; role: 'self' | 'manager' | 'teammate' | 'external' | 'bot'; accounts?: string[]; aliases?: string[] }>>([
 		{ name: '', email: '', role: 'teammate' }
 	]);
 
@@ -384,9 +393,28 @@
 		members = members.filter((_, i) => i !== index);
 	}
 
+	/** Step 5: put the user in as "me" from what Claude Code knows, when the list is still empty. */
+	async function prefillSelf() {
+		if (members.some((m) => m.role === 'self' || m.name.trim() || m.email.trim())) return;
+		// Connecting through Claude Code already wrote "me" to team.json; keep its handles.
+		const existing = await engineApi
+			.getTeam()
+			.then((t) => t.members.find((m) => m.role === 'self'))
+			.catch(() => undefined);
+		const me = existing ?? selfMemberFromIdentities(claudeCodeIdentities);
+		if (!me) return;
+		members = [
+			{ name: me.name, email: me.email, role: 'self', accounts: [...me.accounts], aliases: [...me.aliases] },
+			...members.filter((m) => m.name.trim() || m.email.trim())
+		];
+	}
+
 	async function finish() {
 		// Step 4: Save agent + repos
 		await engineApi.updateSettings({ coding_agent: codingAgent });
+		if (codingAgent === 'claude_code' && useClaudeSubscription) {
+			await engineApi.updateSettings({ models: CLAUDE_SUBSCRIPTION_MODELS } as any);
+		}
 		const allRepos = [...savedRepos];
 		if (repoName.trim() && repoPath.trim()) {
 			allRepos.push({ name: repoName.trim(), path: repoPath.trim(), platform: repoPlatform || 'github', remote_id: repoRemoteId });
@@ -404,8 +432,8 @@
 					email: m.email.trim(),
 					role: m.role,
 					notes: '',
-					aliases: [],
-					accounts: []
+					aliases: m.aliases ?? [],
+					accounts: m.accounts ?? []
 				}))
 			});
 		}
@@ -438,7 +466,10 @@
 			});
 		}
 		if (rules.length > 0) {
-			await engineApi.updateRules({ rules });
+			// Keep rules that exist already (connecting through Claude Code seeds some).
+			const existing = await engineApi.getRules().then((r) => r.rules).catch(() => []);
+			const names = new Set(existing.map((r) => r.name));
+			await engineApi.updateRules({ rules: [...existing, ...rules.filter((r) => !names.has(r.name))] });
 		}
 
 		await engineApi.updateSettings({ setup_complete: true });
@@ -452,6 +483,7 @@
 			finishStep2();
 		} else {
 			step += 1;
+			if (step === 5) prefillSelf();
 		}
 	}
 </script>
@@ -741,6 +773,10 @@
 			{/if}
 		</div>
 
+	<!-- Step 3: Connect Tools through Claude Code -->
+	{:else if step === 3 && toolsVia === 'claude_code'}
+		<SetupClaudeCode bind:identities={claudeCodeIdentities} onUseN8n={() => (toolsVia = 'n8n')} />
+
 	<!-- Step 3: Connect Tools -->
 	{:else if step === 3}
 		<div class="space-y-4">
@@ -810,6 +846,16 @@
 				{/if}
 			</div>
 
+			<button
+				onclick={() => (toolsVia = 'claude_code')}
+				class="w-full rounded-md border border-surface-600 bg-surface-800 p-3 text-left transition-colors hover:border-laya-orange"
+			>
+				<div class="text-sm font-medium">Use Claude Code instead</div>
+				<div class="text-xs text-surface-400">
+					Collect Slack, Gmail, Linear, GitHub and Notion through your Claude Code login. No n8n needed.
+				</div>
+			</button>
+
 			<p class="text-xs text-surface-500">
 				You can skip this and configure integrations later in Settings.
 			</p>
@@ -837,6 +883,19 @@
 					</label>
 				{/each}
 			</div>
+
+			{#if codingAgent === 'claude_code'}
+				<label class="flex cursor-pointer items-start gap-3 rounded-md border border-surface-600 p-3">
+					<input type="checkbox" class="mt-0.5 accent-laya-orange" bind:checked={useClaudeSubscription} />
+					<div>
+						<div class="text-sm font-medium">Also run Laya's models on your Claude subscription</div>
+						<div class="text-xs text-surface-400">
+							Router and Omni use Haiku, the Stager uses Sonnet, through Claude Code. No API key needed for them;
+							chat and Coherence keep their model.
+						</div>
+					</div>
+				</label>
+			{/if}
 
 			<div class="space-y-3 pt-2">
 				<p class="text-sm font-medium">Repositories (optional)</p>
@@ -941,6 +1000,7 @@
 							class="rounded-md border border-surface-600 bg-surface-700 px-2 py-1.5 text-sm"
 							bind:value={member.role}
 						>
+							<option value="self">Me</option>
 							<option value="teammate">Teammate</option>
 							<option value="manager">Manager</option>
 							<option value="stakeholder">Stakeholder</option>

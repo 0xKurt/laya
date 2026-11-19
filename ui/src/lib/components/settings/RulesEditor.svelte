@@ -11,6 +11,7 @@
 	import type { Rule, RuleCondition, SimpleCondition, ClassificationRule } from '$lib/api/types';
 	import { flip } from 'svelte/animate';
 	import { cubicInOut } from 'svelte/easing';
+	import { OTHER_FIELD, conditionValue, isFieldPath, ruleNameParts, valueSummary, valueText } from '$lib/utils/ruleFields';
 
 	const operators: SimpleCondition['operator'][] = ['equals', 'not_equals', 'contains', 'starts_with', 'ends_with', 'in'];
 	const commonFields = [
@@ -31,6 +32,8 @@
 
 	interface ConditionRow {
 		field: string;
+		/** The field is a free dot path ("Other field…"), not one of commonFields. */
+		custom?: boolean;
 		operator: SimpleCondition['operator'];
 		value: string;
 	}
@@ -112,7 +115,7 @@
 
 	function conditionSummary(condition: RuleCondition): string {
 		if ('field' in condition) {
-			return `${condition.field} ${condition.operator.replace('_', ' ')} "${condition.value}"`;
+			return `${condition.field} ${condition.operator.replace('_', ' ')} ${valueSummary(condition.value)}`;
 		}
 		if ('all' in condition) {
 			return condition.all.map(conditionSummary).join(' AND ');
@@ -134,14 +137,14 @@
 			const c = condition as SimpleCondition;
 			return {
 				logic: 'all',
-				rows: [{ field: c.field, operator: c.operator, value: typeof c.value === 'string' ? c.value : c.value.join(', ') }]
+				rows: [{ field: c.field, custom: !commonFields.includes(c.field), operator: c.operator, value: valueText(c.value) }]
 			};
 		}
 		if ('all' in condition) {
 			return {
 				logic: 'all',
 				rows: condition.all.filter((c): c is SimpleCondition => 'field' in c).map(c => ({
-					field: c.field, operator: c.operator, value: typeof c.value === 'string' ? c.value : c.value.join(', ')
+					field: c.field, custom: !commonFields.includes(c.field), operator: c.operator, value: valueText(c.value)
 				}))
 			};
 		}
@@ -149,7 +152,7 @@
 			return {
 				logic: 'any',
 				rows: condition.any.filter((c): c is SimpleCondition => 'field' in c).map(c => ({
-					field: c.field, operator: c.operator, value: typeof c.value === 'string' ? c.value : c.value.join(', ')
+					field: c.field, custom: !commonFields.includes(c.field), operator: c.operator, value: valueText(c.value)
 				}))
 			};
 		}
@@ -158,9 +161,9 @@
 
 	function buildCondition(): RuleCondition {
 		const simples: SimpleCondition[] = formConditions.map(r => ({
-			field: r.field,
+			field: r.field.trim(),
 			operator: r.operator,
-			value: r.value
+			value: conditionValue(r.operator, r.value)
 		}));
 		if (simples.length === 1) return simples[0];
 		if (formLogic === 'any') return { any: simples };
@@ -186,7 +189,19 @@
 		}
 	}
 
-	let formValid = $derived(formName.trim() !== '' && formConditions.every(c => c.value.trim() !== ''));
+	let formValid = $derived(
+		formName.trim() !== '' && formConditions.every(c => c.value.trim() !== '' && isFieldPath(c.field))
+	);
+
+	function pickField(cond: ConditionRow, value: string) {
+		if (value === OTHER_FIELD) {
+			if (!cond.custom) cond.field = '';
+			cond.custom = true;
+		} else {
+			cond.custom = false;
+			cond.field = value;
+		}
+	}
 
 	async function addRule() {
 		rules.push({
@@ -358,6 +373,7 @@
 		{:else}
 			<div class="space-y-3">
 				{#each rules as rule, i}
+					{@const nameParts = ruleNameParts(rule.name)}
 					<div class="{$glassTheme ? 'glass-section' : 'rounded-xl border border-surface-700 bg-surface-800'} p-4">
 						<div class="flex items-start justify-between">
 							<div class="flex-1">
@@ -373,7 +389,10 @@
 									{#if conditionLabel(rule.condition)}
 										<span class="rounded px-1.5 py-0.5 text-laya-secondary font-semibold uppercase bg-blue-900/50 text-blue-400">{conditionLabel(rule.condition)}</span>
 									{/if}
-									<span class="font-medium {rule.enabled ? 'text-surface-50' : 'text-surface-500'}">{rule.name}</span>
+									{#if nameParts.origin}
+										<span class="rounded px-1.5 py-0.5 text-laya-secondary font-semibold bg-laya-orange/15 text-laya-orange" title="Added when you connected a tool through {nameParts.origin}">{nameParts.origin}</span>
+									{/if}
+									<span class="font-medium {rule.enabled ? 'text-surface-50' : 'text-surface-500'}">{nameParts.title}</span>
 								</div>
 								<p class="mt-1 pl-12 font-mono text-laya-secondary text-surface-400">{conditionSummary(rule.condition)}</p>
 							</div>
@@ -442,11 +461,28 @@
 									</span>
 								{/if}
 								<div class="grid flex-1 grid-cols-1 gap-2 sm:grid-cols-3">
-									<select bind:value={cond.field} class="rounded-lg border border-surface-600 bg-surface-900 px-3 py-2 text-laya-base text-surface-50">
-										{#each commonFields as field}
-											<option value={field}>{field}</option>
-										{/each}
-									</select>
+									<div class="flex flex-col gap-2">
+										<select
+											value={cond.custom ? OTHER_FIELD : cond.field}
+											onchange={(e) => pickField(cond, e.currentTarget.value)}
+											aria-label="Field"
+											class="rounded-lg border border-surface-600 bg-surface-900 px-3 py-2 text-laya-base text-surface-50"
+										>
+											{#each commonFields as field}
+												<option value={field}>{field}</option>
+											{/each}
+											<option value={OTHER_FIELD}>Other field…</option>
+										</select>
+										{#if cond.custom}
+											<input
+												bind:value={cond.field}
+												placeholder="content.metadata.github_reason"
+												aria-label="Field path"
+												aria-invalid={cond.field.trim() !== '' && !isFieldPath(cond.field)}
+												class="rounded-lg border bg-surface-900 px-3 py-2 font-mono text-laya-secondary text-surface-50 placeholder-surface-500 {cond.field.trim() !== '' && !isFieldPath(cond.field) ? 'border-red-700' : 'border-surface-600'}"
+											/>
+										{/if}
+									</div>
 									<select bind:value={cond.operator} class="rounded-lg border border-surface-600 bg-surface-900 px-3 py-2 text-laya-base text-surface-50">
 										{#each operators as op}
 											<option value={op}>{op.replace('_', ' ')}</option>
