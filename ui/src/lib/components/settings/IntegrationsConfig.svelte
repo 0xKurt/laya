@@ -13,7 +13,8 @@
 	import PlatformDetail from './PlatformDetail.svelte';
 	import ConnectModal from './ConnectModal.svelte';
 	import N8nAdvancedSection from './N8nAdvancedSection.svelte';
-	import type { PlatformConfig, EgressConnection } from '$lib/api/types';
+	import type { PlatformConfig, EgressConnection, ClaudeCodeStatus } from '$lib/api/types';
+	import { isClaudeCodePlatform, withClaudeCodeConnections } from '$lib/utils/claudeCode';
 
 	// Platform registry + connections
 	let platforms = $state<Record<string, PlatformConfig>>({});
@@ -64,6 +65,27 @@
 		fields: []
 	};
 
+	// Claude Code connector status (GET /claude-code/status). Loaded apart from
+	// the n8n data: the first call can list the CLI's tools, which takes a while,
+	// and the pane must not wait for it. Null until loaded or when unavailable.
+	let claudeCode = $state<ClaudeCodeStatus | null>(null);
+
+	async function loadClaudeCode(full?: ClaudeCodeStatus) {
+		if (full) {
+			claudeCode = full;
+			return;
+		}
+		try {
+			claudeCode = await engineApi.getClaudeCodeStatus();
+		} catch {
+			// Older engine or the CLI check failed: the n8n accounts still show.
+		}
+	}
+
+	$effect(() => {
+		untrack(() => loadClaudeCode());
+	});
+
 	// Load data on mount (once). loadData() reads `platforms` to decide
 	// whether to show the loading skeleton, which Svelte 5 would track as
 	// a dependency — then setting `platforms` after the fetch re-triggers
@@ -96,13 +118,17 @@
 		}
 	}
 
+	// The n8n accounts plus one "via Claude Code" entry per platform connected
+	// through the Claude Code connector (the SMTP-style injection below).
+	const allConnections = $derived(withClaudeCodeConnections(connections, claudeCode?.platforms ?? null));
+
 	const groups = $derived.by(() => {
 		const result: PlatformGroup[] = [];
 		for (const cat of CATEGORY_ORDER) {
 			const items: PlatformEntry[] = [];
 			for (const [key, config] of Object.entries(platforms)) {
 				if (config.category === cat) {
-					items.push({ key, config, connections: connections.filter((c) => c.platform === key) });
+					items.push({ key, config, connections: allConnections.filter((c) => c.platform === key) });
 				}
 			}
 			if (cat === 'email') {
@@ -216,6 +242,9 @@
 					onAdd={() => openAdd(selected)}
 					onReconnect={(conn) => openReconnect(selected, conn)}
 					onRefresh={loadData}
+					claudeCode={isClaudeCodePlatform(selected.key) ? (claudeCode?.platforms[selected.key] ?? null) : undefined}
+					claudeCodeCli={claudeCode?.cli.found ?? false}
+					onClaudeCodeChange={loadClaudeCode}
 				/>
 			{/if}
 		{/if}
