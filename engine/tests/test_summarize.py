@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from laya.pipeline import summarize
+from tests.conftest import insert_test_card
 
 
 def _card(i: int) -> dict:
@@ -186,3 +187,41 @@ async def test_batch_failure_falls_back_to_per_card(db):
 
     assert seen_batch, "batch path should have been attempted"
     assert sorted(await _persisted_card_ids(db)) == ["card_0", "card_1", "card_2"]
+
+
+@pytest.fixture
+def _captured_runs():
+    """Record which space each debounced summary run is scheduled for."""
+    spaces: list[str] = []
+
+    async def fake_debounced_run(space_id):
+        spaces.append(space_id)
+
+    with patch.object(summarize, "_debounced_run", new=fake_debounced_run):
+        yield spaces
+    summarize._pending_cards.clear()
+    summarize._pending_status_changes.clear()
+    summarize._debounce_tasks.clear()
+
+
+@pytest.mark.asyncio
+async def test_card_without_space_is_summarised_in_default_space(db, _captured_runs):
+    """A card created outside an event (the daily briefing) has no space_id."""
+    await summarize.trigger_summary_update(
+        card_id="card_brief", card_header="Briefing", card_summary="s",
+        card_priority="LOW", card_category="briefing", space_id=None,
+    )
+    await summarize._debounce_tasks["default"]
+
+    assert list(summarize._pending_cards) == ["default"]
+    assert _captured_runs == ["default"]
+
+
+@pytest.mark.asyncio
+async def test_status_change_of_card_without_space_uses_default_space(db, _captured_runs):
+    await insert_test_card(db, card_id="card_brief", event_id="evt_brief", space_id=None)
+    await summarize.trigger_summary_status_update("card_brief", "Briefing", "done")
+    await summarize._debounce_tasks["default"]
+
+    assert list(summarize._pending_status_changes) == ["default"]
+    assert _captured_runs == ["default"]

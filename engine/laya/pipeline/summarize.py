@@ -73,7 +73,7 @@ async def trigger_summary_update(
     card_summary: str,
     card_priority: str,
     card_category: str,
-    space_id: str,
+    space_id: str | None,
     card_persona: str | None = None,
     card_intelligence: list[str] | None = None,
     actor_name: str | None = None,
@@ -94,6 +94,9 @@ async def trigger_summary_update(
         "card_tags": card_tags,
     }
 
+    # Cards created outside an event (the daily briefing card) carry no space,
+    # and daily_summaries.space_id is NOT NULL.
+    space_id = space_id or "default"
     async with _debounce_lock:
         _pending_cards.setdefault(space_id, []).append(card_data)
         task = _debounce_tasks.get(space_id)
@@ -117,7 +120,9 @@ async def trigger_summary_status_update(
     rows = await db.execute_fetchall(
         "SELECT space_id FROM action_cards WHERE card_id = ?", (card_id,)
     )
-    space_id = rows[0]["space_id"] if rows else "default"
+    # A card without a space (the daily briefing card) is summarised in the
+    # default space; daily_summaries.space_id is NOT NULL.
+    space_id = (rows[0]["space_id"] if rows else None) or "default"
 
     change_data = {
         "card_id": card_id,
