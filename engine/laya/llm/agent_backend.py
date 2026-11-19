@@ -110,6 +110,8 @@ class AgentResult:
     cost_usd: float | None = None
     # Native usage-limit signal (Claude Code's rate_limit_info), for agent budgeting.
     rate_limit_info: dict | None = None
+    # The Claude account the call ran on (claude_code/accounts.py); None for other agents.
+    account_id: str | None = None
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -503,6 +505,33 @@ def _parse_codex(lines: list[str], out: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+class AgentRateLimited(RuntimeError):
+    """The Claude account's usage limit rejected the turn."""
+
+
+async def _run_agent_routed(agent_id: str, *args: Any) -> dict[str, Any]:
+    """``_run_agent`` on the Claude account routing picks (claude_code only).
+
+    A rejection by that account's usage limit is retried once on the next
+    account with room. The result carries the account in ``account_id``.
+    """
+    if agent_id != "claude_code":
+        return await _run_agent(agent_id, *args)
+    from laya.claude_code import accounts
+
+    account_id, env = await accounts.pick("inference")
+    try:
+        result = await _run_agent(agent_id, *args, account_id=account_id, account_env=env)
+    except AgentRateLimited:
+        nxt = await accounts.failover(account_id)
+        if nxt is None:
+            raise
+        account_id, env = nxt
+        result = await _run_agent(agent_id, *args, account_id=account_id, account_env=env)
+    result["account_id"] = account_id
+    return result
+
+
 async def _run_agent(
     agent_id: str,
     binary: str,
@@ -512,11 +541,20 @@ async def _run_agent(
     response_schema: dict | None,
     native: bool,
     timeout: float,
+    account_id: str | None = None,
+    account_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Spawn the agent once in an ephemeral empty cwd and return parsed output."""
+    """Spawn the agent once in an ephemeral empty cwd and return parsed output.
+
+    ``account_env`` selects a Claude account (``CLAUDE_CONFIG_DIR``); the turn's
+    rate-limit signal is recorded for ``account_id`` before any error is raised.
+    A rejection by the account's usage limit raises :class:`AgentRateLimited`.
+    """
     args, env = _build_args(
         agent_id, binary, system_text, user_prompt, model_string, response_schema, native
     )
+    if account_env:
+        env = {**env, **account_env}
     # Ephemeral, empty working dir: the agent has no repo to read or write, reinforcing
     # the tool/sandbox flags above. Cleaned up regardless of outcome.
     tmpdir = tempfile.mkdtemp(prefix="laya-agent-llm-")
@@ -544,6 +582,13 @@ async def _run_agent(
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     result = _parse_output(agent_id, lines, native_schema=native and bool(response_schema))
+    if agent_id == "claude_code":
+        from laya.claude_code import accounts
+
+        rejected = accounts.is_rejection(result.get("rate_limit_info"), result.get("error"))
+        await accounts.record(account_id, result.get("rate_limit_info"), rejected=rejected)
+        if result.get("error") and rejected:
+            raise AgentRateLimited(f"Agent '{agent_id}' error: {result['error']}")
     if result.get("error"):
         stderr_tail = proc.stderr_output
         raise RuntimeError(
@@ -612,7 +657,7 @@ async def agent_llm_call(
                 system_for_attempt = (base_system + retry_feedback).strip()
 
             start = time.monotonic()
-            result = await _run_agent(
+            result = await _run_agent_routed(
                 agent_id, binary, system_for_attempt, user_prompt, model_string,
                 response_schema, native, timeout,
             )
@@ -632,6 +677,7 @@ async def agent_llm_call(
                 "effective_model": result["effective_model"] or (model_string or agent_id),
                 "cost_usd": result["cost_usd"],
                 "rate_limit_info": result.get("rate_limit_info"),
+                "account_id": result.get("account_id"),
             }
 
             if not response_schema:
@@ -668,6 +714,7 @@ async def agent_llm_call(
         effective_model=last_extra.get("effective_model", ""),
         cost_usd=last_extra.get("cost_usd"),
         rate_limit_info=last_extra.get("rate_limit_info"),
+        account_id=last_extra.get("account_id"),
     )
 
 
@@ -895,14 +942,15 @@ async def _account_stream_turn(
     success: bool,
     error: str | None = None,
     cost_usd: float | None = None,
-    rate_limit_info: dict | None = None,
     tools_used: list[str] | None = None,
+    account_id: str | None = None,
     event_id: str | None = None,
     card_id: str | None = None,
 ) -> None:
     """Audit + budget side effects of one streaming turn, matching llm_call's agent path:
     the audit row (which also counts toward the daily agent call cap), the $ budget
-    check, the native rate-limit record and the window-budget evaluation."""
+    check and the window-budget evaluation. The turn itself records its native
+    rate-limit signal for the account it ran on."""
     from laya.llm.client import log_to_audit
 
     meta: dict[str, Any] = {"backend": "agent", "agent_model": model_id, "streaming": True}
@@ -910,6 +958,8 @@ async def _account_stream_turn(
         meta["cost_usd"] = cost_usd
     if tools_used:
         meta["agent_tools"] = tools_used
+    if account_id:
+        meta["claude_account"] = account_id
     await log_to_audit(
         event_id=event_id,
         card_id=card_id,
@@ -932,11 +982,9 @@ async def _account_stream_turn(
     except Exception:
         pass
     try:
-        from laya.pipeline.agent_budget import evaluate_agent_budget, record_rate_limit
+        from laya.pipeline.agent_budget import evaluate_agent_budget
         from laya.tasks import create_task as create_tracked_task
 
-        if rate_limit_info:
-            await record_rate_limit(parse_agent_model_id(model_id)[0], rate_limit_info)
         create_tracked_task(evaluate_agent_budget())
     except Exception:
         pass
@@ -1000,6 +1048,7 @@ async def agent_llm_stream(
 
     token: str | None = None
     config_path: str | None = None
+    account_id: str | None = None
     tmpdir = tempfile.mkdtemp(prefix="laya-agent-stream-")
     proc = AgentProcess()
     finished = False
@@ -1016,34 +1065,60 @@ async def agent_llm_stream(
             binary, full_system, user_prompt, model_string, config_path, allowed,
         )
 
-        async with _get_semaphore():
-            try:
-                await proc.spawn(args=args, cwd=tmpdir)
-            except FileNotFoundError as e:
-                raise RuntimeError(
-                    f"Agent '{agent_id}' binary not found ({binary}). Is it installed?"
-                ) from e
-            async for line in proc.read_lines(idle_timeout=idle_timeout):
-                for item in parser.feed(line):
-                    if item[0] == "text":
-                        output_text += item[1]
-                        yield StreamEvent(type="chunk", content=item[1], model=model_id)
-                    else:
-                        _, status, tid, name, targs = item[:5]
-                        yield StreamEvent(
-                            type="tool_status",
-                            tool_status=status,
-                            tool_calls=[ToolCall(id=tid, name=name, arguments=targs)],
-                            content=item[5] if status == "done" else "",
-                            model=model_id,
-                        )
-                if time.monotonic() - start > deadline_s:
-                    raise TimeoutError(f"agent '{agent_id}' turn exceeded {int(deadline_s)}s")
-            await proc.wait()
-            finished = True
+        from laya.claude_code import accounts
+
+        account_id, account_env = await accounts.pick("chat")
+        retried = False
+        while True:
+            yielded = False
+            async with _get_semaphore():
+                try:
+                    await proc.spawn(args=args, cwd=tmpdir, env=account_env or None)
+                except FileNotFoundError as e:
+                    raise RuntimeError(
+                        f"Agent '{agent_id}' binary not found ({binary}). Is it installed?"
+                    ) from e
+                async for line in proc.read_lines(idle_timeout=idle_timeout):
+                    for item in parser.feed(line):
+                        yielded = True
+                        if item[0] == "text":
+                            output_text += item[1]
+                            yield StreamEvent(type="chunk", content=item[1], model=model_id)
+                        else:
+                            _, status, tid, name, targs = item[:5]
+                            yield StreamEvent(
+                                type="tool_status",
+                                tool_status=status,
+                                tool_calls=[ToolCall(id=tid, name=name, arguments=targs)],
+                                content=item[5] if status == "done" else "",
+                                model=model_id,
+                            )
+                    if time.monotonic() - start > deadline_s:
+                        raise TimeoutError(f"agent '{agent_id}' turn exceeded {int(deadline_s)}s")
+                await proc.wait()
+                finished = True
+
+            data = parser.result
+            error_text = (
+                str(data.get("result") or data.get("error") or "")
+                if data and data.get("is_error") else None
+            )
+            rejected = accounts.is_rejection(parser.rate_limit_info, error_text)
+            await accounts.record(account_id, parser.rate_limit_info, rejected=rejected)
+            # A turn the account's usage limit rejected is retried once on the next
+            # account, but only while nothing has been shown to the user.
+            if rejected and not yielded and not retried:
+                nxt = await accounts.failover(account_id)
+                if nxt is not None:
+                    account_id, account_env = nxt
+                    retried = True
+                    proc = AgentProcess()
+                    finished = False
+                    parser = ClaudeStreamParser()
+                    continue
+            break
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
-        data = parser.result
         if data is None:
             stderr_tail = proc.stderr_output
             raise RuntimeError(
@@ -1082,7 +1157,7 @@ async def agent_llm_stream(
             model_id, step,
             input_tokens=input_tokens, output_tokens=output_tokens, latency_ms=elapsed_ms,
             success=True, cost_usd=data.get("total_cost_usd"),
-            rate_limit_info=parser.rate_limit_info, tools_used=parser.tools_used,
+            tools_used=parser.tools_used, account_id=account_id,
             event_id=event_id, card_id=card_id,
         )
     except Exception as e:
@@ -1091,7 +1166,8 @@ async def agent_llm_stream(
         yield StreamEvent(type="error", content=str(e), model=model_id, latency_ms=elapsed_ms)
         await _account_stream_turn(
             model_id, step, input_tokens=0, output_tokens=0, latency_ms=elapsed_ms,
-            success=False, error=str(e), event_id=event_id, card_id=card_id,
+            success=False, error=str(e), account_id=account_id,
+            event_id=event_id, card_id=card_id,
         )
     finally:
         if not finished:

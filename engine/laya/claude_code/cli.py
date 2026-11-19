@@ -11,7 +11,10 @@ user's own Claude Code settings may allow a write tool (e.g. a Slack send)
 globally, and a deny rule wins over any allow rule.
 
 Every turn is logged to the audit log as model `agent/claude_code/<model>`,
-so the agent usage budget (pipeline/agent_budget.py) counts it.
+so the agent usage budget (pipeline/agent_budget.py) counts it. Turns run in
+`stream-json` mode so the CLI's `rate_limit_event` is seen too; it is
+recorded for the default Claude account (claude_code/accounts.py), which
+every turn of this module runs on.
 """
 
 from __future__ import annotations
@@ -61,7 +64,7 @@ def build_args(
     denied = sorted(set(deny or []) - set(allowed))
     args = [
         binary, "-p", prompt,
-        "--output-format", "json",
+        "--output-format", "stream-json", "--verbose",
         "--model", model,
         "--tools", "",
         "--permission-mode", "dontAsk",
@@ -100,6 +103,42 @@ async def _run_process(args: list[str], timeout: float) -> list[str]:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def parse_turn_output(lines: list[str]) -> tuple[dict[str, Any], dict | None]:
+    """(the final result, the last rate_limit_info) of a turn's stdout.
+
+    stream-json prints one event per line; the `result` event carries the
+    answer, usage and structured output. A line that is a JSON object without
+    a `type` is read as the result as well (the plain `json` output shape).
+    Raises ValueError when there is output but no result.
+    """
+    result: dict[str, Any] | None = None
+    rate_limit_info: dict | None = None
+    for line in lines:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        etype = ev.get("type")
+        if etype == "rate_limit_event":
+            rate_limit_info = ev.get("rate_limit_info") or rate_limit_info
+        elif etype == "result" or etype is None:
+            result = ev
+    if result is None:
+        text = "\n".join(lines).strip()
+        if not text:
+            return {}, rate_limit_info
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict):
+            raise ValueError("claude printed no result")
+        result = parsed
+    return result, rate_limit_info
+
+
 async def _run_turn(
     step: str,
     prompt: str,
@@ -119,8 +158,7 @@ async def _run_turn(
     start = time.monotonic()
     try:
         lines = await _run_process(args, timeout)
-        text = "\n".join(lines).strip()
-        data = json.loads(text) if text else {}
+        data, rate_limit_info = parse_turn_output(lines)
     except (ClaudeCodeError, ValueError, OSError) as e:
         await log_to_audit(
             event_id=None, card_id=None, step=step, model=f"agent/claude_code/{model}",
@@ -129,6 +167,14 @@ async def _run_turn(
         )
         raise ClaudeCodeError(str(e)) from e
 
+    from laya.claude_code import accounts
+
+    await accounts.record(
+        accounts.DEFAULT_ID, rate_limit_info,
+        rejected=accounts.is_rejection(
+            rate_limit_info, str(data.get("result") or "") if data.get("is_error") else None
+        ),
+    )
     usage = data.get("usage") or {}
     ok = not data.get("is_error") and (schema is None or data.get("structured_output") is not None)
     await log_to_audit(
@@ -180,11 +226,12 @@ async def run_send(
     )
 
 
-async def read_init(timeout: float = 60.0) -> dict[str, Any]:
+async def read_init(timeout: float = 60.0, env: dict[str, str] | None = None) -> dict[str, Any]:
     """The `system/init` message of a headless session: its MCP servers and tools.
 
     The CLI prints this line before it calls the model, so the process is
-    stopped right after it and the listing costs no tokens.
+    stopped right after it and the listing costs no tokens. `env` overrides
+    the environment (e.g. `CLAUDE_CONFIG_DIR` of another Claude account).
     """
     from laya.agents.subprocess_helper import AgentProcess
 
@@ -197,7 +244,7 @@ async def read_init(timeout: float = 60.0) -> dict[str, Any]:
     tmpdir = tempfile.mkdtemp(prefix="laya-claude-code-")
     proc = AgentProcess()
     try:
-        await proc.spawn(args=args, cwd=tmpdir, env=None)
+        await proc.spawn(args=args, cwd=tmpdir, env=env)
 
         async def _first_init() -> dict[str, Any]:
             async for line in proc.read_lines(idle_timeout=timeout):

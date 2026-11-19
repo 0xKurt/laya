@@ -289,7 +289,9 @@ async def test_stream_result_error_yields_error_and_audits_failure(fake):
     assert [e.type for e in events] == ["error"]
     assert "hit your limit" in events[0].content
     assert fake["audit"].await_args.kwargs["success"] is False
-    fake["record"].assert_not_awaited()
+    # The usage-limit rejection is recorded for the account before the error.
+    agent_row, info = fake["record"].await_args.args
+    assert agent_row == "claude_code" and info["status"] == "rejected"
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,7 @@ monthly $ budget (``pipeline/budget.py``) but **window-based with auto-resume**:
 from __future__ import annotations
 
 import json
+import time as time_module
 from datetime import date, datetime, time, timedelta, timezone
 
 import structlog
@@ -181,6 +182,65 @@ async def get_rate_limit_state(agent_id: str) -> dict | None:
     }
 
 
+async def get_rate_limit_raw(agent_id: str) -> dict | None:
+    """The last ``rate_limit_info`` recorded for an agent row, as the CLI sent it."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT raw_json FROM agent_rate_limit_state WHERE agent_id = ?", (agent_id,)
+    )
+    if not rows:
+        return None
+    try:
+        raw = json.loads(rows[0]["raw_json"] or "{}")
+    except (TypeError, ValueError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def rate_limit_windows(raw: dict, now: float | None = None) -> dict[str, dict]:
+    """Per-window usage from a ``rate_limit_info``:
+    ``{window type: {utilization, resets_at, status}}``.
+
+    Claude Code reports every window it tracks in ``unifiedWindows``
+    (``five_hour``, ``seven_day``); the top-level fields describe the window
+    that triggered the event and fill in a window missing there. A status
+    without any window type is kept under ``"unknown"``. A window whose
+    ``resetsAt`` has passed has reset: utilization 0, status ``allowed``.
+    """
+    now = time_module.time() if now is None else now
+    windows: dict[str, dict] = {}
+    unified = raw.get("unifiedWindows") if isinstance(raw, dict) else None
+    if isinstance(unified, dict):
+        for name, w in unified.items():
+            if isinstance(w, dict):
+                windows[str(name)] = {
+                    "utilization": w.get("utilization"),
+                    "resets_at": w.get("resetsAt"),
+                    "status": w.get("status"),
+                }
+    top_type = raw.get("rateLimitType") if isinstance(raw, dict) else None
+    if raw and raw.get("status") and (top_type or not windows):
+        windows.setdefault(str(top_type or "unknown"), {
+            "utilization": raw.get("utilization"),
+            "resets_at": raw.get("resetsAt"),
+            "status": raw.get("status"),
+        })
+    if raw and raw.get("status") == "rejected":
+        # A rejection blocks the account even when the window list still shows
+        # the state from before it.
+        w = windows.setdefault(str(top_type or "unknown"), {"utilization": None})
+        w["status"] = "rejected"
+        w["resets_at"] = raw.get("resetsAt") or w.get("resets_at")
+    for w in windows.values():
+        try:
+            reset = float(w["resets_at"]) if w.get("resets_at") else None
+        except (TypeError, ValueError):
+            reset = None
+        if reset is not None and reset <= now:
+            w.update(utilization=0.0, status="allowed")
+    return windows
+
+
 def native_limit_reached(rl: dict | None, thresholds: dict) -> bool:
     """Whether the CLI's own rate-limit signal should pause ingestion.
 
@@ -332,13 +392,25 @@ async def evaluate_agent_budget() -> None:
         window_hours = float(ac.get("window_hours") or DEFAULT_WINDOW_HOURS)
         limit = int(ac.get("window_token_limit") or 0)
         pause_pct = int(ac.get("pause_at_percent") or DEFAULT_PAUSE_AT_PERCENT)
-        rl = await get_rate_limit_state(agent_id)
+        thresholds = cfg.get("pause_at_utilization", DEFAULT_PAUSE_AT_UTILIZATION)
 
         # Native signal first — when the CLI itself reports we're no longer allowed.
-        if native_limit_reached(rl, cfg.get("pause_at_utilization", DEFAULT_PAUSE_AT_UTILIZATION)):
-            recovery_times.append(_ts_from_unix(rl.get("resets_at")) or _ts_in_hours(window_hours))
-            reasons.append(f"{agent_id}: rate limit {rl['status']}")
-            continue
+        if agent_id == "claude_code":
+            # Claude Code spreads its turns over the user's Claude accounts
+            # (claude_code/accounts.py); it is blocked only when all of them are.
+            from laya.claude_code import accounts
+
+            blocked, until, why = await accounts.native_block(thresholds)
+            if blocked:
+                recovery_times.append(until or _ts_in_hours(window_hours))
+                reasons.append(why)
+                continue
+        else:
+            rl = await get_rate_limit_state(agent_id)
+            if native_limit_reached(rl, thresholds):
+                recovery_times.append(_ts_from_unix(rl.get("resets_at")) or _ts_in_hours(window_hours))
+                reasons.append(f"{agent_id}: rate limit {rl['status']}")
+                continue
 
         # Token-window budget.
         if limit > 0:
@@ -464,10 +536,26 @@ async def maybe_resume_agent_budget() -> None:
                 pu = pu.replace(tzinfo=timezone.utc)
         except ValueError:
             pu = _now_utc()  # malformed → eligible to resume
-        if _now_utc() < pu:
+        if _now_utc() < pu and not await _claude_accounts_have_room(state["paused_reason"]):
             return  # window hasn't reset yet
     log.info("agent_budget_auto_resume", reason="window_reset")
     await resume_from_agent_budget()
+
+
+async def _claude_accounts_have_room(reason: str | None) -> bool:
+    """Whether a pause that only waits for Claude accounts to recover can end
+    early, because an account has room again (e.g. one was just added)."""
+    from laya.claude_code import accounts
+
+    # Reasons of several agents are joined with "; "; only a pause with the
+    # accounts reason alone waits for nothing but the accounts.
+    if not reason or not reason.startswith(accounts.ACCOUNTS_PAUSE_REASON) or "; " in reason:
+        return False
+    try:
+        blocked, _, _ = await accounts.native_block(get_agent_budget_config()["pause_at_utilization"])
+    except Exception:
+        return False
+    return not blocked
 
 
 async def _broadcast_status(paused: bool) -> None:
