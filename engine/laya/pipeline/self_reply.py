@@ -70,7 +70,7 @@ def conversation_key(platform: str, subject_id: str, metadata: dict) -> tuple | 
     never closes a card.
     """
     if platform == "slack":
-        channel = metadata.get("slack_channel") or metadata.get("slack_channel_id")
+        channel = metadata.get("slack_channel_id") or metadata.get("slack_channel")
         if channel:
             if metadata.get("slack_channel_type") == "dm" or str(channel).startswith("D"):
                 return ("slack", channel)
