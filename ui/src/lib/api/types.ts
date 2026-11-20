@@ -2008,13 +2008,25 @@ export interface ClaudeTerminalCreate {
 	rows?: number;
 }
 
-/** One usage window of a Claude account (`five_hour`, `seven_day`), from the CLI's rate-limit signal. */
+/**
+ * One usage window of a Claude account (`five_hour`, `seven_day`): the CLI's
+ * rate-limit signal merged with the last `claude -p "/usage"` poll.
+ */
 export interface ClaudeAccountWindow {
-	/** 0..1; null when the CLI did not report it. */
+	/** 0..1; null when neither the CLI nor a poll reported it. */
 	utilization: number | null;
-	/** Unix seconds. */
+	/** Unix seconds, from the rate-limit signal. */
 	resets_at: number | null;
 	status: string | null;
+	/** The reset as `/usage` words it, e.g. "Nov 25 at 4am (Europe/Berlin)". */
+	resets_text?: string | null;
+}
+
+/** A weekly limit of one model, as `/usage` reports it (display only). */
+export interface ClaudeAccountModelUsage {
+	label: string;
+	percent: number;
+	resets: string | null;
 }
 
 export type ClaudeConnectorKey = 'slack' | 'gmail' | 'drive' | 'linear' | 'notion' | 'github';
@@ -2037,12 +2049,21 @@ export interface ClaudeAccountConnectors {
 
 export interface ClaudeAccount {
 	id: string;
+	/** The Claude Code CLI's own login; Laya uses it only while no account is added. */
 	default: boolean;
 	email: string | null;
 	plan: string | null;
 	logged_in: boolean;
+	/** Whether Laya's routing may use this account now. */
+	in_use: boolean;
+	/** A new account whose first sign-in has not finished. */
+	pending?: boolean;
 	problem: string | null;
-	usage: { windows: Record<string, ClaudeAccountWindow>; as_of: string | null };
+	usage: {
+		windows: Record<string, ClaudeAccountWindow>;
+		as_of: string | null;
+		models?: ClaudeAccountModelUsage[];
+	};
 	connectors: ClaudeAccountConnectors | null;
 }
 
@@ -2051,18 +2072,22 @@ export interface ClaudeAccountLogin {
 	id: string;
 	kind: 'account' | 'connector';
 	account_id: string;
+	/** The sign-in of an account that is being added. */
+	new_account?: boolean;
 	server: string | null;
 	platform: string | null;
 	state: 'starting' | 'waiting_code' | 'verifying' | 'done' | 'failed' | 'cancelled' | 'timed_out';
 	url: string | null;
 	error: string | null;
 	started_at: string;
+	/** When the engine gives up waiting (ISO). */
+	expires_at?: string;
 }
 
 export interface ClaudeAccountsOverview {
 	accounts: ClaudeAccount[];
-	/** The account Laya's processing uses now. */
-	current: string;
+	/** The account Laya's processing uses now; null when none can be used. */
+	current: string | null;
 	thresholds: Record<string, number>;
 	login: ClaudeAccountLogin | null;
 	connectors_url: string;

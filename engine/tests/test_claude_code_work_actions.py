@@ -162,7 +162,7 @@ async def test_one_tool_allowlist_reaches_the_cli(db):
     await _connect_linear()
     seen = []
 
-    async def proc(args, timeout):
+    async def proc(args, timeout, env=None):
         seen.append(args)
         step_out = ({"ok": True, "id": "c1", "url": "", "error": ""} if len(seen) == 1
                     else {"found": True, "issue": _raw()})

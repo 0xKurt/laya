@@ -131,6 +131,12 @@ async def get_accounts(refresh: bool = False) -> dict[str, Any]:
     return await accounts.overview(refresh=refresh)
 
 
+@router.get("/accounts/login")
+async def current_login() -> dict[str, Any]:
+    """The latest sign-in (account or connector, running or ended), or null."""
+    return {"login": accounts.login_state()}
+
+
 @router.post("/accounts")
 async def add_account() -> dict[str, Any]:
     """Start signing in a new account; returns the sign-in (poll its status)."""

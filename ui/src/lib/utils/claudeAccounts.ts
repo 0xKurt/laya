@@ -23,6 +23,7 @@ export interface UsageBar {
 	/** The threshold at which Laya moves processing to another account, 0..100. */
 	threshold: number;
 	over: boolean;
+	rejected: boolean;
 	resets: string | null;
 }
 
@@ -58,8 +59,11 @@ export function usageBars(
 		const threshold = Math.round((thresholds[key] ?? 0.9) * 100);
 		const util = w?.utilization;
 		const percent = util === null || util === undefined ? null : Math.round(Math.min(1, Math.max(0, util)) * 100);
-		const over = w?.status === 'rejected' || (percent !== null && percent >= threshold);
-		return { key, label, percent, threshold, over, resets: resetLabel(w?.resets_at, now) };
+		const rejected = w?.status === 'rejected';
+		const over = rejected || (percent !== null && percent >= threshold);
+		// The epoch from the rate-limit signal is exact; /usage's own words are shown when it is missing.
+		const resets = resetLabel(w?.resets_at, now) ?? (w?.resets_text ? `resets ${w.resets_text}` : null);
+		return { key, label, percent, threshold, over, rejected, resets };
 	});
 }
 
@@ -100,7 +104,7 @@ export function loginStateText(login: ClaudeAccountLogin): string {
 			return 'Starting the sign-in…';
 		case 'waiting_code':
 			return login.kind === 'connector'
-				? `Sign in to ${what} in your browser, then paste the address of the page you land on.`
+				? `Waiting for you to finish signing in to ${what} in the browser…`
 				: 'Sign in on the Claude page in your browser with the account you want to add, then paste the code it shows.';
 		case 'verifying':
 			return 'Checking the code…';
@@ -115,5 +119,69 @@ export function loginStateText(login: ClaudeAccountLogin): string {
 }
 
 export function accountTitle(a: Pick<ClaudeAccount, 'email' | 'default'>): string {
-	return a.email ?? (a.default ? 'Your Claude Code login' : 'Signing in…');
+	return a.email ?? (a.default ? 'Your Claude Code login' : 'New account');
+}
+
+/**
+ * Where the sign-in panel belongs: the id of the account card it renders in,
+ * `'new'` for a pending "New account" card (a new account whose row the list
+ * does not show yet), or null when there is nothing to show (no sign-in, or
+ * an ended one the user dismissed). Decided from the engine's sign-in state
+ * alone, so a reload or a list refresh never loses the panel.
+ */
+export function loginPlacement(
+	login: ClaudeAccountLogin | null | undefined,
+	accounts: Pick<ClaudeAccount, 'id'>[],
+	dismissed: ReadonlySet<string>
+): string | null {
+	if (!login) return null;
+	if (!isLoginActive(login) && (dismissed.has(login.id) || login.state === 'done')) return null;
+	if (accounts.some((a) => a.id === login.account_id)) return login.account_id;
+	if (login.kind === 'account' && login.new_account && isLoginActive(login)) return 'new';
+	return null;
+}
+
+/**
+ * Connector sign-ins whose page was opened already, by sign-in id. Module
+ * state, so returning to Settings does not open the same page again.
+ */
+export const openedLoginIds = new Set<string>();
+
+/**
+ * Whether a connector sign-in's page should be opened now: once per sign-in
+ * (keyed by its id), as soon as the engine has the URL and is waiting.
+ * Account sign-ins are opened by the user, who may want a private window.
+ */
+export function shouldAutoOpen(login: ClaudeAccountLogin | null | undefined, opened: ReadonlySet<string>): boolean {
+	return (
+		!!login &&
+		login.kind === 'connector' &&
+		login.state === 'waiting_code' &&
+		!!login.url &&
+		!opened.has(login.id)
+	);
+}
+
+/** "9:41 left" until the engine stops waiting; null without an expiry or once it has passed. */
+export function countdown(expiresAt: string | null | undefined, now: number = Date.now()): string | null {
+	if (!expiresAt) return null;
+	const end = Date.parse(expiresAt);
+	if (Number.isNaN(end)) return null;
+	const seconds = Math.floor((end - now) / 1000);
+	if (seconds <= 0) return null;
+	const m = Math.floor(seconds / 60);
+	const s = seconds % 60;
+	return `${m}:${String(s).padStart(2, '0')} left`;
+}
+
+/** The status badge of an account card. */
+export function accountBadge(
+	a: Pick<ClaudeAccount, 'id' | 'default' | 'logged_in' | 'in_use' | 'pending'>,
+	current: string | null
+): { label: string; tone: 'active' | 'muted' | 'warn' } | null {
+	if (a.pending) return { label: 'Signing in', tone: 'muted' };
+	if (!a.logged_in) return { label: 'Signed out', tone: 'warn' };
+	if (current === a.id) return { label: 'Processing now', tone: 'active' };
+	if (a.default && !a.in_use) return { label: 'Not used', tone: 'muted' };
+	return null;
 }

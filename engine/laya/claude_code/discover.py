@@ -326,6 +326,75 @@ async def refresh_stored_tools(found: Discovery) -> list[str]:
     return changed
 
 
+# ── per-account listings ─────────────────────────────────────────────────
+
+
+@dataclass
+class AccountListing:
+    """What one Claude account's headless session has: its MCP tools and the
+    platform roles mapped onto them. Tool prefixes differ per account
+    (``mcp__claude_ai_Linear__…`` on one, ``mcp__linear-server__…`` on another)."""
+
+    all_tools: list[str] = field(default_factory=list)
+    platforms: dict[str, PlatformDiscovery] = field(default_factory=dict)
+    at: float = 0.0
+
+
+_account_cache: dict[str, AccountListing] = {}
+_account_locks: dict[str, asyncio.Lock] = {}
+
+
+def listing_from_init(init: dict[str, Any]) -> AccountListing:
+    tools = [t for t in init.get("tools") or [] if isinstance(t, str) and t.startswith("mcp__")]
+    servers = [s for s in init.get("mcp_servers") or [] if isinstance(s, dict)]
+    return AccountListing(all_tools=tools, platforms=map_tools(tools, servers), at=time.monotonic())
+
+
+def store_account_listing(account_id: str, init: dict[str, Any]) -> AccountListing:
+    """Cache an account's listing from an init message read elsewhere (connector check)."""
+    listing = listing_from_init(init)
+    _account_cache[account_id] = listing
+    return listing
+
+
+def reset_account_cache(account_id: str | None = None) -> None:
+    if account_id is None:
+        _account_cache.clear()
+    else:
+        _account_cache.pop(account_id, None)
+
+
+async def account_listing(account_id: str, env: dict[str, str] | None, force: bool = False) -> AccountListing:
+    """The account's listing, cached for ``CACHE_SECONDS``.
+
+    Without ``env`` (the CLI's own login) it is the shared discovery's
+    listing; with one, one ``system/init`` read in that configuration
+    directory (no model call).
+    """
+    if not env:
+        found = _cache
+        if force or found is None or not found.all_tools:
+            found = await discover(force=force, with_identity=False)
+        return AccountListing(
+            all_tools=list(found.all_tools),
+            platforms={p: d for p, d in found.platforms.items() if p in ROLES},
+            at=found.at,
+        )
+    lock = _account_locks.setdefault(account_id, asyncio.Lock())
+    async with lock:
+        cached_listing = _account_cache.get(account_id)
+        if not force and cached_listing is not None and time.monotonic() - cached_listing.at < CACHE_SECONDS:
+            return cached_listing
+        try:
+            init = await cli.read_init(env=env)
+        except cli.ClaudeCodeError as e:
+            _account_cache.pop(account_id, None)
+            return AccountListing(platforms={
+                p: PlatformDiscovery(problem=f"Claude Code did not start for this account: {e}") for p in ROLES
+            })
+        return store_account_listing(account_id, init)
+
+
 # ── entry point ──────────────────────────────────────────────────────────
 
 _cache: Discovery | None = None

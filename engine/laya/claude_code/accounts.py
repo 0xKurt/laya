@@ -3,9 +3,9 @@
 
 """Claude accounts: several Claude subscriptions as sources of usage quota.
 
-The **default account** is the user's normal Claude Code login (no
-``CLAUDE_CONFIG_DIR`` override). It is implicit: it has no row and needs no
-setup. Every **added account** is a separate Claude Code configuration
+The **default account** (``DEFAULT_ID``) is whatever the Claude Code CLI is
+logged in to (no ``CLAUDE_CONFIG_DIR`` override). It has no row and serves
+Laya only while no account has been added. Every **added account** is a separate Claude Code configuration
 directory under ``~/.laya/claude-accounts/<id>/`` (mode 0700). Laya runs
 ``claude`` with ``CLAUDE_CONFIG_DIR=<dir>`` for it, so its login, its MCP
 servers and their OAuth tokens stay in the CLI's own storage; this module
@@ -14,18 +14,26 @@ never reads or stores a token.
 Parts:
 
 - registry: the module-owned table ``claude_code_accounts`` (created with
-  ``CREATE TABLE IF NOT EXISTS``), the email / plan from
+  ``CREATE TABLE IF NOT EXISTS``), the email / plan / organization id from
   ``claude auth status --json`` and whether the account is eligible
-  (logged in, not the same Claude account as another one);
+  (logged in, its directory exists, not the same Claude organization as an
+  earlier added account). Once an account has been added, Laya uses only
+  added accounts; the CLI's own login (the default account) is used only
+  while no account has been added, so a ``/login`` in a Claude Code session
+  never changes what Laya runs on;
 - routing: :func:`pick` chooses the account for an inference stage or a chat
   turn (``llm/agent_backend.py``), sticky with hysteresis and a minimum
   dwell, and :func:`failover` the next account after a rate-limit
-  rejection. Collectors, sending, My work, discovery and the terminal do not
-  route; they run on the default account;
+  rejection. :func:`pick_for_platform` chooses the account for a collector,
+  My work, an action or a send turn: only an account whose connector check
+  shows the platform connected and whose own tool listing has the
+  platform's required tools (hard gating; never failed over);
 - usage: :func:`record` stores each turn's ``rate_limit_info`` in
-  ``agent_rate_limit_state`` under ``claude_code`` (default) or
-  ``claude_code@<id>``; :func:`native_block` tells the agent budget whether
-  every account is over its threshold;
+  ``agent_rate_limit_state`` under ``claude_code@<id>`` (an added account) or
+  ``claude_code@org:<orgId>`` (the CLI login, keyed by the organization it
+  is logged in to); :func:`poll_usage` reads ``claude -p "/usage"`` (no
+  model call) every ``USAGE_POLL_SECONDS``; :func:`native_block` tells the
+  agent budget whether every account is over its threshold;
 - sign-in: :func:`start_login` runs ``claude auth login --claudeai`` (or
   ``claude mcp login <server> --no-browser`` for a connector) in a PTY, shows
   the authorize URL the CLI prints and writes the code the user pastes to
@@ -76,6 +84,9 @@ DWELL_SECONDS = 600.0
 OTHER_WINDOW_THRESHOLD = 0.9
 # A rejection the CLI reported without a reset time blocks the account this long.
 REJECTION_HOLD_SECONDS = 1800
+# Usage of every account is read with `claude -p "/usage"` this often.
+USAGE_POLL_SECONDS = 600.0
+USAGE_TIMEOUT = 90.0
 
 LOGIN_TIMEOUT = 600.0
 POLL_SECONDS = 0.2
@@ -92,8 +103,14 @@ _TABLE = """CREATE TABLE IF NOT EXISTS claude_code_accounts (
     org_name          TEXT,
     logged_in         INTEGER NOT NULL DEFAULT 0,
     status_checked_at TEXT,
-    created_at        TEXT NOT NULL
+    created_at        TEXT NOT NULL,
+    org_id            TEXT
 )"""
+
+# Rows of agent_rate_limit_state that keyed the CLI login by slot rather than
+# by organization; their state may belong to whichever account the CLI was
+# logged in to before, so they are dropped.
+_LEGACY_RATE_ROWS = ("claude_code", "claude_code@default")
 
 # claude_code_state platform for the connector matrices (key connectors:<id>).
 _STATE_PLATFORM = "accounts"
@@ -116,14 +133,38 @@ async def _db():
     if not getattr(db, "_laya_claude_accounts_table", False):
         await store.ensure_tables(db)
         await db.execute(_TABLE)
+        # The table belongs to this module (no numbered migration); a table
+        # created before the org_id column existed gets it here.
+        cols = {r[1] for r in await db.execute_fetchall("PRAGMA table_info(claude_code_accounts)")}
+        if "org_id" not in cols:
+            await db.execute("ALTER TABLE claude_code_accounts ADD COLUMN org_id TEXT")
+        with contextlib.suppress(Exception):
+            await db.execute(
+                f"DELETE FROM agent_rate_limit_state WHERE agent_id IN ({','.join('?' * len(_LEGACY_RATE_ROWS))})",
+                _LEGACY_RATE_ROWS,
+            )
         await db.commit()
         db._laya_claude_accounts_table = True
     return db
 
 
-def agent_row(account_id: str) -> str:
-    """The ``agent_rate_limit_state`` row of an account."""
-    return AGENT_ID if account_id == DEFAULT_ID else f"{AGENT_ID}@{account_id}"
+def agent_row(account_id: str, org_id: str | None = None) -> str | None:
+    """The ``agent_rate_limit_state`` row of an account.
+
+    An added account has its own row. The CLI login (the default account) is
+    keyed by the organization it is logged in to, so a ``/login`` to another
+    account starts from a clean row; without a known organization it has none.
+    """
+    if account_id != DEFAULT_ID:
+        return f"{AGENT_ID}@{account_id}"
+    return f"{AGENT_ID}@org:{org_id}" if org_id else None
+
+
+async def rate_row(account_id: str) -> str | None:
+    """:func:`agent_row` with the CLI login's current organization."""
+    if account_id != DEFAULT_ID:
+        return agent_row(account_id)
+    return agent_row(DEFAULT_ID, (await default_status()).get("org_id"))
 
 
 async def list_rows() -> list[dict[str, Any]]:
@@ -196,7 +237,9 @@ def _cli_env(extra: dict[str, str] | None) -> dict[str, str]:
     return env
 
 
-async def _run_cli(args: list[str], env: dict[str, str] | None = None, timeout: float = 60.0) -> tuple[int, str, str]:
+async def _run_cli(
+    args: list[str], env: dict[str, str] | None = None, timeout: float = 60.0, cwd: str | None = None,
+) -> tuple[int, str, str]:
     """Run a short ``claude`` subcommand; returns (exit code, stdout, stderr)."""
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -205,6 +248,7 @@ async def _run_cli(args: list[str], env: dict[str, str] | None = None, timeout: 
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_cli_env(env),
+            cwd=cwd,
         )
     except OSError as e:
         return 127, "", str(e)
@@ -230,6 +274,7 @@ def parse_auth_status(text: str) -> dict[str, Any]:
         "email": data.get("email") or None,
         "plan": data.get("subscriptionType") or None,
         "org_name": data.get("orgName") or None,
+        "org_id": data.get("orgId") or None,
     }
 
 
@@ -257,41 +302,97 @@ async def refresh_status(account_id: str) -> dict[str, Any]:
     if row is None:
         raise AccountError("Account not found", status=404)
     status = await auth_status(account_env(row))
+    await _store_status(row, status)
+    return status
+
+
+async def _store_status(row: dict[str, Any], status: dict[str, Any]) -> None:
+    """Store an added account's auth status.
+
+    When the directory is now logged in to another Claude organization, the
+    usage recorded for the old one no longer applies and is dropped.
+    """
+    account_id = row["id"]
+    logged_in = bool(status.get("logged_in"))
+    new_org = status.get("org_id") if logged_in else None
+    if new_org and row.get("org_id") and new_org != row["org_id"]:
+        await _clear_usage(account_id)
+        log.info("claude_account_identity_changed", account=account_id)
     await _update_row(
         account_id,
-        logged_in=1 if status["logged_in"] else 0,
-        email=status["email"] if status["logged_in"] else row.get("email"),
-        plan=status["plan"] if status["logged_in"] else row.get("plan"),
-        org_name=status["org_name"] if status["logged_in"] else row.get("org_name"),
+        logged_in=1 if logged_in else 0,
+        email=status["email"] if logged_in else row.get("email"),
+        plan=status["plan"] if logged_in else row.get("plan"),
+        org_name=status["org_name"] if logged_in else row.get("org_name"),
+        org_id=new_org or row.get("org_id"),
         status_checked_at=store.now_iso(),
     )
-    return status
+
+
+async def _clear_usage(account_id: str) -> None:
+    db = await _db()
+    await db.execute("DELETE FROM agent_rate_limit_state WHERE agent_id = ?", (agent_row(account_id),))
+    await db.commit()
+    await store.delete_state(_STATE_PLATFORM, [_usage_key(account_id)])
 
 
 def _same_account(a: str | None, b: str | None) -> bool:
     return bool(a and b and a.strip().lower() == b.strip().lower())
 
 
-async def eligible_ids() -> list[str]:
-    """Accounts routing may use, in preference order: the default first, then
-    the added accounts that are logged in and are not a Claude account that
-    is already listed."""
-    ids = [DEFAULT_ID]
-    try:
-        rows = await list_rows()
-    except Exception:
-        return ids
-    if not rows:
-        return ids
-    seen = [(_default_status[1] if _default_status else {}).get("email")]
+def _identity(row: dict[str, Any]) -> str | None:
+    """What makes two rows the same Claude account: the organization id, else the email."""
+    if row.get("org_id"):
+        return f"org:{row['org_id']}"
+    email = (row.get("email") or "").strip().lower()
+    return f"email:{email}" if email else None
+
+
+def has_own_accounts(rows: list[dict[str, Any]]) -> bool:
+    """Whether the user has added an account (one that was signed in at least once).
+
+    A row of a first sign-in that is still running does not count, so the CLI
+    login keeps serving Laya until the new account is ready.
+    """
+    return any(r["logged_in"] or r.get("email") for r in rows)
+
+
+def own_eligible(rows: list[dict[str, Any]]) -> list[str]:
+    """The added accounts routing may use, in creation order: logged in,
+    directory present, and not the same Claude account as an earlier row."""
+    ids: list[str] = []
+    seen: set[str] = set()
     for row in rows:
         if not row["logged_in"] or not Path(row["config_dir"]).is_dir():
             continue
-        if any(_same_account(row.get("email"), e) for e in seen):
+        ident = _identity(row)
+        if ident and ident in seen:
             continue
-        seen.append(row.get("email"))
+        if ident:
+            seen.add(ident)
         ids.append(row["id"])
     return ids
+
+
+async def eligible_ids() -> list[str]:
+    """Accounts routing may use, in preference order.
+
+    The added accounts that are eligible; the CLI login (``DEFAULT_ID``) only
+    while no account has been added. Empty when accounts were added but none
+    can be used (e.g. all signed out): Laya then does not fall back to
+    whatever the CLI happens to be logged in to.
+    """
+    rows = await list_rows()
+    if not has_own_accounts(rows):
+        return [DEFAULT_ID]
+    return own_eligible(rows)
+
+
+class NoEligibleAccount(AccountError):
+    """Accounts were added, but none of them can be used now."""
+
+    def __init__(self, message: str = "No Claude account Laya can use. Sign in again in Settings → Claude accounts.") -> None:
+        super().__init__(message, status=409)
 
 
 # ── usage ────────────────────────────────────────────────────────────────
@@ -307,11 +408,67 @@ def _thresholds() -> dict[str, float]:
 
 
 async def windows_of(account_id: str, now: float | None = None) -> dict[str, dict[str, Any]]:
-    """The account's current usage windows (see agent_budget.rate_limit_windows)."""
+    """The account's current usage windows (see agent_budget.rate_limit_windows),
+    with the percentages of the last ``/usage`` poll merged in (:func:`merge_usage`)."""
     from laya.pipeline.agent_budget import get_rate_limit_raw, rate_limit_windows
 
-    raw = await get_rate_limit_raw(agent_row(account_id))
-    return rate_limit_windows(raw or {}, now=now)
+    row = await rate_row(account_id)
+    raw = (await get_rate_limit_raw(row)) if row else None
+    windows = rate_limit_windows(raw or {}, now=now)
+    updated = await _rate_updated_epoch(row) if row else None
+    return merge_usage(windows, await stored_usage(account_id), updated, now)
+
+
+def merge_usage(
+    windows: dict[str, dict[str, Any]],
+    polled: dict[str, Any] | None,
+    rate_updated: float | None,
+    now: float | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Combine the rate-limit signal of the last turn with the last ``/usage`` poll.
+
+    - The utilization of ``five_hour`` / ``seven_day`` comes from whichever is
+      newer; a window only one of them knows is taken from it.
+    - Status (``rejected``) and the epoch ``resets_at`` stay with the
+      rate-limit signal; a poll older than a window's reset no longer counts.
+    - The poll's human reset text is added as ``resets_text`` for display.
+    """
+    now = time.time() if now is None else now
+    out = {k: dict(v) for k, v in windows.items()}
+    if not polled:
+        return out
+    at = float(polled.get("at") or 0)
+    for name, p in (polled.get("windows") or {}).items():
+        if not isinstance(p, dict) or p.get("utilization") is None:
+            continue
+        w = out.setdefault(name, {"utilization": None, "resets_at": None, "status": None})
+        try:
+            reset = float(w["resets_at"]) if w.get("resets_at") else None
+        except (TypeError, ValueError):
+            reset = None
+        if reset is not None and reset <= now and at < reset:
+            continue
+        if w.get("utilization") is None or rate_updated is None or at >= rate_updated:
+            w["utilization"] = p["utilization"]
+        if p.get("resets"):
+            w["resets_text"] = p["resets"]
+    return out
+
+
+async def _rate_updated_epoch(row: str) -> float | None:
+    from datetime import datetime, timezone
+
+    db = await _db()
+    rows = await db.execute_fetchall("SELECT updated_at FROM agent_rate_limit_state WHERE agent_id = ?", (row,))
+    if not rows or not rows[0]["updated_at"]:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(rows[0]["updated_at"]).replace(" ", "T"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
 def window_over(name: str, w: dict[str, Any], thresholds: dict[str, float], margin: float = 0.0) -> bool:
@@ -406,12 +563,14 @@ def choose(
     return current
 
 
-async def _decide(commit: bool) -> str:
-    order = await eligible_ids()
+async def _decide(commit: bool, order: list[str] | None = None) -> str:
+    order = await eligible_ids() if order is None else order
+    if not order:
+        raise NoEligibleAccount()
     if len(order) == 1:
-        if commit and _route.current != DEFAULT_ID:
-            _route.current, _route.since = DEFAULT_ID, time.time()
-        return DEFAULT_ID
+        if commit and _route.current != order[0]:
+            _route.current, _route.since = order[0], time.time()
+        return order[0]
     now = time.time()
     windows = {a: await windows_of(a, now) for a in order}
     chosen = choose(order, windows, _thresholds(), _route.current, _route.since, now)
@@ -421,27 +580,53 @@ async def _decide(commit: bool) -> str:
     return chosen
 
 
+async def _env_of(account_id: str) -> dict[str, str]:
+    return {} if account_id == DEFAULT_ID else account_env(await get_row(account_id))
+
+
+async def _fallback_account(exclude: str | None = None) -> str | None:
+    """The account to use when routing itself failed: the first eligible added
+    account, or the CLI login only when no account was added."""
+    rows = await list_rows()
+    if not has_own_accounts(rows):
+        return DEFAULT_ID if exclude != DEFAULT_ID else None
+    return next((a for a in own_eligible(rows) if a != exclude), None)
+
+
 async def pick(purpose: str = "inference") -> tuple[str, dict[str, str]]:
     """The account for one inference stage or chat turn and its environment.
 
-    Never raises: any failure routes to the default account.
+    Raises :class:`NoEligibleAccount` when accounts were added but none can be
+    used. Any other routing failure falls back to the first eligible added
+    account (the CLI login only when no account was added, or when the
+    account registry itself cannot be read).
     """
     try:
         account_id = await _decide(commit=True)
-        if account_id == DEFAULT_ID:
-            return DEFAULT_ID, {}
-        return account_id, account_env(await get_row(account_id))
+        return account_id, await _env_of(account_id)
+    except NoEligibleAccount:
+        raise
     except Exception as e:
         log.warning("claude_account_pick_failed", purpose=purpose, error=str(e))
-        return DEFAULT_ID, {}
+        try:
+            fallback = await _fallback_account()
+            env = await _env_of(fallback) if fallback else {}
+        except Exception as e2:
+            # Without the account registry no added account's directory is
+            # known, so the turn can only run on the CLI login.
+            log.warning("claude_account_registry_unavailable", purpose=purpose, error=str(e2))
+            return DEFAULT_ID, {}
+        if fallback is None:
+            raise NoEligibleAccount() from e
+        return fallback, env
 
 
-async def current_account() -> str:
+async def current_account() -> str | None:
     """The account processing uses now (what the next :func:`pick` returns)."""
     try:
         return await _decide(commit=False)
     except Exception:
-        return DEFAULT_ID
+        return None
 
 
 async def failover(failed: str) -> tuple[str, dict[str, str]] | None:
@@ -461,12 +646,111 @@ async def failover(failed: str) -> tuple[str, dict[str, str]] | None:
         if not free:
             return None
         nxt = max(free, key=lambda a: (headroom(windows[a], thresholds), -order.index(a)))
-        log.info("claude_account_failover", failed=failed, account=nxt)
-        _route.current, _route.since = nxt, now
-        return nxt, (await env_for(nxt))
     except Exception as e:
         log.warning("claude_account_failover_failed", error=str(e))
+        try:
+            nxt = await _fallback_account(exclude=failed)
+        except Exception:
+            return None
+        if nxt is None:
+            return None
+    log.info("claude_account_failover", failed=failed, account=nxt)
+    _route.current, _route.since = nxt, time.time()
+    return nxt, await _env_of(nxt)
+
+
+# ── per-platform gating ──────────────────────────────────────────────────
+
+
+@dataclass
+class Assignment:
+    """The account a platform's turn runs on, with that account's own tool names."""
+
+    account_id: str
+    env: dict[str, str]
+    # role -> tool name of the platform on this account
+    tools: dict[str, str]
+    # every MCP tool this account's session has (a turn denies all but its own)
+    all_tools: list[str]
+    # role -> tool name of every platform available on this account
+    platform_tools: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def source_fields(self) -> dict[str, Any]:
+        """What a collector's ``source`` carries so every turn of the sweep
+        (collector, re-check, linked documents) runs on this account."""
+        return {
+            "tools": dict(self.tools),
+            "deny_tools": list(self.all_tools),
+            "account_id": self.account_id,
+            "account_env": dict(self.env),
+            "account_platform_tools": {p: dict(t) for p, t in self.platform_tools.items()},
+        }
+
+
+async def platform_assignment(
+    account_id: str, platform: str, roles: tuple[str, ...] = (), force: bool = False,
+) -> tuple[Assignment | None, str | None]:
+    """(the assignment, None) when ``account_id`` can run ``platform``, else (None, reason).
+
+    An added account needs its connector check to show the platform
+    connected; every account needs its own tool listing to have the
+    platform's required tools (and ``roles``).
+    """
+    from laya.claude_code import discover
+
+    if account_id != DEFAULT_ID:
+        matrix = await stored_connectors(account_id)
+        state = (((matrix or {}).get("connectors") or {}).get(platform) or {}).get("state")
+        if state != "connected":
+            return None, f"{platform} is not connected on this account"
+    env = await _env_of(account_id)
+    listing = await discover.account_listing(account_id, env, force=force)
+    pd = listing.platforms.get(platform)
+    if pd is None or not pd.available:
+        return None, (pd.problem if pd else None) or f"{platform} has no tools on this account"
+    missing = [r for r in roles if not pd.tools.get(r)]
+    if missing:
+        return None, f"{platform} lacks {', '.join(missing)} on this account"
+    return Assignment(
+        account_id=account_id, env=env, tools=dict(pd.tools), all_tools=list(listing.all_tools),
+        platform_tools={p: dict(d.tools) for p, d in listing.platforms.items() if d.available},
+    ), None
+
+
+async def pick_for_platform(platform: str, roles: tuple[str, ...] = ()) -> Assignment | None:
+    """The account a collector, My work, action or send turn of ``platform`` runs on.
+
+    Only accounts that pass :func:`platform_assignment`. Among them the
+    account inference routing uses now when it has room, else the one with
+    most headroom that is under its thresholds, else the first. None when no
+    account can run the platform. Never fails over: a turn that changes
+    something must not run twice.
+    """
+    order = await eligible_ids()
+    ready: dict[str, Assignment] = {}
+    for account_id in order:
+        try:
+            assignment, reason = await platform_assignment(account_id, platform, roles)
+        except Exception as e:
+            assignment, reason = None, str(e)
+        if assignment is not None:
+            ready[account_id] = assignment
+        else:
+            log.debug("claude_account_not_eligible", account=account_id, platform=platform, reason=reason)
+    if not ready:
         return None
+    candidates = [a for a in order if a in ready]
+    if len(candidates) == 1:
+        return ready[candidates[0]]
+    now = time.time()
+    thresholds = _thresholds()
+    windows = {a: await windows_of(a, now) for a in candidates}
+    free = [a for a in candidates if not account_over(windows[a], thresholds)]
+    if _route.current in free:
+        return ready[_route.current]
+    if free:
+        return ready[max(free, key=lambda a: (headroom(windows[a], thresholds), -candidates.index(a)))]
+    return ready[candidates[0]]
 
 
 _REJECTION_RE = re.compile(
@@ -500,7 +784,15 @@ async def record(account_id: str | None, rate_limit_info: dict | None, rejected:
     if info is None:
         return
     try:
-        await agent_budget.record_rate_limit(agent_row(account_id or DEFAULT_ID), info)
+        account_id = account_id or DEFAULT_ID
+        if account_id == DEFAULT_ID and rejected:
+            # A rejection is filed under the organization the CLI is logged in
+            # to right now, not the one cached before a possible /login.
+            await default_status(force=True)
+        row = await rate_row(account_id)
+        if row is None:
+            return
+        await agent_budget.record_rate_limit(row, info)
     except Exception as e:
         log.warning("claude_account_record_failed", account=account_id, error=str(e))
 
@@ -511,6 +803,8 @@ async def native_block(thresholds: dict[str, float]) -> tuple[bool, str | None, 
     from laya.db.timeutil import db_ts_from_epoch
 
     order = await eligible_ids()
+    if not order:
+        return True, None, f"{ACCOUNTS_PAUSE_REASON} (no Claude account can be used; sign in again)"
     now = time.time()
     recoveries: list[int] = []
     parts: list[str] = []
@@ -528,6 +822,176 @@ async def native_block(thresholds: dict[str, float]) -> tuple[bool, str | None, 
 
 
 ACCOUNTS_PAUSE_REASON = "claude_code: every Claude account is over its usage threshold"
+
+
+# ── usage poll (`claude -p "/usage"`) ────────────────────────────────────
+
+# One line of the CLI's /usage block, e.g.
+# "Current week (all models): 2% used · resets Nov 26 at 4am (Europe/Berlin)".
+_USAGE_LINE_RE = re.compile(r"^(Current session|Current week \((.+?)\)): (\d+)% used(?: \u00b7 resets (.+))?$")
+
+# Last poll per account (monotonic seconds), to space scheduled polls.
+_last_poll: dict[str, float] = {}
+
+
+def parse_usage(text: str) -> dict[str, Any] | None:
+    """The usage block ``claude -p "/usage"`` prints, or None when the text has none.
+
+    ``Current session`` is the ``five_hour`` window, ``Current week (all
+    models)`` the ``seven_day`` one; other weekly lines (one model) are kept
+    for display only. A window without a line stays unknown (never 0 %).
+    """
+    windows: dict[str, dict[str, Any]] = {}
+    models: list[dict[str, Any]] = []
+    for line in (text or "").splitlines():
+        m = _USAGE_LINE_RE.match(line.strip())
+        if not m:
+            continue
+        percent = int(m.group(3))
+        entry = {"utilization": percent / 100.0, "resets": (m.group(4) or "").strip() or None}
+        if m.group(1) == "Current session":
+            windows["five_hour"] = entry
+        elif m.group(2).strip().lower() == "all models":
+            windows["seven_day"] = entry
+        else:
+            models.append({"label": m.group(2).strip(), "percent": percent, "resets": entry["resets"]})
+    if not windows and not models:
+        return None
+    return {"windows": windows, "models": models}
+
+
+def _usage_key(account_id: str, org_id: str | None = None) -> str:
+    if account_id != DEFAULT_ID:
+        return f"usage:{account_id}"
+    return f"usage:org:{org_id}" if org_id else "usage:org:unknown"
+
+
+async def stored_usage(account_id: str) -> dict[str, Any] | None:
+    org = (await default_status()).get("org_id") if account_id == DEFAULT_ID else None
+    if account_id == DEFAULT_ID and not org:
+        return None
+    key = _usage_key(account_id, org)
+    raw = (await store.get_state(_STATE_PLATFORM, key)).get(key)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+async def _fresh_turn_data(account_id: str, within: float) -> bool:
+    """Whether a real turn recorded both windows' utilization for the account
+    within ``within`` seconds (then a poll would add nothing)."""
+    from laya.pipeline.agent_budget import get_rate_limit_raw, rate_limit_windows
+
+    row = await rate_row(account_id)
+    if row is None:
+        return False
+    updated = await _rate_updated_epoch(row)
+    if updated is None or time.time() - updated > within:
+        return False
+    windows = rate_limit_windows(await get_rate_limit_raw(row) or {})
+    return all((windows.get(w) or {}).get("utilization") is not None for w in ("five_hour", "seven_day"))
+
+
+async def poll_usage(account_id: str, force: bool = False) -> dict[str, Any]:
+    """Read one account's usage with ``claude -p "/usage"`` (no model call).
+
+    Auth status first: a signed-out account is stored as such and not polled.
+    Skipped while a sign-in runs in the account's directory, and (unless
+    ``force``) when a real turn recorded both windows in the last
+    ``USAGE_POLL_SECONDS``. Lines that are missing keep their last known
+    value. Returns ``{polled, logged_in, error}``.
+    """
+    if login_running_for(account_id):
+        return {"polled": False, "logged_in": None, "error": "sign-in running"}
+    _last_poll[account_id] = time.monotonic()
+    row = None
+    if account_id == DEFAULT_ID:
+        status = await default_status(force=True)
+        env: dict[str, str] = {}
+    else:
+        row = await get_row(account_id)
+        if row is None:
+            raise AccountError("Account not found", status=404)
+        env = account_env(row)
+        status = await auth_status(env)
+        await _store_status(row, status)
+    if not status.get("logged_in"):
+        return {"polled": False, "logged_in": False, "error": None}
+    if not force and await _fresh_turn_data(account_id, USAGE_POLL_SECONDS):
+        return {"polled": False, "logged_in": True, "error": None}
+
+    import tempfile
+
+    tmpdir = tempfile.mkdtemp(prefix="laya-claude-usage-")
+    try:
+        code, out, err = await _run_cli(
+            [get_agent_binary("claude_code"), "-p", "/usage", "--output-format", "json",
+             "--no-session-persistence"],
+            env, timeout=USAGE_TIMEOUT, cwd=tmpdir,
+        )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    try:
+        data = json.loads(out or "{}")
+    except ValueError:
+        data = {}
+    text = data.get("result") if isinstance(data, dict) else None
+    parsed = parse_usage(text if isinstance(text, str) else "")
+    if parsed is None:
+        error = (err or (text if isinstance(text, str) else "") or f"exit {code}").strip()[:200]
+        log.info("claude_account_usage_unknown", account=account_id, error=error)
+        return {"polled": False, "logged_in": True, "error": error or "no usage block"}
+
+    previous = await stored_usage(account_id) or {}
+    windows = {**(previous.get("windows") or {}), **parsed["windows"]}
+    value = {"windows": windows, "models": parsed["models"], "at": time.time(), "as_of": store.now_iso()}
+    await store.set_state(_STATE_PLATFORM, _usage_key(account_id, status.get("org_id")), json.dumps(value))
+    return {"polled": True, "logged_in": True, "error": None}
+
+
+def _poll_targets(rows: list[dict[str, Any]]) -> list[str]:
+    targets = [DEFAULT_ID]
+    targets += [r["id"] for r in rows if r["logged_in"] or r.get("email")]
+    return targets
+
+
+async def poll_due_usage() -> list[str]:
+    """Poll every account whose last poll is ``USAGE_POLL_SECONDS`` old (service loop)."""
+    polled: list[str] = []
+    rows = await list_rows()
+    if not rows and not await store.list_sources():
+        # Claude Code is not used by Laya at all (no account, no platform).
+        return polled
+    now = time.monotonic()
+    for account_id in _poll_targets(rows):
+        last = _last_poll.get(account_id)
+        if last is not None and now - last < USAGE_POLL_SECONDS:
+            continue
+        try:
+            result = await poll_usage(account_id)
+        except Exception as e:
+            log.warning("claude_account_usage_poll_failed", account=account_id, error=str(e))
+            continue
+        if result.get("polled"):
+            polled.append(account_id)
+    return polled
+
+
+async def poll_all_usage() -> None:
+    """Poll every account now ("Refresh")."""
+    targets = _poll_targets(await list_rows())
+
+    async def one(account_id: str) -> None:
+        try:
+            await poll_usage(account_id, force=True)
+        except Exception as e:
+            log.warning("claude_account_usage_poll_failed", account=account_id, error=str(e))
+
+    await asyncio.gather(*(one(a) for a in targets))
 
 
 # ── PTY sign-in ──────────────────────────────────────────────────────────
@@ -612,22 +1076,33 @@ def _start_pty(args: list[str], env: dict[str, str], cwd: str) -> PtyProcess:
     return PtyProcess(args, _cli_env(env), cwd)
 
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
-_OSC8_URL_RE = re.compile(r"\x1b\]8;[^;]*;(https://[^\x07\x1b]+)(?:\x07|\x1b\\)")
+# OSC 8 hyperlink opener: ESC ] 8 ; <params> ; <target> (BEL | ESC \). The
+# CLI prints the authorize URL as such a link, often with colour codes around
+# (or inside) the visible text.
+_OSC8_RE = re.compile(r"\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)")
+_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ESC_RE = re.compile(r"\x1b[()][0-9A-Za-z]|\x1b[=>78DEHMNOZc]")
+_ANSI_RE = re.compile(f"{_OSC_RE.pattern}|{_CSI_RE.pattern}|{_ESC_RE.pattern}")
 _URL_RE = re.compile(r"https://[^\s\x07\x1b'\"<>]+")
 
 
+def strip_escapes(text: str) -> str:
+    """Terminal text without escape sequences; an OSC 8 link keeps its target
+    (followed by a space) so it reads as a plain URL."""
+    text = _OSC8_RE.sub(lambda m: f"{m.group(1)} " if m.group(1) else "", text)
+    return _ANSI_RE.sub("", text)
+
+
 def parse_login_url(text: str) -> str | None:
-    """The authorize URL a ``claude auth login`` / ``claude mcp login`` printed."""
-    m = _OSC8_URL_RE.search(text)
-    if m:
-        return m.group(1)
-    m = _URL_RE.search(_ANSI_RE.sub("", text))
-    return m.group(0) if m else None
+    """The authorize URL a ``claude auth login`` / ``claude mcp login`` printed:
+    the first https URL once escape sequences are removed."""
+    m = _URL_RE.search(strip_escapes(text))
+    return m.group(0).rstrip(".,;:") if m else None
 
 
 def _last_line(text: str) -> str:
-    lines = [ln.strip() for ln in _ANSI_RE.sub("", text).replace("\r", "\n").split("\n")]
+    lines = [ln.strip() for ln in strip_escapes(text).replace("\r", "\n").split("\n")]
     lines = [ln for ln in lines if ln and not ln.startswith("Paste code")]
     return lines[-1][:300] if lines else ""
 
@@ -657,11 +1132,23 @@ class LoginFlow:
     def redact(self, text: str) -> str:
         return text.replace(self.secret, "[code]") if self.secret else text
 
+    @property
+    def expires_at(self) -> str:
+        from datetime import datetime, timedelta
+
+        try:
+            start = datetime.fromisoformat(self.started_at)
+        except ValueError:
+            return self.started_at
+        return (start + timedelta(seconds=LOGIN_TIMEOUT)).isoformat()
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id, "kind": self.kind, "account_id": self.account_id,
+            "new_account": self.new_account,
             "server": self.server, "platform": self.platform, "state": self.state,
             "url": self.url, "error": self.error, "started_at": self.started_at,
+            "expires_at": self.expires_at,
         }
 
 
@@ -704,7 +1191,7 @@ async def start_login(account_id: str | None = None) -> dict[str, Any]:
         new = True
     else:
         if account_id == DEFAULT_ID:
-            raise AccountError("The default account is your normal Claude Code login.")
+            raise AccountError("The Claude Code login is managed in Claude Code itself.")
         row = await get_row(account_id)
         if row is None:
             raise AccountError("Account not found", status=404)
@@ -747,6 +1234,19 @@ def _get_flow(account_id: str) -> LoginFlow:
 
 def flow_status(account_id: str) -> dict[str, Any] | None:
     return _flow.to_dict() if _flow is not None and _flow.account_id == account_id else None
+
+
+def login_state() -> dict[str, Any] | None:
+    """The latest sign-in (running or ended), whichever account it is for.
+
+    The UI renders the sign-in panel from this on every poll, so a reload,
+    a list refresh or navigating away never loses it.
+    """
+    return _flow.to_dict() if _flow is not None else None
+
+
+def login_running_for(account_id: str) -> bool:
+    return _flow is not None and _flow.active and _flow.account_id == account_id
 
 
 async def cancel(account_id: str) -> dict[str, Any]:
@@ -797,9 +1297,11 @@ async def _finish(flow: LoginFlow, code: int, text: str) -> None:
         await _end(flow, "failed", flow.redact(_last_line(text)) or "The sign-in failed.")
         return
     others = [r for r in await list_rows() if r["id"] != flow.account_id and r["logged_in"]]
-    default_email = (await default_status(force=True)).get("email")
-    if any(_same_account(status["email"], e) for e in [default_email, *(r.get("email") for r in others)]):
-        # Usually the browser was still signed in to the account Laya already uses.
+    mine = _identity({"org_id": status.get("org_id"), "email": status.get("email")})
+    if any(
+        (mine and _identity(r) == mine) or _same_account(status["email"], r.get("email")) for r in others
+    ):
+        # Usually the browser was still signed in to an account Laya already has.
         await _run_cli([get_agent_binary("claude_code"), "auth", "logout"], account_env(row))
         await _end(
             flow, "failed",
@@ -807,14 +1309,13 @@ async def _finish(flow: LoginFlow, code: int, text: str) -> None:
             "account on claude.ai in your browser (or use a private window) and add it again.",
         )
         return
-    await _update_row(
-        flow.account_id, logged_in=1, email=status["email"], plan=status["plan"],
-        org_name=status["org_name"], status_checked_at=store.now_iso(),
-    )
+    await _store_status(row, status)
     await _end(flow, "done", None)
     await _after_account_added()
     with contextlib.suppress(Exception):
         await check_connectors(flow.account_id)
+    with contextlib.suppress(Exception):
+        await poll_usage(flow.account_id, force=True)
 
 
 async def _after_account_added() -> None:
@@ -848,8 +1349,12 @@ async def _forget_account(account_id: str, config_dir: str) -> None:
     await db.execute("DELETE FROM claude_code_accounts WHERE id = ?", (account_id,))
     await db.execute("DELETE FROM agent_rate_limit_state WHERE agent_id = ?", (agent_row(account_id),))
     await db.commit()
-    await store.delete_state(_STATE_PLATFORM, [f"connectors:{account_id}"])
+    await store.delete_state(_STATE_PLATFORM, [f"connectors:{account_id}", _usage_key(account_id)])
     _remove_account_dir(config_dir)
+    from laya.claude_code import discover
+
+    discover.reset_account_cache(account_id)
+    _last_poll.pop(account_id, None)
     if _route.current == account_id:
         _route.current = None
 
@@ -867,7 +1372,7 @@ def user_mcp_servers(config_dir: str) -> dict[str, dict[str, Any]]:
 async def remove(account_id: str) -> None:
     """Sign out of every MCP server and the account, then delete its directory."""
     if account_id == DEFAULT_ID:
-        raise AccountError("The default account is your normal Claude Code login and cannot be removed.")
+        raise AccountError("The Claude Code login is managed in Claude Code itself and cannot be removed here.")
     row = await get_row(account_id)
     if row is None:
         raise AccountError("Account not found", status=404)
@@ -992,12 +1497,16 @@ async def check_connectors(account_id: str) -> dict[str, Any]:
     """List the account's connectors (no model call) and store the matrix."""
     from laya.claude_code import cli
 
+    from laya.claude_code import discover
+
     env = await env_for(account_id)
     try:
         init = await cli.read_init(env=env or None)
         error = None
+        discover.store_account_listing(account_id, init)
     except cli.ClaudeCodeError as e:
         init, error = {}, str(e)[:300]
+        discover.reset_account_cache(account_id)
     matrix = {
         "connectors": connector_matrix(init, await _github_status()),
         "checked_at": store.now_iso(),
@@ -1068,52 +1577,64 @@ async def start_connector_login(account_id: str, connector: str) -> dict[str, An
 
 
 async def _usage(account_id: str) -> dict[str, Any]:
-    from laya.pipeline.agent_budget import get_rate_limit_raw, rate_limit_windows
+    """Usage windows, when they were last seen and the poll's per-model lines."""
+    row = await rate_row(account_id)
+    rate_at = await _rate_updated_epoch(row) if row else None
+    polled = await stored_usage(account_id)
+    poll_at = float(polled["at"]) if polled and polled.get("at") else None
+    newest = max([t for t in (rate_at, poll_at) if t is not None], default=None)
+    from datetime import datetime, timezone
 
-    db = await _db()
-    rows = await db.execute_fetchall(
-        "SELECT updated_at FROM agent_rate_limit_state WHERE agent_id = ?", (agent_row(account_id),)
-    )
-    raw = await get_rate_limit_raw(agent_row(account_id))
     return {
-        "windows": rate_limit_windows(raw or {}),
-        "as_of": rows[0]["updated_at"] if rows else None,
+        "windows": await windows_of(account_id),
+        "as_of": datetime.fromtimestamp(newest, timezone.utc).isoformat() if newest else None,
+        "models": (polled or {}).get("models") or [],
     }
 
 
 async def overview(refresh: bool = False) -> dict[str, Any]:
     """Everything the Settings tab shows."""
+    if refresh:
+        await poll_all_usage()
     default = await default_status(force=refresh)
+    rows = await list_rows()
+    own = has_own_accounts(rows)
     accounts = [{
         "id": DEFAULT_ID, "default": True, "email": default["email"], "plan": default["plan"],
-        "logged_in": default["logged_in"], "problem": None if default["logged_in"] else
+        "logged_in": default["logged_in"],
+        "in_use": not own,
+        "problem": None if default["logged_in"] else
         "Claude Code is not logged in. Run `claude auth login` in a terminal.",
         "usage": await _usage(DEFAULT_ID),
         "connectors": await stored_connectors(DEFAULT_ID),
     }]
-    eligible = await eligible_ids()
-    for row in await list_rows():
-        if refresh or not row.get("status_checked_at"):
+    eligible = own_eligible(rows)
+    for row in rows:
+        if not row.get("status_checked_at") and not login_running_for(row["id"]):
             with contextlib.suppress(AccountError):
                 await refresh_status(row["id"])
                 row = await get_row(row["id"]) or row
+        pending = not row.get("email") and not row["logged_in"]
         problem = None
-        if not row["logged_in"]:
+        if pending:
+            pass
+        elif not row["logged_in"]:
             problem = "Signed out. Sign in again to use this account."
         elif row["id"] not in eligible:
             problem = "The same Claude account as another entry; Laya does not use it."
         accounts.append({
             "id": row["id"], "default": False, "email": row.get("email"), "plan": row.get("plan"),
-            "logged_in": bool(row["logged_in"]), "problem": problem,
+            "logged_in": bool(row["logged_in"]), "in_use": row["id"] in eligible,
+            "pending": pending,
+            "problem": problem,
             "usage": await _usage(row["id"]),
             "connectors": await stored_connectors(row["id"]),
         })
-    flow = current_flow()
     return {
         "accounts": accounts,
         "current": await current_account(),
         "thresholds": _thresholds(),
-        "login": flow.to_dict() if flow is not None else None,
+        "login": login_state(),
         "connectors_url": CONNECTORS_URL,
     }
 

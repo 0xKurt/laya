@@ -120,6 +120,9 @@ def fake(monkeypatch):
     monkeypatch.setattr(ab, "get_agent_binary", lambda agent_id: "claude")
     monkeypatch.setattr("laya.pipeline.agent_budget.enforce_daily_call_limit", AsyncMock())
     monkeypatch.setattr("laya.pipeline.agent_budget.record_rate_limit", record)
+    # The CLI login's rate-limit row is keyed by the organization it is logged in to.
+    monkeypatch.setattr("laya.claude_code.accounts.default_status",
+                        AsyncMock(return_value={"logged_in": True, "org_id": "org-test"}))
     monkeypatch.setattr("laya.pipeline.queue.get_model_timeout", lambda: 30.0)
     monkeypatch.setattr("laya.llm.client.log_to_audit", audit)
 
@@ -246,7 +249,7 @@ async def test_stream_yields_chunks_done_and_accounts(fake):
     audit = fake["audit"].await_args.kwargs
     assert audit["model"] == MODEL and audit["step"] == "trace" and audit["success"] is True
     assert audit["metadata"]["backend"] == "agent"
-    fake["record"].assert_awaited_once_with("claude_code", RATE_LIMIT)
+    fake["record"].assert_awaited_once_with("claude_code@org:org-test", RATE_LIMIT)
 
 
 @pytest.mark.asyncio
@@ -291,7 +294,7 @@ async def test_stream_result_error_yields_error_and_audits_failure(fake):
     assert fake["audit"].await_args.kwargs["success"] is False
     # The usage-limit rejection is recorded for the account before the error.
     agent_row, info = fake["record"].await_args.args
-    assert agent_row == "claude_code" and info["status"] == "rejected"
+    assert agent_row == "claude_code@org:org-test" and info["status"] == "rejected"
 
 
 @pytest.mark.asyncio

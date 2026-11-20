@@ -38,7 +38,7 @@ from typing import Any
 
 import structlog
 
-from laya.claude_code import cli, discover, my_work, store
+from laya.claude_code import cli, my_work, store
 
 log = structlog.get_logger()
 
@@ -239,17 +239,22 @@ def verify_change(action: str, payload: dict[str, Any], raw: dict[str, Any],
     return None
 
 
-async def _linear_context() -> tuple[dict[str, Any], dict[str, str], list[str]]:
-    """The linear source, its tools (current discovery first) and every discovered MCP tool."""
+async def _linear_context() -> tuple[dict[str, Any], dict[str, str], list[str], dict[str, Any]]:
+    """The linear source, the tools of the Claude account the action runs on,
+    every MCP tool of that account, and the account (``{env, account_id}``,
+    passed to each turn). Actions never fail over to another account."""
+    from laya.claude_code import accounts
+
     source = await store.get_source("linear")
     if source is None:
         raise ActionError("Linear is not connected through Claude Code.", 404)
-    found = discover.cached()
-    if found is None or not found.all_tools:
-        found = await discover.discover(with_identity=False)
-    pd = found.platforms.get("linear")
-    tools = {**(source.get("tools") or {}), **((pd.tools if pd else None) or {})}
-    return source, tools, list(found.all_tools)
+    assignment = await accounts.pick_for_platform("linear")
+    if assignment is None:
+        raise ActionError(
+            "No Claude account has Linear connected. Check the connectors in Settings → Claude accounts.", 409
+        )
+    account = {"env": assignment.env or None, "account_id": assignment.account_id}
+    return source, dict(assignment.tools), list(assignment.all_tools), account
 
 
 def _tool(tools: dict[str, str], role: str) -> str:
@@ -288,13 +293,13 @@ async def team_states(team: str, refresh: bool = False) -> list[dict[str, Any]]:
                     return cached["states"]
             except ValueError:
                 pass
-    source, tools, all_tools = await _linear_context()
+    source, tools, all_tools, account = await _linear_context()
     tool = _tool(tools, "list_issue_statuses")
     try:
         data = await cli.run_send(
             "linear_states", states_prompt(tool, team.upper()), tool,
             model=_model(source), timeout=TURN_TIMEOUT, schema=_STATES_SCHEMA,
-            deny=_deny(all_tools, tool),
+            deny=_deny(all_tools, tool), **account,
         )
     except cli.ClaudeCodeError as e:
         raise ActionError(f"Could not read the {team.upper()} workflow states: {e}", 502) from e
@@ -325,7 +330,7 @@ async def linear_action(identifier: str, action: str, value: Any = None,
             raise ActionError(f"'{payload['state']}' is not a workflow state of team {team_of(identifier)}.")
         payload["state"] = names[payload["state"].lower()]
 
-    source, tools, all_tools = await _linear_context()
+    source, tools, all_tools, account = await _linear_context()
     tool = _tool(tools, role)
     get_tool = _tool(tools, "get_issue")
     model = _model(source)
@@ -347,7 +352,7 @@ async def linear_action(identifier: str, action: str, value: Any = None,
         try:
             data = await cli.run_send(
                 "linear_action", prompt, tool, model=model, timeout=TURN_TIMEOUT,
-                schema=_WRITE_SCHEMA, deny=_deny(all_tools, tool),
+                schema=_WRITE_SCHEMA, deny=_deny(all_tools, tool), **account,
             )
         except cli.ClaudeCodeError as e:
             # Never retried: the tool may have run before the turn failed.
@@ -363,6 +368,7 @@ async def linear_action(identifier: str, action: str, value: Any = None,
             vdata = await cli.run_send(
                 "linear_verify", verify_prompt(get_tool, identifier), get_tool, model=model,
                 timeout=TURN_TIMEOUT, schema=_VERIFY_SCHEMA, deny=_deny(all_tools, get_tool),
+                **account,
             )
         except cli.ClaudeCodeError as e:
             raise ActionError(f"The change was sent but could not be checked: {e}. Refresh to see it.", 502) from e

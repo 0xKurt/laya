@@ -407,10 +407,17 @@ class ClaudeCodeBackend(EgressBackend):
                 f"{label} sending through Claude Code is not available: "
                 f"{rows[0]['error_message'] or rows[0]['status']}"))
 
+        from laya.claude_code import accounts
+
         source = await store.get_source(platform)
-        found = discover.cached() or await discover.discover(with_identity=False)
-        pd = found.platforms.get(platform)
-        tool = send_tool(platform, (pd.tools if pd and pd.tools else None) or (source or {}).get("tools") or {})
+        # The send runs on a Claude account that has the platform and its send
+        # tool, with that account's own tool names; it is never failed over.
+        assignment = await accounts.pick_for_platform(platform, (SEND_ROLES[platform],))
+        if assignment is None:
+            return EgressResult(success=False, error=(
+                f"No Claude account has {label} with its send tool connected. "
+                "Check the connectors in Settings → Claude accounts."))
+        tool = send_tool(platform, assignment.tools)
         if tool is None:
             return EgressResult(success=False, error=f"Claude Code has no {label} send tool")
 
@@ -426,12 +433,13 @@ class ClaudeCodeBackend(EgressBackend):
             return EgressResult(success=False, error=f"Invalid {label} payload: " + "; ".join(errors))
 
         model = store.merged_config(platform, (source or {}).get("config")).get("model") or "haiku"
-        deny = sorted(set(found.all_tools) - {tool})
+        deny = sorted(set(assignment.all_tools) - {tool})
         try:
             data = await cli.run_send(
                 platform, build_prompt(platform, tool, args), tool,
                 model=model, timeout=SEND_TIMEOUT,
                 schema=_SLACK_SCHEMA if platform == "slack" else _GMAIL_SCHEMA, deny=deny,
+                env=assignment.env or None, account_id=assignment.account_id,
             )
         except cli.ClaudeCodeError as e:
             # Not retryable: the tool may have run before the turn failed.
