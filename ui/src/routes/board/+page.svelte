@@ -25,8 +25,7 @@
 		groupByLane,
 		isAgentSession,
 		isFiltering,
-		isOrderedLane,
-		mergeVisibleOrder,
+		planDrop,
 		planMove,
 		presentPlatforms,
 		withLaneOrder,
@@ -39,6 +38,8 @@
 		type LaneTagIds,
 		type MoveStep
 	} from '$lib/board/board';
+	import { syncErrors, syncLabel, syncProgress, type SyncAllStatus } from '$lib/board/sync';
+	import { CLAUDE_CODE_LABELS } from '$lib/utils/claudeCode';
 
 	let cards = $state<BoardCard[]>([]);
 	let laneTagIds = $state<LaneTagIds | null>(null);
@@ -174,6 +175,36 @@
 		await load();
 	}
 
+	// ── Sync now: sweep every enabled source and re-check open cards ──
+	let sync = $state<SyncAllStatus | null>(null);
+	let syncError = $state<string | null>(null);
+	let syncPoll: ReturnType<typeof setTimeout> | null = null;
+	let now = $state(new Date());
+	const syncText = $derived(syncLabel(sync, now));
+	const syncFailures = $derived(sync && !sync.running ? syncErrors(sync, CLAUDE_CODE_LABELS) : []);
+
+	async function refreshSync() {
+		try {
+			const wasRunning = sync?.running ?? false;
+			sync = await engineApi.getSyncAll();
+			if (wasRunning && !sync.running) await load();
+		} catch {
+			// The line next to the button is optional; the board works without it.
+		}
+		if (syncPoll) clearTimeout(syncPoll);
+		syncPoll = sync?.running ? setTimeout(refreshSync, 2000) : null;
+	}
+
+	async function syncNow() {
+		syncError = null;
+		try {
+			sync = await engineApi.startSyncAll();
+		} catch (e: any) {
+			syncError = e?.message ?? 'Could not start the sync';
+		}
+		await refreshSync();
+	}
+
 	// Starting a workspace agent moves the card to In progress; the lane tag
 	// keeps it there after the agent finishes.
 	async function runAgent(entityId: string) {
@@ -248,19 +279,18 @@
 		if (!ids || !card) return;
 		if (zone === 'archive') return moveTo(card, 'archive');
 
-		const steps = planMove(card, zone);
-		const laneBefore = groupByLane(cards, EMPTY_FILTERS)[zone].map((c) => c.card_id);
-		const order = isOrderedLane(zone) ? mergeVisibleOrder(laneBefore.filter((x) => x !== cardId), visibleIds) : [];
-		const orderChanged = isOrderedLane(zone) && order.join() !== laneBefore.join();
-		if (steps.length === 0 && !orderChanged) return;
+		// Every lane, Done included, keeps the order the card was dropped in.
+		const plan = planDrop(cards, cardId, zone, visibleIds);
+		if (!plan || !plan.changed) return;
+		const { steps, order } = plan;
 
 		const previous = cards;
 		// Optimistic: move first, reload from the engine afterwards.
 		const moved = cards.map((c) => (c.card_id === cardId ? { ...applyMove(c, zone, ids), lane: zone, position: null } : c));
-		cards = isOrderedLane(zone) ? withLaneOrder(moved, zone, order) : moved;
+		cards = withLaneOrder(moved, zone, order);
 		try {
 			for (const step of steps) await runStep(card, step, ids);
-			if (isOrderedLane(zone)) await engineApi.setBoardOrder(zone, order);
+			await engineApi.setBoardOrder(zone, order);
 		} catch (e: any) {
 			cards = previous;
 			error = e?.body?.detail ?? e?.message ?? 'Could not move the card';
@@ -298,8 +328,16 @@
 		// Space picks a card up for a keyboard drag; Enter keeps opening it.
 		setKeyboardDragTrigger('space');
 		load();
+		refreshSync();
+		// Keeps "x min ago" current and picks up the scheduled sweeps.
+		const tick = setInterval(() => {
+			now = new Date();
+			if (!sync?.running) refreshSync();
+		}, 60_000);
 		return () => {
 			if (reloadTimer) clearTimeout(reloadTimer);
+			if (syncPoll) clearTimeout(syncPoll);
+			clearInterval(tick);
 		};
 	});
 </script>
@@ -349,6 +387,34 @@
 				>Clear</button>
 			{/if}
 			<span class="flex-1"></span>
+			{#if sync}
+				<span
+					class="text-laya-micro {syncError || syncFailures.length ? 'text-rose-300' : 'text-surface-500'}"
+					title={syncFailures.join('\n') || undefined}
+				>
+					{#if sync.running}
+						Syncing… {syncProgress(sync)}
+					{:else if syncError}
+						{syncError}
+					{:else if syncFailures.length}
+						{syncFailures.length === 1 ? syncFailures[0] : `${syncFailures.length} sources failed to sync`}
+					{:else}
+						{syncText}
+					{/if}
+				</span>
+				<button
+					type="button"
+					onclick={syncNow}
+					disabled={sync.running}
+					title="Sync every enabled source now and re-check open cards"
+					class="mr-2 flex items-center gap-1 rounded-md px-2 py-0.5 text-laya-micro font-medium text-surface-400 transition-colors hover:bg-surface-800 hover:text-surface-200 disabled:opacity-60"
+				>
+					<svg class="h-3 w-3 {sync.running ? 'animate-spin' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+					</svg>
+					{sync.running ? 'Syncing…' : 'Sync now'}
+				</button>
+			{/if}
 			{#each [['detailed', 'Detailed'], ['compact', 'Compact']] as [id, label] (id)}
 				<button
 					type="button"

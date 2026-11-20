@@ -16,12 +16,8 @@ import { sumYouMinutes } from '$lib/sessions/session';
 
 export type Lane = 'backlog' | 'todo' | 'in_progress' | 'done';
 export type DropTarget = Lane | 'archive';
-export type OrderedLane = Exclude<Lane, 'done'>;
-/** Lanes the user orders by hand. Done is always newest first. */
-export const ORDERED_LANES: ReadonlySet<Lane> = new Set<OrderedLane>(['backlog', 'todo', 'in_progress']);
-export function isOrderedLane(lane: Lane): lane is OrderedLane {
-	return ORDERED_LANES.has(lane);
-}
+/** Lanes the user orders by hand: all of them. */
+export type OrderedLane = Lane;
 
 /**
  * A card as GET /board returns it: `lane` is the lane the engine computed,
@@ -114,34 +110,40 @@ export function positionOf(card: BoardCard): number | null {
 	return card.position;
 }
 
+/** Default order of cards without a position: Done newest first, the other lanes by priority, then latest activity. */
+function compareDefault(a: BoardCard, b: BoardCard): number {
+	if (a.status === 'done' && b.status === 'done') {
+		const doneAt = (c: ActionCard) => c.resolved_at ?? c.updated_at ?? '';
+		return doneAt(b).localeCompare(doneAt(a)) || (b.created_at ?? '').localeCompare(a.created_at ?? '');
+	}
+	return (
+		(PRIORITY_RANK[a.priority] ?? 9) - (PRIORITY_RANK[b.priority] ?? 9) ||
+		lastActivity(b).localeCompare(lastActivity(a))
+	);
+}
+
 /**
- * Order inside Backlog, To do and In progress: cards without a position
- * first (priority, then latest activity), then the placed cards by position.
+ * Order inside a lane: cards without a position first (default order), then
+ * the placed cards by position. The engine gives newcomers in a lane with a
+ * manual order a stored place on top, so "first" holds only until the next load.
  */
 export function compareInLane(a: BoardCard, b: BoardCard): number {
 	const pa = positionOf(a);
 	const pb = positionOf(b);
-	if (pa == null && pb == null) {
-		return (
-			(PRIORITY_RANK[a.priority] ?? 9) - (PRIORITY_RANK[b.priority] ?? 9) ||
-			lastActivity(b).localeCompare(lastActivity(a))
-		);
-	}
+	if (pa == null && pb == null) return compareDefault(a, b);
 	if (pa == null) return -1;
 	if (pb == null) return 1;
 	return pa - pb;
 }
 
-/** Visible cards per lane: the open lanes in their manual order, Done newest first. */
+/** Visible cards per lane, each in its manual order. */
 export function groupByLane<T extends BoardCard>(cards: T[], f: BoardFilters): Record<Lane, T[]> {
 	const byLane: Record<Lane, T[]> = { backlog: [], todo: [], in_progress: [], done: [] };
 	for (const card of cards) {
 		if (HIDDEN_STATUSES.has(card.status) || !matchesFilters(card, f)) continue;
 		byLane[laneOf(card)].push(card);
 	}
-	for (const lane of ORDERED_LANES) byLane[lane].sort(compareInLane);
-	const newest = (a: ActionCard, b: ActionCard) => (b.created_at ?? '').localeCompare(a.created_at ?? '');
-	byLane.done.sort((a, b) => (b.resolved_at ?? b.updated_at ?? '').localeCompare(a.resolved_at ?? a.updated_at ?? '') || newest(a, b));
+	for (const lane of Object.keys(byLane) as Lane[]) byLane[lane].sort(compareInLane);
 	return byLane;
 }
 
@@ -166,6 +168,27 @@ export function mergeVisibleOrder(laneIds: string[], visibleIds: string[]): stri
 		else followers.set(anchor, [...(followers.get(anchor) ?? []), id]);
 	}
 	return [...leading, ...visibleIds.flatMap((id) => [id, ...(followers.get(id) ?? [])])];
+}
+
+/** What a drop of a card into a lane needs: the move steps and the lane's new full order. */
+export type DropPlan = { steps: MoveStep[]; order: string[]; changed: boolean };
+
+/**
+ * Plan a drop of `cardId` into `lane`, where `visibleIds` are the lane's
+ * visible cards in their order after the drop (the dropped card included).
+ * `order` is the full order of the lane to store (hidden cards keep their
+ * place); `changed` is false when neither the lane nor the order changes.
+ */
+export function planDrop(cards: BoardCard[], cardId: string, lane: Lane, visibleIds: string[]): DropPlan | null {
+	const card = cards.find((c) => c.card_id === cardId);
+	if (!card) return null;
+	const steps = planMove(card, lane);
+	const laneBefore = groupByLane(cards, EMPTY_FILTERS)[lane].map((c) => c.card_id);
+	const order = mergeVisibleOrder(
+		laneBefore.filter((id) => id !== cardId),
+		visibleIds
+	);
+	return { steps, order, changed: steps.length > 0 || order.join() !== laneBefore.join() };
 }
 
 /** The cards with `orderedIds` placed in `lane` at positions 0..n-1 (for an optimistic update). */

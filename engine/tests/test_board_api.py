@@ -191,7 +191,7 @@ async def test_order_after_a_lane_change_via_tags(db):
 
 
 @pytest.mark.asyncio
-async def test_done_cards_are_newest_first_and_cannot_be_ordered(db):
+async def test_done_is_newest_first_until_ordered_by_hand(db):
     await insert_test_card(db, card_id="d_old", event_id="e1", status="done")
     await insert_test_card(db, card_id="d_new", event_id="e2", status="done")
     await db.execute("UPDATE action_cards SET resolved_at = datetime('now', '-2 days') WHERE card_id = 'd_old'")
@@ -201,23 +201,86 @@ async def test_done_cards_are_newest_first_and_cannot_be_ordered(db):
     async with await _client() as client:
         assert await _lane_ids(client, "done") == ["d_new", "d_old"]
         resp = await client.put("/board/order", json={"lane": "done", "card_ids": ["d_old", "d_new"]})
+        assert resp.status_code == 200
+        assert await _lane_ids(client, "done") == ["d_old", "d_new"]
+
+        # A card marked done outside the board goes on top once ...
+        await insert_test_card(db, card_id="d_late", event_id="e3", status="ready")
+        await client.post("/cards/d_late/done")
+        assert await _lane_ids(client, "done") == ["d_late", "d_old", "d_new"]
+        # ... and the user can place it anywhere afterwards.
+        await client.put("/board/order", json={"lane": "done", "card_ids": ["d_old", "d_late", "d_new"]})
+        assert await _lane_ids(client, "done") == ["d_old", "d_late", "d_new"]
+
+        resp = await client.put("/board/order", json={"lane": "archive", "card_ids": ["d_old"]})
         assert resp.status_code == 400
         resp = await client.put("/board/order", json={"lane": "backlog", "card_ids": ["x", "x"]})
         assert resp.status_code == 400
 
 
 @pytest.mark.asyncio
-async def test_positions_of_archived_done_and_deleted_cards_are_pruned(db):
-    for i, cid in enumerate(["keep", "arch", "done", "gone"]):
+async def test_newcomers_go_on_top_once_and_never_above_later_arrivals(db):
+    for i, cid in enumerate(["a", "b", "c"]):
         await insert_test_card(db, card_id=cid, event_id=f"e{i}", status="ready")
 
     async with await _client() as client:
-        await client.put("/board/order", json={"lane": "backlog", "card_ids": ["keep", "arch", "done", "gone"]})
+        await client.put("/board/order", json={"lane": "backlog", "card_ids": ["b", "c", "a"]})
+        await insert_test_card(db, card_id="n1", event_id="e5", status="ready", priority="LOW")
+        assert await _lane_ids(client, "backlog") == ["n1", "b", "c", "a"]
+        # The newcomer's place is stored, so it does not float above the next one.
+        rows = await db.execute_fetchall("SELECT lane FROM board_positions WHERE card_id = 'n1'")
+        assert [r["lane"] for r in rows] == ["backlog"]
+        await insert_test_card(db, card_id="n2", event_id="e6", status="ready", priority="LOW")
+        assert await _lane_ids(client, "backlog") == ["n2", "n1", "b", "c", "a"]
+        # The user drops n2 below a: it stays there across loads.
+        await client.put("/board/order", json={"lane": "backlog", "card_ids": ["n1", "b", "c", "a", "n2"]})
+        assert await _lane_ids(client, "backlog") == ["n1", "b", "c", "a", "n2"]
+        assert await _lane_ids(client, "backlog") == ["n1", "b", "c", "a", "n2"]
+
+
+@pytest.mark.asyncio
+async def test_lane_without_manual_order_gets_no_positions(db):
+    await insert_test_card(db, card_id="a", event_id="e1", status="ready")
+    await insert_test_card(db, card_id="d", event_id="e2", status="done")
+
+    async with await _client() as client:
+        await client.get("/board")
+
+    rows = await db.execute_fetchall("SELECT card_id FROM board_positions")
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_a_card_moved_by_status_goes_on_top_of_its_new_lane(db):
+    for i, cid in enumerate(["a", "b", "x"]):
+        await insert_test_card(db, card_id=cid, event_id=f"e{i}", status="ready")
+
+    async with await _client() as client:
+        await client.put("/board/order", json={"lane": "backlog", "card_ids": ["a", "b", "x"]})
+        await client.put("/board/order", json={"lane": "done", "card_ids": []})
+        await client.post("/cards/x/done")
+        await insert_test_card(db, card_id="d1", event_id="e9", status="done")
+        await client.put("/board/order", json={"lane": "done", "card_ids": ["d1"]})
+        assert await _lane_ids(client, "done") == ["x", "d1"]
+        rows = await db.execute_fetchall("SELECT lane FROM board_positions WHERE card_id = 'x'")
+        assert [r["lane"] for r in rows] == ["done"]
+
+
+@pytest.mark.asyncio
+async def test_positions_of_archived_old_done_and_deleted_cards_are_pruned(db):
+    for i, cid in enumerate(["keep", "arch", "done", "old_done", "gone"]):
+        await insert_test_card(db, card_id=cid, event_id=f"e{i}", status="ready")
+
+    async with await _client() as client:
+        await client.put("/board/order", json={"lane": "backlog", "card_ids": ["keep", "arch", "done", "old_done", "gone"]})
         await db.execute("UPDATE action_cards SET status = 'archived' WHERE card_id = 'arch'")
-        await db.execute("UPDATE action_cards SET status = 'done' WHERE card_id = 'done'")
+        await db.execute("UPDATE action_cards SET status = 'done', resolved_at = datetime('now') WHERE card_id = 'done'")
+        await db.execute(
+            "UPDATE action_cards SET status = 'done', resolved_at = datetime('now', '-10 days') WHERE card_id = 'old_done'"
+        )
         await db.execute("DELETE FROM action_cards WHERE card_id = 'gone'")
         await db.commit()
         await client.get("/board")
 
-    rows = await db.execute_fetchall("SELECT card_id FROM board_positions")
-    assert [r["card_id"] for r in rows] == ["keep"]
+    rows = await db.execute_fetchall("SELECT card_id FROM board_positions ORDER BY card_id")
+    assert [r["card_id"] for r in rows] == ["done", "keep"]

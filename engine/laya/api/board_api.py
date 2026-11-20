@@ -17,11 +17,17 @@ tags and makes sure both lane tags exist as system tags, so the UI can assign
 and remove them by id.
 
 The only state the board keeps itself is the manual order of the cards in
-Backlog, To do and In progress: table ``board_positions`` (created by this
-module on first use, one row per placed card with the lane it was placed in).
-A position counts only while the card is still in that lane. Cards without one
-(new cards, cards moved by a status change) sit at the top of their lane,
-sorted by priority, then latest activity. Done is always newest first.
+every lane: table ``board_positions`` (created by this module on first use,
+one row per placed card with the lane it was placed in). A position counts
+only while the card is still in that lane.
+
+A lane without any position keeps its default order: Backlog, To do and In
+progress by priority, then latest activity; Done newest first. Once a lane has
+a manual order, a card that arrives without a position (a new card, a card
+moved by a status change or marked done outside the board) goes on top of it
+once: GET /board gives it a position above the lane's first card and stores
+it, so the next newcomer lands above it instead of it floating above the
+cards the user placed.
 """
 
 from __future__ import annotations
@@ -53,8 +59,8 @@ ACTIVE_STATUSES = (
 )
 # Statuses that put a card in In progress whatever its lane tags say.
 IN_PROGRESS_STATUSES = {"agent_running", "awaiting_input", "executing"}
-# Lanes the user orders by hand. Done is always newest first.
-ORDERED_LANES = ("backlog", "todo", "in_progress")
+# Lanes the user orders by hand.
+ORDERED_LANES = ("backlog", "todo", "in_progress", "done")
 PRIORITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 
 POSITIONS_DDL = """CREATE TABLE IF NOT EXISTS board_positions (
@@ -115,16 +121,39 @@ def last_activity(card: dict) -> str:
     )
 
 
-def board_sort_key(card: dict) -> tuple:
-    """Sort key within a lane: Done newest first; the other lanes put cards
-    without a position first (priority, then latest activity), then the
-    placed cards by position."""
+def default_sort_key(card: dict) -> tuple:
+    """Order of the cards without a position: Done newest first; the other
+    lanes by priority, then latest activity."""
     if card["lane"] == "done":
         done_at = card.get("resolved_at") or card.get("updated_at") or ""
-        return (1, _desc(done_at), _desc(card.get("created_at") or ""))
+        return (_desc(done_at), _desc(card.get("created_at") or ""))
+    return (PRIORITY_RANK.get(card.get("priority"), 9), _desc(last_activity(card)))
+
+
+def board_sort_key(card: dict) -> tuple:
+    """Sort key within a lane: cards without a position first (default
+    order), then the placed cards by position."""
     if card["position"] is None:
-        return (0, PRIORITY_RANK.get(card.get("priority"), 9), _desc(last_activity(card)))
+        return (0, default_sort_key(card))
     return (1, card["position"])
+
+
+def place_newcomers(cards: list[dict]) -> list[tuple[str, str, float]]:
+    """Give the unplaced cards of each lane that has a manual order a position
+    above its first placed card (in default order); returns the new rows
+    (card_id, lane, position) and sets them on the cards."""
+    rows: list[tuple[str, str, float]] = []
+    for lane in ORDERED_LANES:
+        in_lane = [c for c in cards if c["lane"] == lane]
+        placed = [c["position"] for c in in_lane if c["position"] is not None]
+        if not placed:
+            continue
+        newcomers = sorted((c for c in in_lane if c["position"] is None), key=default_sort_key)
+        top = min(placed)
+        for i, card in enumerate(newcomers):
+            card["position"] = top - len(newcomers) + i
+            rows.append((card["card_id"], lane, float(card["position"])))
+    return rows
 
 
 def _desc(text: str) -> tuple:
@@ -133,14 +162,18 @@ def _desc(text: str) -> tuple:
 
 
 async def _prune_positions() -> None:
-    """Drop positions of cards that left the board (archived, dismissed, done, deleted)."""
+    """Drop positions of cards that left the board (archived, dismissed,
+    deleted, or done longer ago than Done shows)."""
     db = await get_db()
     placeholders = ",".join("?" * len(ACTIVE_STATUSES))
     await db.execute(
         f"""DELETE FROM board_positions
             WHERE card_id NOT IN (
-                SELECT card_id FROM action_cards WHERE status IN ({placeholders}))""",
-        ACTIVE_STATUSES,
+                SELECT card_id FROM action_cards
+                WHERE status IN ({placeholders})
+                   OR (status = 'done'
+                       AND COALESCE(resolved_at, updated_at, created_at) >= datetime('now', ?)))""",
+        [*ACTIVE_STATUSES, f"-{DONE_VISIBLE_DAYS} days"],
     )
     await db.commit()
 
@@ -191,6 +224,20 @@ async def get_board(space_id: str | None = None) -> dict:
         # A position from another lane is stale: the card moved by a status change.
         item["position"] = stored[1] if stored and stored[0] == lane else None
         out.append(item)
+    newcomers = place_newcomers(out)
+    if newcomers:
+        # A position set meanwhile in the card's current lane (a drop that
+        # raced this load) wins over the newcomer's place.
+        await db.executemany(
+            """INSERT INTO board_positions (card_id, lane, position, updated_at)
+               VALUES (?, ?, ?, datetime('now'))
+               ON CONFLICT(card_id) DO UPDATE SET
+                   lane = excluded.lane, position = excluded.position,
+                   updated_at = excluded.updated_at
+               WHERE board_positions.lane != excluded.lane""",
+            newcomers,
+        )
+        await db.commit()
     out.sort(key=lambda c: (LANE_ORDER[c["lane"]], board_sort_key(c)))
     return {"cards": out, "lane_tags": lane_tags}
 

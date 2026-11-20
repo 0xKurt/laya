@@ -11,6 +11,7 @@ import {
 	laneOf,
 	matchesFilters,
 	mergeVisibleOrder,
+	planDrop,
 	planMove,
 	withLaneOrder,
 	presentPlatforms,
@@ -138,15 +139,23 @@ describe('manual order', () => {
 		expect(ids(lanes.todo)).toEqual(['stale', 'placed']);
 	});
 
-	it('keeps Done newest first whatever the positions', () => {
-		const lanes = groupByLane(
+	it('shows Done newest first until it has a manual order, then keeps that order', () => {
+		const unplaced = groupByLane(
+			[
+				card({ card_id: 'old', status: 'done', resolved_at: '2026-11-10' }),
+				card({ card_id: 'new', status: 'done', resolved_at: '2026-11-12' })
+			],
+			EMPTY_FILTERS
+		);
+		expect(ids(unplaced.done)).toEqual(['new', 'old']);
+		const placed = groupByLane(
 			[
 				card({ card_id: 'old', status: 'done', resolved_at: '2026-11-10', lane: 'done', position: 0 }),
 				card({ card_id: 'new', status: 'done', resolved_at: '2026-11-12', lane: 'done', position: 1 })
 			],
 			EMPTY_FILTERS
 		);
-		expect(ids(lanes.done)).toEqual(['new', 'old']);
+		expect(ids(placed.done)).toEqual(['old', 'new']);
 	});
 
 	it('places cards optimistically', () => {
@@ -164,6 +173,66 @@ describe('manual order', () => {
 		expect(mergeVisibleOrder(lane, ['a', 'n', 'c', 'e'])).toEqual(['x', 'a', 'b', 'n', 'c', 'd', 'e']);
 		// A card that left the lane is not in `laneIds`; its hidden follower stays in place.
 		expect(mergeVisibleOrder(['x', 'b', 'c', 'd', 'e'], ['e', 'c'])).toEqual(['x', 'b', 'e', 'c', 'd']);
+	});
+});
+
+describe('planDrop', () => {
+	const ids = (cards: { card_id: string }[]) => cards.map((c) => c.card_id);
+	const done = (id: string, resolved: string, position?: number) =>
+		card({ card_id: id, status: 'done', resolved_at: resolved, lane: position == null ? undefined : 'done', position });
+
+	// Root cause: drops into Done (and reorders inside it) stored no order, so
+	// the card jumped back to the top.
+	it('stores the order of a drop into Done at a position', () => {
+		const cards = [done('d1', '2026-11-12'), done('d2', '2026-11-10'), card({ card_id: 'b' })];
+		const plan = planDrop(cards, 'b', 'done', ['d1', 'b', 'd2'])!;
+		expect(plan.steps).toEqual([{ kind: 'done' }]);
+		expect(plan.order).toEqual(['d1', 'b', 'd2']);
+		expect(plan.changed).toBe(true);
+		// After the optimistic update the card is where it was dropped, not on top.
+		const after = withLaneOrder(
+			cards.map((c) => (c.card_id === 'b' ? applyMove(c, 'done', IDS) : c)),
+			'done',
+			plan.order
+		);
+		expect(ids(groupByLane(after, EMPTY_FILTERS).done)).toEqual(['d1', 'b', 'd2']);
+	});
+
+	it('stores a reorder inside Done', () => {
+		const cards = [done('d1', '2026-11-12'), done('d2', '2026-11-10')];
+		const plan = planDrop(cards, 'd2', 'done', ['d2', 'd1'])!;
+		expect(plan).toEqual({ steps: [], order: ['d2', 'd1'], changed: true });
+	});
+
+	it('stores the full lane on its first manual order, so unplaced cards get positions too', () => {
+		const cards = [
+			card({ card_id: 'a', priority: 'CRITICAL' }),
+			card({ card_id: 'b', priority: 'HIGH' }),
+			card({ card_id: 'c', priority: 'LOW' }),
+			card({ card_id: 'h', priority: 'MEDIUM', header: 'hidden' })
+		];
+		// A filter hides h; the user drags c to the top.
+		const plan = planDrop(cards, 'c', 'backlog', ['c', 'a', 'b'])!;
+		expect(plan.order).toEqual(['c', 'a', 'b', 'h']);
+		const after = withLaneOrder(cards, 'backlog', plan.order);
+		expect(after.every((c) => c.position != null)).toBe(true);
+	});
+
+	it('does nothing when a card is dropped where it was', () => {
+		const cards = [card({ card_id: 'a', priority: 'HIGH' }), card({ card_id: 'b', priority: 'LOW' })];
+		expect(planDrop(cards, 'a', 'backlog', ['a', 'b'])!.changed).toBe(false);
+		expect(planDrop(cards, 'zzz', 'backlog', ['a', 'b'])).toBeNull();
+	});
+
+	it('drops a card from Backlog into the middle of To do', () => {
+		const cards = [
+			card({ card_id: 't1', tags: [TODO], lane: 'todo', position: 0 }),
+			card({ card_id: 't2', tags: [TODO], lane: 'todo', position: 1 }),
+			card({ card_id: 'b' })
+		];
+		const plan = planDrop(cards, 'b', 'todo', ['t1', 'b', 't2'])!;
+		expect(plan.steps).toEqual([{ kind: 'assign', lane: 'todo' }]);
+		expect(plan.order).toEqual(['t1', 'b', 't2']);
 	});
 });
 
