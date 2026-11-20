@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { ClaudeAccountConnector, ClaudeAccountLogin } from '$lib/api/types';
 import {
+	accountBadge,
 	accountTitle,
+	countdown,
+	loginPlacement,
+	shouldAutoOpen,
 	connectorAction,
 	isLoginActive,
 	loginStateText,
@@ -85,5 +89,92 @@ describe('login helpers', () => {
 		expect(planLabel(null)).toBeNull();
 		expect(accountTitle({ email: null, default: true })).toBe('Your Claude Code login');
 		expect(accountTitle({ email: 'a@b.c', default: false })).toBe('a@b.c');
+	});
+});
+
+describe('sign-in panel placement', () => {
+	const flow = (over: Partial<ClaudeAccountLogin>): ClaudeAccountLogin => ({
+		id: 'f1',
+		kind: 'connector',
+		account_id: 'a1',
+		server: 'linear-server',
+		platform: 'linear',
+		state: 'waiting_code',
+		url: 'https://mcp.linear.app/authorize?x=1',
+		error: null,
+		started_at: '2026-11-20T08:00:00+00:00',
+		expires_at: '2026-11-20T08:10:00+00:00',
+		...over
+	});
+	const list = [{ id: 'default' }, { id: 'a1' }];
+
+	it('renders in the card of the account the sign-in is for', () => {
+		expect(loginPlacement(flow({}), list, new Set())).toBe('a1');
+		expect(loginPlacement(null, list, new Set())).toBeNull();
+	});
+
+	it('renders a pending new account before the list shows its row', () => {
+		const add = flow({ kind: 'account', account_id: 'n1', new_account: true, state: 'starting' });
+		expect(loginPlacement(add, list, new Set())).toBe('new');
+		expect(loginPlacement({ ...add, state: 'failed' }, list, new Set())).toBeNull();
+	});
+
+	it('keeps an ended sign-in until dismissed, and hides a finished one', () => {
+		const failed = flow({ state: 'failed', error: 'nope' });
+		expect(loginPlacement(failed, list, new Set())).toBe('a1');
+		expect(loginPlacement(failed, list, new Set(['f1']))).toBeNull();
+		expect(loginPlacement(flow({ state: 'done' }), list, new Set())).toBeNull();
+		// Dismissing never hides a running sign-in.
+		expect(loginPlacement(flow({}), list, new Set(['f1']))).toBe('a1');
+	});
+
+	it('opens a connector page once per sign-in, never an account sign-in', () => {
+		expect(shouldAutoOpen(flow({}), new Set())).toBe(true);
+		expect(shouldAutoOpen(flow({}), new Set(['f1']))).toBe(false);
+		expect(shouldAutoOpen(flow({ url: null }), new Set())).toBe(false);
+		expect(shouldAutoOpen(flow({ state: 'starting' }), new Set())).toBe(false);
+		expect(shouldAutoOpen(flow({ kind: 'account' }), new Set())).toBe(false);
+	});
+
+	it('counts down to the expiry', () => {
+		const start = Date.parse('2026-11-20T08:00:00+00:00');
+		expect(countdown('2026-11-20T08:10:00+00:00', start)).toBe('10:00 left');
+		expect(countdown('2026-11-20T08:10:00+00:00', start + 9 * 60_000 + 55_000)).toBe('0:05 left');
+		expect(countdown('2026-11-20T08:10:00+00:00', start + 11 * 60_000)).toBeNull();
+		expect(countdown(undefined, start)).toBeNull();
+	});
+
+	it('tells the user to finish a connector sign-in in the browser', () => {
+		expect(loginStateText(flow({}))).toContain('Waiting for you to finish');
+	});
+});
+
+describe('account badges and reset texts', () => {
+	const acc = { id: 'a1', default: false, logged_in: true, in_use: true, pending: false };
+
+	it('marks the account processing now, signed-out and unused ones', () => {
+		expect(accountBadge(acc, 'a1')).toEqual({ label: 'Processing now', tone: 'active' });
+		expect(accountBadge({ ...acc, logged_in: false }, 'a1')).toEqual({ label: 'Signed out', tone: 'warn' });
+		expect(accountBadge({ ...acc, id: 'default', default: true, in_use: false }, 'a1')).toEqual({
+			label: 'Not used',
+			tone: 'muted'
+		});
+		expect(accountBadge({ ...acc, pending: true, logged_in: false }, null)?.label).toBe('Signing in');
+		expect(accountBadge(acc, 'a2')).toBeNull();
+	});
+
+	it('uses the /usage reset text when the rate-limit signal has no epoch', () => {
+		const bars = usageBars(
+			{
+				usage: {
+					windows: {
+						seven_day: { utilization: 1, resets_at: null, status: null, resets_text: 'Nov 25 at 4am' }
+					},
+					as_of: null
+				}
+			},
+			{ seven_day: 0.8 }
+		);
+		expect(bars[1]).toMatchObject({ percent: 100, over: true, rejected: false, resets: 'resets Nov 25 at 4am' });
 	});
 });

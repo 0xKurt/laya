@@ -1422,6 +1422,8 @@ export const engineApi = {
 			method: 'POST',
 			body: JSON.stringify({ code })
 		}),
+	/** The latest sign-in (account or connector), whichever account it is for. */
+	getClaudeLogin: () => request<{ login: ClaudeAccountLogin | null }>('/claude-code/accounts/login'),
 	getClaudeAccountLogin: (id: string) =>
 		request<{ login: ClaudeAccountLogin | null }>(`/claude-code/accounts/${encodeURIComponent(id)}/status`),
 	cancelClaudeAccountLogin: (id: string) =>
