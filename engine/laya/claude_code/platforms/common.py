@@ -178,4 +178,6 @@ async def run_turn(source: dict[str, Any], platform: str, prompt: str, schema: d
         platform, prompt, schema, read_tools(source, platform),
         model=config.get("model") or "haiku",
         deny=source.get("deny_tools") or [],
+        env=source.get("account_env") or None,
+        account_id=source.get("account_id"),
     )

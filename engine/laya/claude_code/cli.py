@@ -13,8 +13,8 @@ globally, and a deny rule wins over any allow rule.
 Every turn is logged to the audit log as model `agent/claude_code/<model>`,
 so the agent usage budget (pipeline/agent_budget.py) counts it. Turns run in
 `stream-json` mode so the CLI's `rate_limit_event` is seen too; it is
-recorded for the default Claude account (claude_code/accounts.py), which
-every turn of this module runs on.
+recorded for the Claude account the turn ran on (`account_id`, with `env`
+holding that account's `CLAUDE_CONFIG_DIR`; see claude_code/accounts.py).
 """
 
 from __future__ import annotations
@@ -78,14 +78,14 @@ def build_args(
     return args
 
 
-async def _run_process(args: list[str], timeout: float) -> list[str]:
+async def _run_process(args: list[str], timeout: float, env: dict[str, str] | None = None) -> list[str]:
     """Run a process in an empty temp dir and return its stdout lines."""
     from laya.agents.subprocess_helper import AgentProcess
 
     tmpdir = tempfile.mkdtemp(prefix="laya-claude-code-")
     proc = AgentProcess()
     try:
-        await proc.spawn(args=args, cwd=tmpdir, env=None)
+        await proc.spawn(args=args, cwd=tmpdir, env=env or None)
 
         async def _read() -> list[str]:
             lines: list[str] = []
@@ -148,29 +148,32 @@ async def _run_turn(
     schema: dict | None,
     timeout: float,
     deny: list[str] | None,
+    env: dict[str, str] | None = None,
+    account_id: str | None = None,
 ) -> dict[str, Any]:
     from laya.llm.client import log_to_audit
+    from laya.claude_code import accounts
 
+    account_id = account_id or accounts.DEFAULT_ID
     args = build_args(
         get_agent_binary("claude_code"), prompt,
         tools=tools, model=model, schema=schema, deny=deny,
     )
     start = time.monotonic()
     try:
-        lines = await _run_process(args, timeout)
+        lines = await _run_process(args, timeout, env)
         data, rate_limit_info = parse_turn_output(lines)
     except (ClaudeCodeError, ValueError, OSError) as e:
         await log_to_audit(
             event_id=None, card_id=None, step=step, model=f"agent/claude_code/{model}",
             input_tokens=0, output_tokens=0,
             latency_ms=int((time.monotonic() - start) * 1000), success=False, error=str(e)[:500],
+            metadata={"claude_account": account_id},
         )
         raise ClaudeCodeError(str(e)) from e
 
-    from laya.claude_code import accounts
-
     await accounts.record(
-        accounts.DEFAULT_ID, rate_limit_info,
+        account_id, rate_limit_info,
         rejected=accounts.is_rejection(
             rate_limit_info, str(data.get("result") or "") if data.get("is_error") else None
         ),
@@ -183,7 +186,10 @@ async def _run_turn(
         output_tokens=usage.get("output_tokens") or 0,
         latency_ms=int((time.monotonic() - start) * 1000), success=ok,
         error=None if ok else str(data.get("result"))[:500],
-        metadata={"cost_usd": data.get("total_cost_usd")} if data.get("total_cost_usd") else None,
+        metadata={
+            "claude_account": account_id,
+            **({"cost_usd": data.get("total_cost_usd")} if data.get("total_cost_usd") else {}),
+        },
     )
     if not ok:
         raise ClaudeCodeError(f"{step} failed: {str(data.get('result') or data)[:300]}")
@@ -198,13 +204,19 @@ async def run_collect(
     model: str = "haiku",
     timeout: float = DEFAULT_TIMEOUT,
     deny: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    account_id: str | None = None,
 ) -> dict[str, Any]:
-    """One read-only collector turn; returns the schema-validated structured output."""
+    """One read-only collector turn; returns the schema-validated structured output.
+
+    ``env`` / ``account_id``: the Claude account the turn runs on (none = the
+    CLI's own login)."""
     if not tools:
         raise ClaudeCodeError(f"no read tools discovered for {platform}")
     data = await _run_turn(
         f"claude_code_{platform}", prompt,
         tools=tools, model=model, schema=schema, timeout=timeout, deny=deny,
+        env=env, account_id=account_id,
     )
     return data["structured_output"]
 
@@ -217,12 +229,15 @@ async def run_send(
     timeout: float = DEFAULT_TIMEOUT,
     schema: dict | None = None,
     deny: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    account_id: str | None = None,
 ) -> dict[str, Any]:
     """One send turn with exactly one send tool allowed. Returns the raw result
     (with `structured_output` when a schema is given)."""
     return await _run_turn(
         f"claude_code_{platform}_send", prompt,
         tools=[tool], model=model, schema=schema, timeout=timeout, deny=deny,
+        env=env, account_id=account_id,
     )
 
 

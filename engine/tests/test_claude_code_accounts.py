@@ -40,8 +40,13 @@ def _reset_module(monkeypatch):
     monkeypatch.setattr(accounts, "_route", accounts._Route())
     monkeypatch.setattr(accounts, "_flow", None)
     monkeypatch.setattr(accounts, "_default_status", (time.monotonic(), {
-        "logged_in": True, "email": "kurt@example.com", "plan": "max", "org_name": None}))
+        "logged_in": True, "email": "kurt@example.com", "plan": "max", "org_name": None,
+        "org_id": "org-cli"}))
     monkeypatch.setattr(accounts, "_thresholds", lambda: dict(T))
+    monkeypatch.setattr(accounts, "_last_poll", {})
+    from laya.claude_code import discover
+
+    discover.reset_account_cache()
     yield
     flow = accounts._flow
     if flow is not None and flow.proc is not None and hasattr(flow.proc, "proc"):
@@ -50,14 +55,19 @@ def _reset_module(monkeypatch):
             flow.proc.proc.wait()
 
 
-async def _add_row(account_id="acct2", email="second@example.com", logged_in=1):
+_created = [0]
+
+
+async def _add_row(account_id="acct2", email="second@example.com", logged_in=1, org_id=None):
     path = accounts.ACCOUNTS_DIR / account_id
     path.mkdir(parents=True, exist_ok=True)
     db = await accounts._db()
+    _created[0] += 1
+    created = (datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=_created[0])).isoformat()
     await db.execute(
-        "INSERT INTO claude_code_accounts (id, config_dir, email, plan, logged_in, created_at) "
-        "VALUES (?, ?, ?, 'max', ?, ?)",
-        (account_id, str(path), email, logged_in, datetime.now(timezone.utc).isoformat()),
+        "INSERT INTO claude_code_accounts (id, config_dir, email, plan, logged_in, created_at, org_id) "
+        "VALUES (?, ?, ?, 'max', ?, ?, ?)",
+        (account_id, str(path), email, logged_in, created, org_id or f"org-{account_id}"),
     )
     await db.commit()
     return path
@@ -165,24 +175,63 @@ async def test_pick_without_added_accounts_is_the_default(db):
 
 @pytest.mark.asyncio
 async def test_pick_moves_to_an_added_account_and_back(db, monkeypatch):
+    await _add_row("acct1", email="first@example.com")
     path = await _add_row()
-    await accounts.record("default", _info(seven=0.9, status="allowed_warning"))
+    await accounts.record("acct1", _info(seven=0.9, status="allowed_warning"))
     assert await accounts.pick() == ("acct2", {"CLAUDE_CONFIG_DIR": str(path)})
-    # Sticky: the default recovering a little does not move routing back.
-    await accounts.record("default", _info(seven=0.75))
+    # Sticky: the first account recovering a little does not move routing back.
+    await accounts.record("acct1", _info(seven=0.75))
     assert (await accounts.pick())[0] == "acct2"
-    # Well below its threshold, after the dwell, routing returns to the default.
-    await accounts.record("default", _info(seven=0.2))
+    # Well below its threshold, after the dwell, routing returns to the first account.
+    await accounts.record("acct1", _info(seven=0.2))
     accounts._route.since -= accounts.DWELL_SECONDS + 1
-    assert (await accounts.pick())[0] == "default"
+    assert (await accounts.pick())[0] == "acct1"
+
+
+@pytest.mark.asyncio
+async def test_added_accounts_replace_the_cli_login(db):
+    """Once an account is added, Laya never runs on whatever the CLI is logged in to."""
+    path = await _add_row("acct1", email="kurt@example.com")  # the same person as the CLI login is fine
+    assert await accounts.eligible_ids() == ["acct1"]
+    assert await accounts.pick() == ("acct1", {"CLAUDE_CONFIG_DIR": str(path)})
+
+
+@pytest.mark.asyncio
+async def test_a_first_sign_in_in_progress_keeps_the_cli_login(db):
+    db_ = await accounts._db()
+    await db_.execute(
+        "INSERT INTO claude_code_accounts (id, config_dir, created_at) VALUES ('new', ?, '2026-01-01')",
+        (str(accounts.ACCOUNTS_DIR / "new"),),
+    )
+    await db_.commit()
+    assert await accounts.eligible_ids() == ["default"]
+
+
+@pytest.mark.asyncio
+async def test_no_usable_added_account_never_falls_back_to_the_cli(db, monkeypatch):
+    await _add_row("out", logged_in=0)
+    assert await accounts.eligible_ids() == []
+    with pytest.raises(accounts.NoEligibleAccount):
+        await accounts.pick()
+    blocked, _, reason = await accounts.native_block(T)
+    assert blocked and reason.startswith(accounts.ACCOUNTS_PAUSE_REASON)
+
+
+@pytest.mark.asyncio
+async def test_pick_failure_falls_back_to_the_first_added_account(db, monkeypatch):
+    path = await _add_row("acct1")
+    await _add_row()
+    monkeypatch.setattr(accounts, "windows_of", AsyncMock(side_effect=RuntimeError("db gone")))
+    assert await accounts.pick() == ("acct1", {"CLAUDE_CONFIG_DIR": str(path)})
 
 
 @pytest.mark.asyncio
 async def test_signed_out_or_duplicate_accounts_are_not_eligible(db):
     await _add_row("out", logged_in=0)
-    await _add_row("dup", email="KURT@example.com")
-    await _add_row("ok", email="other@example.com")
-    assert await accounts.eligible_ids() == ["default", "ok"]
+    await _add_row("ok", email="other@example.com", org_id="org-x")
+    await _add_row("dup", email="third@example.com", org_id="org-x")
+    await _add_row("ok2", email="fourth@example.com")
+    assert await accounts.eligible_ids() == ["ok", "ok2"]
 
 
 @pytest.mark.asyncio
@@ -190,7 +239,9 @@ async def test_record_stores_per_account_rows_and_rejections(db):
     await accounts.record("acct2", _info(five=0.4))
     await accounts.record(None, _info(seven=0.5))
     assert (await agent_budget.get_rate_limit_raw("claude_code@acct2"))["unifiedWindows"]["five_hour"]
-    assert (await agent_budget.get_rate_limit_raw("claude_code"))["unifiedWindows"]["seven_day"]
+    # The CLI login is keyed by the organization it is logged in to.
+    assert (await agent_budget.get_rate_limit_raw("claude_code@org:org-cli"))["unifiedWindows"]["seven_day"]
+    assert await agent_budget.get_rate_limit_raw("claude_code") is None
     # A rejection without any signal holds the account for a while.
     await accounts.record("acct2", None, rejected=True)
     w = await accounts.windows_of("acct2")
@@ -212,20 +263,21 @@ def test_is_rejection():
 
 @pytest.mark.asyncio
 async def test_run_agent_routed_retries_once_on_the_next_account(db, monkeypatch):
+    path1 = await _add_row("acct1", email="first@example.com")
     path = await _add_row()
     calls = []
 
     async def fake_run(agent_id, *args, account_id=None, account_env=None):
         calls.append((account_id, account_env))
-        if account_id == "default":
-            await accounts.record("default", None, rejected=True)
+        if account_id == "acct1":
+            await accounts.record("acct1", None, rejected=True)
             raise ab.AgentRateLimited("hit your limit")
         return {"content": "ok"}
 
     monkeypatch.setattr(ab, "_run_agent", fake_run)
     result = await ab._run_agent_routed("claude_code", "bin", "s", "u", None, None, True, 30.0)
     assert result["account_id"] == "acct2"
-    assert calls == [("default", {}), ("acct2", {"CLAUDE_CONFIG_DIR": str(path)})]
+    assert calls == [("acct1", {"CLAUDE_CONFIG_DIR": str(path1)}), ("acct2", {"CLAUDE_CONFIG_DIR": str(path)})]
     # Routing stays on the account that worked.
     assert accounts._route.current == "acct2"
 
@@ -329,11 +381,12 @@ async def _stream():
 
 @pytest.mark.asyncio
 async def test_stream_fails_over_before_the_first_chunk(db, stream_env):
+    path1 = await _add_row("acct1", email="first@example.com")
     path = await _add_row()
     StreamProc.scripts = [[_res("You've hit your limit", is_error=True)], [*_chunk("hello"), _res("hello")]]
     events = await _stream()
     assert [e.type for e in events] == ["chunk", "done"]
-    assert StreamProc.envs == [None, {"CLAUDE_CONFIG_DIR": str(path)}]
+    assert StreamProc.envs == [{"CLAUDE_CONFIG_DIR": str(path1)}, {"CLAUDE_CONFIG_DIR": str(path)}]
     assert stream_env.await_args.kwargs["metadata"]["claude_account"] == "acct2"
 
 
@@ -398,17 +451,19 @@ async def _evaluate():
 
 @pytest.mark.asyncio
 async def test_budget_does_not_pause_while_one_account_has_room(db):
+    await _add_row("acct1", email="first@example.com")
     await _add_row()
-    await accounts.record("default", _info(seven=0.9, status="allowed_warning"))
+    await accounts.record("acct1", _info(seven=0.9, status="allowed_warning"))
     await accounts.record("acct2", _info(seven=0.3))
     assert await _evaluate() == {}
 
 
 @pytest.mark.asyncio
 async def test_budget_pauses_when_every_account_is_over_until_the_first_recovers(db):
+    await _add_row("acct1", email="first@example.com")
     await _add_row()
     soon, later = int(time.time()) + 3600, int(time.time()) + 86400
-    await accounts.record("default", _info(seven=0.9, status="allowed_warning", resets=later))
+    await accounts.record("acct1", _info(seven=0.9, status="allowed_warning", resets=later))
     await accounts.record("acct2", _info(five=0.95, status="allowed_warning", resets=soon))
     paused = await _evaluate()
     assert paused["reason"].startswith(accounts.ACCOUNTS_PAUSE_REASON)
@@ -429,10 +484,11 @@ async def test_pause_ends_early_once_an_account_has_room(db):
     until = (datetime.now(timezone.utc) + timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
     await db.execute(
         "UPDATE agent_budget_state SET paused_at = CURRENT_TIMESTAMP, paused_until = ?, paused_reason = ? WHERE id = 1",
-        (until, accounts.ACCOUNTS_PAUSE_REASON + " (default seven_day)"),
+        (until, accounts.ACCOUNTS_PAUSE_REASON + " (acct1 seven_day)"),
     )
     await db.commit()
-    await accounts.record("default", _info(seven=0.9, status="allowed_warning"))
+    await _add_row("acct1", email="first@example.com")
+    await accounts.record("acct1", _info(seven=0.9, status="allowed_warning"))
     resume = AsyncMock()
     with patch.object(agent_budget, "resume_from_agent_budget", resume):
         await agent_budget.maybe_resume_agent_budget()
@@ -553,10 +609,10 @@ async def test_sign_in_times_out(db, fake_claude, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_same_account_as_the_default_is_refused(db, fake_claude, monkeypatch):
+async def test_same_account_as_another_added_one_is_refused(db, fake_claude, monkeypatch):
+    await _add_row("acct1", email="first@example.com", org_id="org-1")
     monkeypatch.setattr(accounts, "auth_status", AsyncMock(return_value={
-        "logged_in": True, "email": "kurt@example.com", "plan": "max", "org_name": None}))
-    monkeypatch.setattr(accounts, "default_status", AsyncMock(return_value={"email": "kurt@example.com"}))
+        "logged_in": True, "email": "First@example.com", "plan": "max", "org_name": None, "org_id": "org-1"}))
     run_cli = AsyncMock(return_value=(0, "", ""))
     monkeypatch.setattr(accounts, "_run_cli", run_cli)
     flow = await accounts.start_login()
@@ -705,15 +761,17 @@ async def test_accounts_api(db, monkeypatch):
     await _add_row()
     await accounts.record("acct2", _info(five=0.4, seven=0.5))
     monkeypatch.setattr(accounts, "default_status", AsyncMock(return_value={
-        "logged_in": True, "email": "kurt@example.com", "plan": "max", "org_name": None}))
+        "logged_in": True, "email": "kurt@example.com", "plan": "max", "org_name": None, "org_id": "org-cli"}))
     monkeypatch.setattr(accounts, "refresh_status", AsyncMock())
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         data = (await client.get("/claude-code/accounts")).json()
         assert [a["id"] for a in data["accounts"]] == ["default", "acct2"]
         assert data["accounts"][0]["email"] == "kurt@example.com"
+        assert data["accounts"][0]["in_use"] is False and data["accounts"][1]["in_use"] is True
         usage = data["accounts"][1]["usage"]
         assert usage["windows"]["five_hour"]["utilization"] == 0.4 and usage["as_of"]
-        assert data["current"] == "default" and data["login"] is None
+        assert data["current"] == "acct2" and data["login"] is None
+        assert (await client.get("/claude-code/accounts/login")).json() == {"login": None}
         assert (await client.get("/claude-code/accounts/acct2/status")).json() == {"login": None}
         assert (await client.post("/claude-code/accounts/acct2/code", json={"code": "x"})).status_code == 404
         assert (await client.delete("/claude-code/accounts/default")).status_code == 422

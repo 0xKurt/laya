@@ -232,7 +232,7 @@ async def test_slack_allowlist_is_exactly_one_tool(db, found):
     await _connect(db, "slack")
     captured = {}
 
-    async def fake_process(args, timeout):
+    async def fake_process(args, timeout, env=None):
         captured["args"] = args
         return [json.dumps(_turn({"ok": True, "permalink": "https://x.slack.com/p", "ts": "1", "error": ""}))]
 

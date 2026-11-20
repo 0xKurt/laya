@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from laya.claude_code import cli, discover, my_work, store
-from laya.claude_code.discover import Discovery
+from laya.claude_code.discover import Discovery, PlatformDiscovery
 
 
 @pytest.fixture(autouse=True)
@@ -24,9 +24,11 @@ def _no_real_subprocesses():
          patch.object(cli, "read_init", side_effect=_refuse), \
          patch.object(cli, "cli_version", side_effect=_refuse), \
          patch.object(cli, "run_gh", side_effect=_refuse):
-        discover._cache = Discovery(all_tools=[
-            "mcp__linear-server__list_issues", "mcp__linear-server__save_issue",
-        ])
+        discover._cache = Discovery(
+            all_tools=["mcp__linear-server__list_issues", "mcp__linear-server__save_issue"],
+            platforms={"linear": PlatformDiscovery(
+                available=True, tools={"list_issues": "mcp__linear-server__list_issues"})},
+        )
         yield
         discover.reset_cache()
 
@@ -196,10 +198,11 @@ async def test_budget_pause_skips_linear_turn_and_returns_cache(db):
 async def test_errors_are_reported_per_section(db, budget_open):
     await _connect("github")
     await _connect("linear", tools={})
+    discover._cache.platforms["linear"] = PlatformDiscovery(problem="no Linear")
     with patch.object(cli, "run_gh", AsyncMock(side_effect=cli.ClaudeCodeError("gh api graphql failed"))):
         out = await my_work.get_my_work()
     assert out["github"]["error"] == "gh api graphql failed" and out["github"]["prs"] == []
-    assert "list-issues tool" in out["linear"]["error"]
+    assert "No Claude account has Linear connected" in out["linear"]["error"]
 
 
 @pytest.mark.asyncio

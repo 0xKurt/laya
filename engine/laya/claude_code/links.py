@@ -181,24 +181,32 @@ _SCHEMA = {
 }
 
 
-def doc_tools() -> dict[str, str]:
-    """The read tools for linked documents: {notion: fetch tool, google: Drive read tool}."""
+def doc_tools(source: dict[str, Any] | None = None) -> dict[str, str]:
+    """The read tools for linked documents: {notion: fetch tool, google: Drive read tool}.
+
+    A sweep that runs on a Claude account carries that account's tool names
+    (``account_platform_tools``); only those can run in its session.
+    """
     from laya.claude_code import discover
 
     tools: dict[str, str] = {}
-    found = discover.cached()
-    if found is not None:
-        notion = found.platforms.get("notion")
-        gmail = found.platforms.get("gmail")
-        if notion and notion.tools.get("fetch"):
-            tools["notion"] = notion.tools["fetch"]
-        if gmail and gmail.tools.get("drive_read"):
-            tools["google"] = gmail.tools["drive_read"]
+    by_platform = (source or {}).get("account_platform_tools")
+    if by_platform is None:
+        found = discover.cached()
+        by_platform = {p: d.tools for p, d in found.platforms.items()} if found is not None else {}
+    notion = by_platform.get("notion") or {}
+    gmail = by_platform.get("gmail") or {}
+    if notion.get("fetch"):
+        tools["notion"] = notion["fetch"]
+    if gmail.get("drive_read"):
+        tools["google"] = gmail["drive_read"]
     return tools
 
 
-async def _stored_doc_tools() -> dict[str, str]:
-    tools = doc_tools()
+async def _stored_doc_tools(source: dict[str, Any] | None = None) -> dict[str, str]:
+    tools = doc_tools(source)
+    if (source or {}).get("account_platform_tools") is not None:
+        return tools
     if "notion" not in tools:
         notion = await store.get_source("notion")
         if notion and (notion.get("tools") or {}).get("fetch"):
@@ -239,6 +247,7 @@ async def read_documents(
         "links", build_prompt(readable, tools, context), _SCHEMA,
         sorted({tools[link["kind"]] for link in readable}),
         model=config.get("model") or "haiku", deny=source.get("deny_tools") or [], timeout=300,
+        env=source.get("account_env") or None, account_id=source.get("account_id"),
     )
     wanted = {link["key"] for link in readable}
     return {
@@ -278,7 +287,7 @@ async def enrich_event(event: LayaEvent, source: dict[str, Any], *, model_allowe
 
     pending = [link for link in links if link["key"] not in entries]
     if pending and model_allowed:
-        tools = await _stored_doc_tools()
+        tools = await _stored_doc_tools(source)
         try:
             results = await read_documents(pending, body, source, tools)
         except cli.ClaudeCodeError as e:

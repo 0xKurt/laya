@@ -14,10 +14,20 @@ Every minute the loop sweeps each connected, enabled platform that is due:
 - the agent budget is not paused (pipeline/agent_budget.py);
 - the space of the platform's `sources` row is not paused.
 
+A sweep of an MCP platform runs on one Claude account
+(`accounts.pick_for_platform`): an account whose connector check shows the
+platform connected and whose own tool listing has its required tools. With
+no such account the sweep is recorded as failed and the cursor stays where
+it is, so nothing is skipped. The account's environment, tool names and deny
+list travel on `source`, so the collector, the re-check and the linked
+documents all run on it. GitHub uses `gh` and no account.
+
 A sweep collects the events since the cursor (minus a small overlap; event
 ids are stable, so duplicates are dropped), runs the optional enrich step,
 posts them through the same code path as `POST /events`, then re-checks old
 open cards (recheck.py).
+
+The loop also polls each Claude account's usage (`accounts.poll_due_usage`).
 """
 
 from __future__ import annotations
@@ -110,6 +120,21 @@ async def _with_deny_list(source: dict[str, Any]) -> dict[str, Any]:
     return {**source, "deny_tools": list(found.all_tools) if found else []}
 
 
+NO_ACCOUNT_ERROR = "no eligible account"
+
+
+async def _assign_account(platform: str) -> dict[str, Any] | None:
+    """The source fields of the Claude account the platform's sweep runs on, or None."""
+    from laya.claude_code import accounts
+
+    try:
+        assignment = await accounts.pick_for_platform(platform)
+    except Exception as e:
+        log.warning("claude_code_account_pick_failed", platform=platform, error=str(e))
+        return None
+    return assignment.source_fields() if assignment else None
+
+
 async def sweep(platform: str) -> dict[str, Any]:
     """Collect one platform once and post its events. Returns {events, error}."""
     from laya.api.events import receive_event
@@ -123,13 +148,29 @@ async def sweep(platform: str) -> dict[str, Any]:
         if reason:
             return {"events": 0, "error": reason}
 
+        account_fields: dict[str, Any] | None = None
+        if platform != "github":
+            account_fields = await _assign_account(platform)
+            if account_fields is None:
+                # The cursor stays: a later sweep on an eligible account
+                # collects this window.
+                await store.record_run(
+                    platform, started_at=datetime.now(timezone.utc).isoformat(), ok=False,
+                    error=NO_ACCOUNT_ERROR,
+                )
+                log.warning("claude_code_sweep_no_account", platform=platform)
+                return {"events": 0, "error": NO_ACCOUNT_ERROR}
+
         started = datetime.now(timezone.utc)
         config = source["config"]
         if source.get("cursor"):
             since = parse_ts(source["cursor"]) - OVERLAP
         else:
             since = started - timedelta(hours=float(config.get("initial_lookback_hours", 12)))
-        source = await _with_deny_list(source)
+        if account_fields is not None:
+            source = {**source, **account_fields}
+        else:
+            source = await _with_deny_list(source)
         try:
             events = await COLLECTORS[platform](source, since)
             events = await enrich(events, source)
@@ -170,6 +211,8 @@ async def run_due_sweeps(now: datetime | None = None) -> list[str]:
 
 
 async def _loop() -> None:
+    from laya.claude_code import accounts
+
     while True:
         try:
             await run_due_sweeps()
@@ -177,6 +220,12 @@ async def _loop() -> None:
             raise
         except Exception as e:
             log.error("claude_code_loop_error", error=str(e))
+        try:
+            await accounts.poll_due_usage()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("claude_code_usage_poll_error", error=str(e))
         await asyncio.sleep(LOOP_SECONDS)
 
 

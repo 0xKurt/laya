@@ -310,17 +310,23 @@ def merge_issues(out: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 async def fetch_linear(source: dict[str, Any]) -> list[dict[str, Any]]:
-    from laya.claude_code.service import _with_deny_list
+    """The user's open Linear issues, read on a Claude account that has Linear
+    (``accounts.pick_for_platform``) with that account's own tool name."""
+    from laya.claude_code import accounts
 
-    tool = (source.get("tools") or {}).get("list_issues")
-    if not tool:
-        raise cli.ClaudeCodeError("No Linear list-issues tool was discovered.")
-    source = await _with_deny_list(source)
+    assignment = await accounts.pick_for_platform("linear", ("list_issues",))
+    if assignment is None:
+        raise cli.ClaudeCodeError(
+            "No Claude account has Linear connected. Check the connectors in Settings → Claude accounts."
+        )
+    tool = assignment.tools["list_issues"]
     out = await cli.run_collect(
         "linear_my_work", linear_prompt(tool), LINEAR_SCHEMA, [tool],
         model=(source.get("config") or {}).get("model") or "haiku",
         timeout=LINEAR_TIMEOUT,
-        deny=source.get("deny_tools") or [],
+        deny=assignment.all_tools,
+        env=assignment.env or None,
+        account_id=assignment.account_id,
     )
     return merge_issues(out)
 
