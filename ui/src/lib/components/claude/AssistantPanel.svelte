@@ -37,7 +37,7 @@
 
 	const shown = $derived($sidePanel.panel === 'assistant' && $sidePanel.host === 'panel');
 	const agentLabel = $derived(
-		session?.agent_label ?? agents.find((a) => a.id === agentChoice)?.label ?? 'Claude Code'
+		session?.agent_label ?? agents.find((a) => a.id === agentChoice)?.label ?? 'Agent'
 	);
 
 	async function createSession(opts: { resume?: string } = {}): Promise<void> {

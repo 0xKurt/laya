@@ -1,7 +1,7 @@
 <!-- Copyright 2026 Aayush Chawla -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!--
-	One platform collected through the user's Claude Code login
+	One platform collected through the user's coding agent login
 	(docs/claude-code-connector.md): connect / disconnect, status, sync now,
 	pause, and the platform's settings.
 -->
@@ -54,11 +54,11 @@
 	};
 
 	const INTRO: Record<ClaudeCodePlatform, string> = {
-		slack: 'Reads your DMs, mentions and the threads you are in through the Slack connector of your Claude Code login. No Slack app or n8n needed.',
-		gmail: 'Reads your inbox through the Gmail connector of your Claude Code login, including meeting notes. No OAuth client or n8n needed.',
-		linear: 'Reads the issues you are involved in through the Linear connector of your Claude Code login. No API key or n8n needed.',
+		slack: 'Reads your DMs, mentions and the threads you are in through the Slack connector of your coding agent login. No Slack app or n8n needed.',
+		gmail: 'Reads your inbox through the Gmail connector of your coding agent login, including meeting notes. No OAuth client or n8n needed.',
+		linear: 'Reads the issues you are involved in through the Linear connector of your coding agent login. No API key or n8n needed.',
 		github: 'Reads your pull requests, reviews and mentions through the GitHub CLI (gh). No token or n8n needed.',
-		notion: 'Reads pages and comments that involve you through the Notion connector of your Claude Code login. No integration or n8n needed.'
+		notion: 'Reads pages and comments that involve you through the Notion connector of your coding agent login. No integration or n8n needed.'
 	};
 
 	let busy = $state<null | 'connect' | 'disconnect' | 'sync' | 'discover' | 'enable' | 'save'>(null);
@@ -195,7 +195,7 @@
 			class="h-2 w-2 shrink-0 rounded-full"
 			style:background={badge ? STATUS_STYLE[badge.status].dot : 'var(--color-integ-t4)'}
 		></span>
-		<span class="text-integ-name font-semibold text-integ-t1">via Claude Code</span>
+		<span class="text-integ-name font-semibold text-integ-t1">via coding agent</span>
 		{#if badge}
 			<span
 				class="rounded-[5px] px-[7px] py-0.5 text-integ-label font-semibold tracking-[0.02em]"
@@ -231,7 +231,7 @@
 	{#if !connected}
 		<p class="max-w-[520px] text-integ-body leading-[1.6] text-integ-t3 [text-wrap:pretty]">{INTRO[platform]}</p>
 		{#if busy === 'connect'}
-			<p class="text-integ-small text-integ-t4">Reading your {label} identity through Claude Code. This can take a minute.</p>
+			<p class="text-integ-small text-integ-t4">Reading your {label} identity through your coding agent. This can take a minute.</p>
 		{/if}
 	{:else if status && identityLabel(status.identity)}
 		<span class="text-integ-body text-integ-t3">Signed in as <span class="text-integ-t2">{identityLabel(status.identity)}</span></span>
@@ -478,7 +478,7 @@
 
 	{#if !problem}
 		<div class="flex items-center gap-2 text-integ-small text-integ-t4">
-			<span>Added or removed a connector in Claude Code?</span>
+			<span>Added or removed a connector in your coding agent?</span>
 			<button onclick={discover} disabled={busy !== null} class="font-medium text-integ-t3 underline-offset-2 hover:text-integ-t1 hover:underline disabled:opacity-50">
 				{busy === 'discover' ? 'Checking…' : 'Run discovery again'}
 			</button>
@@ -488,9 +488,9 @@
 	{#if confirming}
 		<div class="flex flex-wrap items-center gap-3 rounded-lg bg-[rgb(239_68_68/0.08)] px-3.5 py-3">
 			<div class="flex min-w-[220px] flex-1 flex-col gap-0.5">
-				<span class="text-integ-item font-semibold text-integ-t1">Disconnect {label} via Claude Code?</span>
+				<span class="text-integ-item font-semibold text-integ-t1">Disconnect {label} via coding agent?</span>
 				<span class="text-integ-note leading-normal text-integ-t3">
-					Stops collecting and removes its source and seeded rules. Existing cards stay. Your Claude Code connector is not touched.
+					Stops collecting and removes its source and seeded rules. Existing cards stay. The connector in your coding agent is not touched.
 				</span>
 			</div>
 			<!-- svelte-ignore a11y_autofocus -->

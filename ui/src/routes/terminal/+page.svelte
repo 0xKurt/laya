@@ -36,7 +36,7 @@
 	// one session never has two views (they would fight over the PTY size).
 	const dockedId = $derived($sidePanel.sessionId);
 	const dockedHere = $derived($sidePanel.host === 'view');
-	const agentLabel = (id: string | undefined) => agents.find((a) => a.id === id)?.label ?? 'Claude Code';
+	const agentLabel = (id: string | undefined) => agents.find((a) => a.id === id)?.label ?? 'Agent';
 
 	const active = $derived(sessions.find((s) => s.id === activeId) ?? null);
 	const recentCwds = $derived(
@@ -190,7 +190,7 @@
 							role="tab"
 							aria-selected={s.id === activeId}
 							class="flex min-w-0 items-center gap-1.5 py-1 pl-2.5 pr-1"
-							title={`${s.agent_label ?? 'Claude Code'} · ${s.cwd}\nDouble-click to rename`}
+							title={`${s.agent_label ?? 'Agent'} · ${s.cwd}\nDouble-click to rename`}
 							onclick={() => activate(s.id)}
 							ondblclick={() => beginRename(s)}
 						>
@@ -334,7 +334,7 @@
 						<button
 							type="button"
 							disabled={!c.resumable || starting}
-							title={c.resumable ? `Resume in ${c.cwd}` : 'Claude has no conversation for this session (it was closed before the first message).'}
+							title={c.resumable ? `Resume in ${c.cwd}` : 'The agent has no conversation for this session (it was closed before the first message).'}
 							class="block w-full truncate px-3 py-1.5 text-left text-laya-micro text-surface-300 hover:bg-surface-800 hover:text-surface-100 disabled:cursor-not-allowed disabled:opacity-40"
 							onclick={() => resume(c.id)}
 						>{closedLabel(c)}</button>

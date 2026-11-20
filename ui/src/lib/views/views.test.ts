@@ -89,6 +89,6 @@ describe('panels (Chat)', () => {
 		expect(setVisible(['chat', 'omni'], 'chat', true)).toEqual(['omni']);
 		expect(isPanelHidden(['chat'], 'chat')).toBe(true);
 		expect(isPanelHidden([], 'chat')).toBe(false);
-		expect(PANELS.find((p) => p.id === 'chat')?.hint).toBe('Claude (the terminal) can do everything Chat does and more.');
+		expect(PANELS.find((p) => p.id === 'chat')?.hint).toBe('The Assistant can do everything Chat does and more.');
 	});
 });

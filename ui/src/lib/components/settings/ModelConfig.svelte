@@ -959,7 +959,7 @@
 				</div>
 				<p class="mt-2 text-laya-micro text-surface-500">
 					{#if agentMode}
-						Stages run through an installed CLI agent on its own subscription — no API key or local VRAM. Chat &amp; Coherence run on Claude Code too (with Laya's read-only tools); with other agents they keep using a model provider.
+						Stages run through an installed CLI agent on its own subscription — no API key or local VRAM. Chat &amp; Coherence need an agent that streams (Claude Code, with Laya's read-only tools); with other agents they keep using a model provider.
 					{:else}
 						Use cloud or local-provider models for every stage.
 					{/if}
@@ -1163,9 +1163,9 @@
 										class="mt-1 w-full rounded-md border border-surface-600 bg-surface-700 px-2 py-1.5 text-laya-base text-surface-200" />
 								</label>
 							</div>
-							<p class="mt-2 text-laya-micro text-surface-500">Claude Code warns early about its own limits. A warning pauses ingestion only once that window is this full; a refusal always pauses until the agent's reset.</p>
+							<p class="mt-2 text-laya-micro text-surface-500">Agents warn early about their own limits. A warning pauses ingestion only once that window is this full; a refusal always pauses until the agent's reset.</p>
 						</div>
-						<p class="text-laya-micro text-surface-500">Tip: set the token budget to match your plan’s window (e.g. Claude Code’s 5-hour window). A full token budget pauses ingestion for one window.</p>
+						<p class="text-laya-micro text-surface-500">Tip: set the token budget to match your plan’s window (e.g. a 5-hour window). A full token budget pauses ingestion for one window.</p>
 					{/if}
 				</div>
 			</div>

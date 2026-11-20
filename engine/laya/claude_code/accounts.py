@@ -391,7 +391,7 @@ async def eligible_ids() -> list[str]:
 class NoEligibleAccount(AccountError):
     """Accounts were added, but none of them can be used now."""
 
-    def __init__(self, message: str = "No Claude account Laya can use. Sign in again in Settings → Claude accounts.") -> None:
+    def __init__(self, message: str = "No login Laya can use. Sign in again in Settings → Models → Access.") -> None:
         super().__init__(message, status=409)
 
 
@@ -756,7 +756,7 @@ async def pick_for_platform(platform: str, roles: tuple[str, ...] = ()) -> Assig
 async def account_label(account_id: str) -> str:
     """How an account is named in a message: its email, else what it is."""
     if account_id == DEFAULT_ID:
-        return "the Claude Code login"
+        return "the Claude Code CLI login"
     row = await get_row(account_id)
     return (row or {}).get("email") or f"account {account_id}"
 
@@ -766,8 +766,8 @@ async def platform_unavailable_reason(platform: str, roles: tuple[str, ...] = ()
     label = store.LABELS.get(platform, platform)
     order = await eligible_ids()
     if not order:
-        return (f"No Claude account is eligible to read {label}: every added account is signed out "
-                "or a duplicate. Sign in again in Settings → Claude accounts.")
+        return (f"No login is eligible to read {label}: every added login is signed out "
+                "or a duplicate. Sign in again in Settings → Models → Access.")
     reasons: list[str] = []
     for account_id in order:
         try:
@@ -777,8 +777,8 @@ async def platform_unavailable_reason(platform: str, roles: tuple[str, ...] = ()
         if reason:
             reasons.append(f"{await account_label(account_id)}: {reason}")
     detail = f" ({'; '.join(reasons)})" if reasons else ""
-    return (f"No Claude account has {label} connected{detail}. "
-            "Check the connectors in Settings → Claude accounts.")
+    return (f"No login has {label} connected{detail}. "
+            "Check the connectors in Settings → Models → Access.")
 
 
 _WINDOW_NAMES = {"five_hour": "5-hour", "seven_day": "Weekly"}
@@ -857,7 +857,7 @@ async def native_block(thresholds: dict[str, float]) -> tuple[bool, str | None, 
 
     order = await eligible_ids()
     if not order:
-        return True, None, f"{ACCOUNTS_PAUSE_REASON} (no Claude account can be used; sign in again)"
+        return True, None, f"{ACCOUNTS_PAUSE_REASON} (no login can be used; sign in again)"
     now = time.time()
     recoveries: list[int] = []
     parts: list[str] = []
@@ -1358,7 +1358,7 @@ async def _finish(flow: LoginFlow, code: int, text: str) -> None:
         await _run_cli([get_agent_binary("claude_code"), "auth", "logout"], account_env(row))
         await _end(
             flow, "failed",
-            f"{status['email']} is already one of your Claude accounts. Sign in to the other "
+            f"{status['email']} is already one of your logins. Sign in to the other "
             "account on claude.ai in your browser (or use a private window) and add it again.",
         )
         return
@@ -1674,7 +1674,7 @@ async def overview(refresh: bool = False) -> dict[str, Any]:
         elif not row["logged_in"]:
             problem = "Signed out. Sign in again to use this account."
         elif row["id"] not in eligible:
-            problem = "The same Claude account as another entry; Laya does not use it."
+            problem = "The same account as another entry; Laya does not use it."
         accounts.append({
             "id": row["id"], "default": False, "email": row.get("email"), "plan": row.get("plan"),
             "logged_in": bool(row["logged_in"]), "in_use": row["id"] in eligible,

@@ -251,7 +251,7 @@ async def _linear_context() -> tuple[dict[str, Any], dict[str, str], list[str], 
     assignment = await accounts.pick_for_platform("linear")
     if assignment is None:
         raise ActionError(
-            "No Claude account has Linear connected. Check the connectors in Settings → Claude accounts.", 409
+            "No login has Linear connected. Check the connectors in Settings → Models → Access.", 409
         )
     account = {"env": assignment.env or None, "account_id": assignment.account_id}
     return source, dict(assignment.tools), list(assignment.all_tools), account

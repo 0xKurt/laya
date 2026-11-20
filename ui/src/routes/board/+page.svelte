@@ -442,7 +442,7 @@
 												{#if isAgentSession(card)}
 													<span
 														class="ml-auto flex shrink-0 items-center gap-1 rounded bg-violet-500/15 px-1 text-laya-micro text-violet-300"
-														title={card.status === 'awaiting_input' ? 'Claude session waiting for input' : 'Claude session running'}
+														title={card.status === 'awaiting_input' ? 'Agent session waiting for input' : 'Agent session running'}
 													>
 														<span class="h-1.5 w-1.5 rounded-full bg-violet-400 {card.status === 'agent_running' ? 'animate-pulse' : ''}"></span>
 														{card.status === 'awaiting_input' ? 'input' : 'agent'}

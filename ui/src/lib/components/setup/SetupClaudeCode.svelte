@@ -1,7 +1,7 @@
 <!-- Copyright 2026 Aayush Chawla -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!--
-	Setup wizard, step 3: connect tools through the user's Claude Code login
+	Setup wizard, step 3: connect tools through the user's coding agent login
 	instead of n8n (docs/claude-code-connector.md). Runs discovery, shows
 	each platform with what was found or what is missing, and connects them.
 -->
@@ -96,10 +96,10 @@
 </script>
 
 <div class="space-y-4">
-	<h2 class="text-xl font-semibold">Connect Tools with Claude Code</h2>
+	<h2 class="text-xl font-semibold">Connect tools through your coding agent</h2>
 	<p class="text-sm text-surface-400">
-		Laya reads Slack, Gmail, Linear, GitHub and Notion through the connectors your Claude Code login already
-		has. No Slack app, OAuth client or n8n is needed. Collecting is read-only; Laya sends a reply only when you
+		Laya reads Slack, Gmail, Linear, GitHub and Notion through the connectors your coding agent login already
+		has (Claude Code connectors, or MCP servers added to Codex). No Slack app, OAuth client or n8n is needed. Collecting is read-only; Laya sends a reply only when you
 		click Send on a card.
 	</p>
 
@@ -115,7 +115,7 @@
 			></span>
 			<span class="flex-1 text-sm font-medium">
 				{#if discovering && !status}
-					Looking for Claude Code and its connectors…
+					Looking for coding agents and their connectors…
 				{:else if cliFound}
 					Claude Code {status?.cli.version ?? ''} found
 				{:else}
@@ -131,11 +131,11 @@
 			</button>
 		</div>
 		{#if discovering}
-			<p class="mt-2 text-xs text-surface-400">This asks Claude Code which tools it has and who you are there. It can take a minute.</p>
+			<p class="mt-2 text-xs text-surface-400">This asks your coding agent which tools it has and who you are there. It can take a minute.</p>
 		{/if}
 		{#if status && !cliFound}
 			<p class="mt-2 text-sm text-surface-400">
-				Install Claude Code, run <code class="rounded bg-surface-800 px-1">claude</code> once in a terminal to log in, then check again.
+				Install a coding agent (Claude Code or Codex) and log in to it once in a terminal, then check again.
 			</p>
 		{/if}
 		{#if error}

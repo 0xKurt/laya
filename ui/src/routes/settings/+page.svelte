@@ -69,7 +69,7 @@
 		{ id: 'models',  label: 'Models' },
 		{ id: 'repos',   label: 'Repos' },
 		{ id: 'agent',   label: 'Agent' },
-		{ id: 'claude-accounts', label: 'Claude accounts' },
+		{ id: 'claude-accounts', label: 'Logins' },
 		{ id: 'integrations', label: 'Integrations' },
 		{ id: 'spaces',       label: 'Spaces' },
 		{ id: 'scheduling',   label: 'Features' },

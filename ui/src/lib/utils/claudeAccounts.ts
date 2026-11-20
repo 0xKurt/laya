@@ -1,5 +1,5 @@
 /**
- * Pure helpers for Settings → Claude accounts (`ClaudeAccountsConfig.svelte`).
+ * Pure helpers for the logins in Settings → Models (`ClaudeAccountsConfig.svelte`).
  */
 import type {
 	ClaudeAccount,
@@ -105,7 +105,7 @@ export function loginStateText(login: ClaudeAccountLogin): string {
 		case 'waiting_code':
 			return login.kind === 'connector'
 				? `Waiting for you to finish signing in to ${what} in the browser…`
-				: 'Sign in on the Claude page in your browser with the account you want to add, then paste the code it shows.';
+				: 'Sign in on the page in your browser with the account you want to add, then paste the code it shows.';
 		case 'verifying':
 			return 'Checking the code…';
 		case 'done':
@@ -119,7 +119,7 @@ export function loginStateText(login: ClaudeAccountLogin): string {
 }
 
 export function accountTitle(a: Pick<ClaudeAccount, 'email' | 'default'>): string {
-	return a.email ?? (a.default ? 'Your Claude Code login' : 'New account');
+	return a.email ?? (a.default ? 'The CLI login' : 'New account');
 }
 
 /**

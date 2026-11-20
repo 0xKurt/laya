@@ -55,7 +55,7 @@ describe('claudeCodeState', () => {
 
 describe('claudeCodeProblem', () => {
 	it('explains a missing CLI before anything else', () => {
-		expect(claudeCodeProblem(status(), false)).toMatch(/not installed/);
+		expect(claudeCodeProblem(status(), false)).toMatch(/No coding agent/);
 	});
 	it("passes the engine's reason through, or nothing when available", () => {
 		expect(claudeCodeProblem(status(), true)).toBeNull();
@@ -74,18 +74,18 @@ describe('claudeCodeConnection', () => {
 		expect(c.connection_id).toBe('claude_code:slack');
 		expect(c.status).toBe('connected');
 		expect(c.last_validated_at).toBe('2026-11-19T10:00:00+00:00');
-		expect(platformSummary([c])).toBe('via Claude Code');
+		expect(platformSummary([c])).toBe('via coding agent');
 	});
 	it('shows a failing sweep as an error with its message', () => {
 		const c = claudeCodeConnection('gmail', status({ last_error: 'timeout' }))!;
 		expect(c.status).toBe('error');
 		expect(c.error_message).toBe('timeout');
-		expect(platformSummary([c])).toBe('via Claude Code · Error');
+		expect(platformSummary([c])).toBe('via coding agent · Error');
 	});
 	it('marks a paused source without calling it failing', () => {
 		const c = claudeCodeConnection('linear', status({ enabled: false }))!;
 		expect(c.status).toBe('connected');
-		expect(c.name).toBe('via Claude Code · paused');
+		expect(c.name).toBe('via coding agent · paused');
 	});
 });
 

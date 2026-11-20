@@ -860,9 +860,9 @@
 				onclick={() => (toolsVia = 'claude_code')}
 				class="w-full rounded-md border border-surface-600 bg-surface-800 p-3 text-left transition-colors hover:border-laya-orange"
 			>
-				<div class="text-sm font-medium">Use Claude Code instead</div>
+				<div class="text-sm font-medium">Use your coding agent instead</div>
 				<div class="text-xs text-surface-400">
-					Collect Slack, Gmail, Linear, GitHub and Notion through your Claude Code login. No n8n needed.
+					Collect Slack, Gmail, Linear, GitHub and Notion through the connectors of your coding agent login (Claude Code or Codex). No n8n needed.
 				</div>
 			</button>
 
@@ -876,8 +876,8 @@
 		<div class="space-y-4">
 			<h2 class="text-xl font-semibold">Coding Agent (optional)</h2>
 			<p class="text-sm text-surface-400">
-				The coding agent runs 'Run Agent' tasks on cards. Laya's collecting, the Claude view, the assistant and
-				Claude accounts always use Claude Code.
+				The coding agent runs 'Run Agent' tasks on cards and is the assistant's default. Which logins Laya's
+				own processing runs on is set in the Model access step and in Settings → Models.
 			</p>
 
 			<div class="space-y-2">
@@ -900,7 +900,7 @@
 			<label class="flex cursor-pointer items-start gap-3 rounded-md border border-surface-600 p-3">
 				<input type="checkbox" class="mt-0.5 accent-laya-orange" bind:checked={useClaudeSubscription} />
 				<div>
-					<div class="text-sm font-medium">Also run Laya's models on your Claude subscription</div>
+					<div class="text-sm font-medium">Also run Laya's models on your coding agent subscription</div>
 					<div class="text-xs text-surface-400">
 						Router and Omni use Haiku; the Stager, chat and Coherence use Sonnet, through Claude Code.
 						No API key needed for them.

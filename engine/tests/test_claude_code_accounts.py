@@ -619,7 +619,7 @@ async def test_same_account_as_another_added_one_is_refused(db, fake_claude, mon
     await _until(lambda: accounts._flow.state == "waiting_code")
     await accounts.submit_code(flow["account_id"], GOOD)
     await _until(lambda: accounts._flow.state == "failed")
-    assert "already one of your Claude accounts" in accounts._flow.error
+    assert "already one of your logins" in accounts._flow.error
     assert run_cli.await_args.args[0][1:] == ["auth", "logout"]
     assert await accounts.get_row(flow["account_id"]) is None
 

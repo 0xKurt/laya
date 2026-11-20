@@ -52,10 +52,10 @@ export function claudeCodeProblem(
 	s: ClaudeCodePlatformStatus | null | undefined,
 	cliFound: boolean
 ): string | null {
-	if (!cliFound) return 'Claude Code is not installed or not on the PATH. Install it and log in by running `claude` once.';
+	if (!cliFound) return 'No coding agent with connectors was found. Install Claude Code or Codex and log in once.';
 	if (!s) return null;
 	if (s.available) return null;
-	return s.problem || 'Not available in your Claude Code session.';
+	return s.problem || 'Not available through your coding agent logins.';
 }
 
 /**
@@ -73,7 +73,7 @@ export function claudeCodeConnection(
 	return {
 		connection_id: `${CLAUDE_CODE_PREFIX}${platform}`,
 		platform,
-		name: state === 'paused' ? 'via Claude Code · paused' : 'via Claude Code',
+		name: state === 'paused' ? 'via coding agent · paused' : 'via coding agent',
 		status: failing ? 'error' : 'connected',
 		capabilities: [],
 		error_message: failing ? (s.last_error ?? s.problem ?? undefined) : undefined,

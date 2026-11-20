@@ -169,7 +169,7 @@
 		<div class="px-4 py-10 text-center">
 			<p class="text-laya-secondary text-surface-300">{label} is not connected.</p>
 			<p class="mt-1 text-laya-micro text-surface-500">
-				Connect {label} via Claude Code in <a href="/settings" class="text-laya-orange/90 hover:underline">Settings → Integrations</a>.
+				Connect {label} via coding agent in <a href="/settings" class="text-laya-orange/90 hover:underline">Settings → Integrations</a>.
 			</p>
 		</div>
 	{:else}
@@ -257,7 +257,7 @@
 						'Linear',
 						issueFilter === 'created' ? 'No open issues created by you.' : 'No open issues. Nice.',
 						shownIssues.length,
-						'Reading Linear through Claude Code; this can take a minute.'
+						'Reading Linear through your coding agent; this can take a minute.'
 					)}
 					{#each issueGroups as group (group.id)}
 						<h3 class="sticky top-0 z-10 flex items-baseline gap-2 bg-surface-900/95 px-4 pb-1 pt-3 text-laya-micro font-semibold uppercase tracking-wide text-surface-500 backdrop-blur">

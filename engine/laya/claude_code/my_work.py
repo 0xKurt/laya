@@ -423,7 +423,7 @@ def describe_error(section: str, e: BaseException) -> str:
                 "showing the last fetched data. Laya tries again at the next refresh.")
     text = str(e)[:300] or type(e).__name__
     if section == "linear" and accounts.is_rejection(None, text) and "limit reached" not in text.lower():
-        return f"Usage limit reached on the Claude account: {text}"
+        return f"Usage limit reached on the login: {text}"
     return text
 
 

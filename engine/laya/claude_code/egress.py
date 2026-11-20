@@ -415,8 +415,8 @@ class ClaudeCodeBackend(EgressBackend):
         assignment = await accounts.pick_for_platform(platform, (SEND_ROLES[platform],))
         if assignment is None:
             return EgressResult(success=False, error=(
-                f"No Claude account has {label} with its send tool connected. "
-                "Check the connectors in Settings → Claude accounts."))
+                f"No login has {label} with its send tool connected. "
+                "Check the connectors in Settings → Models → Access."))
         tool = send_tool(platform, assignment.tools)
         if tool is None:
             return EgressResult(success=False, error=f"Claude Code has no {label} send tool")

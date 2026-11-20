@@ -87,7 +87,7 @@ describe('login helpers', () => {
 		expect(planLabel('max')).toBe('Max');
 		expect(planLabel('custom')).toBe('Custom');
 		expect(planLabel(null)).toBeNull();
-		expect(accountTitle({ email: null, default: true })).toBe('Your Claude Code login');
+		expect(accountTitle({ email: null, default: true })).toBe('The CLI login');
 		expect(accountTitle({ email: 'a@b.c', default: false })).toBe('a@b.c');
 	});
 });

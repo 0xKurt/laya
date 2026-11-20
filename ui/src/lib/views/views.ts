@@ -21,7 +21,7 @@ export interface PanelItem {
 
 /** Hiding a panel removes its titlebar button and keyboard shortcut; nothing is deleted. */
 export const PANELS: readonly PanelItem[] = [
-	{ id: 'chat', label: 'Chat', hint: 'Claude (the terminal) can do everything Chat does and more.' }
+	{ id: 'chat', label: 'Chat', hint: 'The Assistant can do everything Chat does and more.' }
 ];
 
 export interface ViewItem {

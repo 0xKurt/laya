@@ -1,7 +1,7 @@
 <!-- Copyright 2026 Aayush Chawla -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!--
-	Settings → Claude accounts: the user's Claude subscriptions Laya spreads
+	Settings → logins: the user's coding agent subscriptions Laya spreads
 	its processing over (engine/laya/claude_code/accounts.py). Lists each
 	account with plan, usage windows and connectors; adds an account through
 	the CLI's own sign-in (open the page, paste the code); removes one.
@@ -245,7 +245,7 @@
 			</div>
 			{#if l.kind === 'account'}
 				<p class="text-laya-secondary text-surface-400">
-					The page signs in with the Claude account your browser is logged in to. To add another account, log in
+					The page signs in with the account your browser is logged in to. To add another account, log in
 					to it on claude.ai first or open the link in a private window.
 				</p>
 			{:else}
@@ -311,7 +311,7 @@
 	<div class="{sectionClass} p-6 {account.default && !account.in_use ? 'opacity-80' : ''}">
 		{#if account.default}
 			<div class="mb-1 text-laya-micro uppercase tracking-wider text-surface-400">
-				Claude Code login (used only while no account is added)
+				Claude Code · CLI login (used only while no login is added)
 			</div>
 		{/if}
 		<div class="flex flex-wrap items-center gap-2">
@@ -435,7 +435,7 @@
 					</div>
 					{#if CONNECTOR_ORDER.some((k) => account.connectors?.connectors[k]?.kind === 'claude_ai' && account.connectors?.connectors[k]?.state !== 'connected')}
 						<p class="mt-2 text-laya-micro text-surface-500">
-							"Connect" opens claude.ai connector settings for whichever Claude account your browser is logged in to.
+							"Connect" opens claude.ai connector settings for whichever account your browser is logged in to.
 						</p>
 					{/if}
 				{:else}
@@ -450,7 +450,7 @@
 	<div class="{sectionClass} p-6">
 		<div class="flex items-start justify-between gap-4">
 			<div>
-				<h3 class="mb-1 text-laya-heading font-semibold text-surface-50">Claude accounts</h3>
+				<h3 class="mb-1 text-laya-heading font-semibold text-surface-50">Logins</h3>
 				<p class="text-laya-base text-surface-400">
 					Laya runs on the accounts you add here, independently of the account the Claude Code CLI is logged in to.
 					It moves to the account with most headroom when one nears its limits. Collecting, My work and actions on a

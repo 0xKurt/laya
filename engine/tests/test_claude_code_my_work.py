@@ -290,8 +290,8 @@ async def test_errors_are_stored_per_section_with_the_reason(db, budget_open):
         await _settle()
         out = await my_work.get_my_work()
     assert out["github"]["error"] == "gh api graphql failed" and out["github"]["prs"] == []
-    assert "No Claude account has Linear connected" in out["linear"]["error"]
-    assert "the Claude Code login: no Linear" in out["linear"]["error"]
+    assert "No login has Linear connected" in out["linear"]["error"]
+    assert "the Claude Code CLI login: no Linear" in out["linear"]["error"]
 
 
 @pytest.mark.asyncio
@@ -306,7 +306,7 @@ async def test_weekly_limit_skips_the_turn_with_a_reason(db, budget_open):
         await _settle()
         out = await my_work.get_my_work()
     collect.assert_not_awaited()
-    assert out["linear"]["error"] == "Weekly limit reached on the Claude Code login; resets Nov 24, 9am."
+    assert out["linear"]["error"] == "Weekly limit reached on the Claude Code CLI login; resets Nov 24, 9am."
 
 
 @pytest.mark.asyncio
