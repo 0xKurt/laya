@@ -1,0 +1,10 @@
+{"id": 1, "result": {"data": [
+  {"name": "linear-server", "authStatus": "oAuth", "runtimeStatus": null, "resources": [], "resourceTemplates": [],
+   "tools": {"get_notifications": {"name": "get_notifications", "inputSchema": {}}, "list_issues": {"name": "list_issues", "inputSchema": {}},
+             "get_issue": {"name": "get_issue", "inputSchema": {}}, "list_comments": {"name": "list_comments", "inputSchema": {}},
+             "save_issue": {"name": "save_issue", "inputSchema": {}}}},
+  {"name": "notion", "authStatus": "notLoggedIn", "runtimeStatus": null, "resources": [], "resourceTemplates": [], "tools": {}},
+  {"name": "github", "authStatus": "unsupported", "runtimeStatus": null, "resources": [], "resourceTemplates": [],
+   "tools": {"create_issue": {"name": "create_issue", "inputSchema": {}}}},
+  {"name": "justrunmy.app", "authStatus": "unsupported", "runtimeStatus": null, "resources": [], "resourceTemplates": [], "tools": {}}
+], "nextCursor": null}}

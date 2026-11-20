@@ -54,7 +54,7 @@ def test_codex_exec_args_are_lean_and_noninteractive(tmp_path):
     # exec never asks for approval; the interactive-only flag must not be passed.
     assert "--ask-for-approval" not in args
     assert args[args.index("--sandbox") + 1] == "read-only"
-    for flag in ("--json", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config"):
+    for flag in ("--json", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "apps"):
         assert flag in args
     assert args[args.index("--model") + 1] == "gpt-5.4"
     schema_file = Path(args[args.index("--output-schema") + 1])

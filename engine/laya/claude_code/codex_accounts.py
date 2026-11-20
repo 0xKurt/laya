@@ -810,8 +810,180 @@ async def overview_entries() -> list[dict[str, Any]]:
             "email": row.get("email"), "plan": row.get("plan"),
             "logged_in": bool(row["logged_in"]), "in_use": row["id"] in eligible,
             "current": current == row["id"],
-            "pending": pending, "problem": problem,
+            "pending": pending, "problem": problem, "home": row["config_dir"],
             "usage": await _usage(row["id"]),
             "connectors": await accounts.stored_connectors(row["id"]),
         })
     return out
+
+
+# ── MCP inventory and connector jobs ─────────────────────────────────────
+#
+# Collecting, My work and re-checks may run on a Codex login whose MCP servers
+# (configured in its CODEX_HOME with `codex mcp add`) give the platform's
+# required read tools. The inventory comes from `mcpServerStatus/list` (no
+# model call). A turn exposes only the tools it needs: every other server is
+# switched off (`-c mcp_servers.<name>.enabled=false`) and the needed server
+# lists its allowed tools (`enabled_tools`), and ChatGPT apps are off
+# (`--disable apps`). Codex's `-c` keys cannot address a server whose name
+# contains a dot, so a login with such a server is not used for connector
+# jobs. Sending and write actions stay on Claude Code (see accounts.py).
+
+LISTING_CACHE_SECONDS = 3600.0
+_STATUS_BY_AUTH = {"notLoggedIn": "needs-auth"}
+
+
+def _server_status(server: dict[str, Any]) -> str:
+    if server.get("tools"):
+        return "connected"
+    return _STATUS_BY_AUTH.get(str(server.get("authStatus")), "failed")
+
+
+class Listing:
+    """One Codex login's MCP inventory: tool names in the ``mcp__<server>__<tool>``
+    form discovery maps, the platforms mapped onto them, and the real server names."""
+
+    def __init__(self, data: list[dict[str, Any]]) -> None:
+        from laya.claude_code import discover
+
+        self.servers: dict[str, str] = {}
+        self.statuses: list[dict[str, str]] = []
+        self.all_tools: list[str] = []
+        for s in data:
+            if not isinstance(s, dict) or not s.get("name"):
+                continue
+            name = str(s["name"])
+            norm = discover.normalize_server_name(name)
+            self.servers[norm] = name
+            self.statuses.append({"name": name, "status": _server_status(s)})
+            self.all_tools += [f"mcp__{norm}__{t}" for t in (s.get("tools") or {})]
+        found = discover.map_tools(self.all_tools, self.statuses)
+        self.platforms = {p: d for p, d in found.items() if p in discover.ROLES}
+        for p, d in self.platforms.items():
+            if not d.available:
+                d.problem = _codex_problem(p, d, self.statuses)
+        self.at = time.monotonic()
+
+    def unswitchable(self, needed: set[str]) -> list[str]:
+        """Servers a turn would have to switch off but cannot (a dot in the name)."""
+        return sorted(name for norm, name in self.servers.items() if norm not in needed and "." in name)
+
+    def restrict_args(self, tools: list[str]) -> list[str]:
+        """``-c`` overrides that leave exactly ``tools`` visible in a turn."""
+        from laya.claude_code import discover
+
+        allowed: dict[str, list[str]] = {}
+        for tool in tools:
+            parts = discover.split_tool(tool)
+            if parts and parts[0] in self.servers:
+                allowed.setdefault(parts[0], []).append(parts[1])
+        args = ["--disable", "apps"]
+        for norm, name in sorted(self.servers.items()):
+            if norm in allowed:
+                args += ["-c", f"mcp_servers.{name}.enabled_tools={json.dumps(sorted(set(allowed[norm])))}"]
+            elif "." not in name:
+                args += ["-c", f"mcp_servers.{name}.enabled=false"]
+        return args
+
+
+def _codex_problem(platform: str, d: Any, statuses: list[dict[str, str]]) -> str:
+    from laya.claude_code.discover import _SERVER_HINTS, LABELS
+
+    label = LABELS[platform]
+    hint = _SERVER_HINTS[platform]
+    for s in statuses:
+        if hint in s["name"].lower() and s["status"] != "connected":
+            return (f"The {label} MCP server '{s['name']}' in Codex is not signed in. "
+                    f"Run `codex mcp login {s['name']}` for this login.")
+    return f"Codex has no {label} MCP server. Add one with `codex mcp add` for this login."
+
+
+_listings: dict[str, Listing] = {}
+
+
+async def listing(login_id: str, force: bool = False) -> Listing:
+    """The login's MCP inventory, cached for ``LISTING_CACHE_SECONDS``."""
+    cached = _listings.get(login_id)
+    if not force and cached is not None and time.monotonic() - cached.at < LISTING_CACHE_SECONDS:
+        return cached
+    env = await env_for(login_id)
+    (resp,) = await app_server(
+        [("mcpServerStatus/list", {"detail": "toolsAndAuthOnly", "limit": 200})], env,
+        timeout=180, args=["--disable", "apps"],
+    )
+    result = resp.get("result") if isinstance(resp, dict) else None
+    if not isinstance(result, dict):
+        raise AppServerError(str((resp or {}).get("error") or "no MCP inventory"))
+    found = Listing(result.get("data") or [])
+    _listings[login_id] = found
+    return found
+
+
+def cached_listing(login_id: str) -> Listing | None:
+    return _listings.get(login_id)
+
+
+async def platform_assignment(
+    login_id: str, platform: str, roles: tuple[str, ...] = (), force: bool = False,
+) -> tuple[Any, str | None]:
+    """(the assignment, None) when the Codex login can run ``platform``'s read
+    turns, else (None, reason)."""
+    from laya.claude_code.accounts import Assignment
+
+    try:
+        found = await listing(login_id, force=force)
+    except AppServerError as e:
+        return None, f"Codex did not list its MCP servers: {e}"
+    pd = found.platforms.get(platform)
+    if pd is None or not pd.available:
+        return None, (pd.problem if pd else None) or f"{platform} has no tools on this login"
+    missing = [r for r in roles if not pd.tools.get(r)]
+    if missing:
+        return None, f"{platform} lacks {', '.join(missing)} on this login"
+    blocked = found.unswitchable({pd.server} if pd.server else set())
+    if blocked:
+        return None, (f"Codex cannot switch off the MCP server(s) {', '.join(blocked)} for a read-only "
+                      "turn (a dot in the name); rename them to use this login for connector jobs")
+    return Assignment(
+        account_id=login_id, env=await env_for(login_id), tools=dict(pd.tools),
+        all_tools=list(found.all_tools),
+        platform_tools={p: dict(d.tools) for p, d in found.platforms.items() if d.available},
+        agent_id=AGENT_ID,
+    ), None
+
+
+async def check_connectors(login_id: str) -> dict[str, Any]:
+    """List the login's MCP servers (no model call) and store the connector matrix."""
+    from laya.claude_code import accounts, store
+
+    try:
+        found = await listing(login_id, force=True)
+        error = None
+    except AppServerError as e:
+        found, error = None, str(e)[:300]
+    connectors: dict[str, dict[str, Any]] = {}
+    github = await accounts._github_status()
+    for key, label, platform, hint in accounts.CONNECTORS:
+        if key == "github":
+            ok = bool(github and github.get("available"))
+            connectors[key] = {"label": label, "kind": "gh", "state": "connected" if ok else "missing",
+                               "server": None, "detail": github.get("login") or github.get("problem"),
+                               "can_add": False}
+            continue
+        state, server = "missing", None
+        if found is not None:
+            pd = found.platforms.get(platform) if platform else None
+            if pd is not None and pd.available:
+                state, server = "connected", found.servers.get(pd.server or "", pd.server)
+            elif key == "drive" and any("drive" in t.lower() for t in found.all_tools):
+                state = "connected"
+            else:
+                s = next((s for s in found.statuses if hint in s["name"].lower()), None)
+                if s:
+                    server = s["name"]
+                    state = {"needs-auth": "needs_login"}.get(s["status"], s["status"])
+        connectors[key] = {"label": label, "kind": "mcp", "state": state, "server": server,
+                           "detail": None, "can_add": False}
+    matrix = {"connectors": connectors, "checked_at": store.now_iso(), "error": error}
+    await store.set_state("accounts", f"connectors:{login_id}", json.dumps(matrix))
+    return matrix

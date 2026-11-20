@@ -248,6 +248,7 @@ async def read_documents(
         sorted({tools[link["kind"]] for link in readable}),
         model=config.get("model") or "haiku", deny=source.get("deny_tools") or [], timeout=300,
         env=source.get("account_env") or None, account_id=source.get("account_id"),
+        agent_id=source.get("agent_id"),
     )
     wanted = {link["key"] for link in readable}
     return {

@@ -2073,6 +2073,8 @@ export interface ClaudeAccount {
 	agent_id?: string;
 	/** Whether this login of its agent is the one processing uses now. */
 	current?: boolean;
+	/** A Codex login's own Codex home (CODEX_HOME). */
+	home?: string;
 	/** The Claude Code CLI's own login; Laya uses it only while no account is added. */
 	default: boolean;
 	email: string | null;

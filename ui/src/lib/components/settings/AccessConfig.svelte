@@ -409,7 +409,7 @@
 			<div class="mt-2 text-laya-micro text-surface-500">Usage {asOf(account.usage.as_of)}</div>
 		{/if}
 
-		{#if !account.pending && agentOf(account) === 'claude_code'}
+		{#if !account.pending}
 			<div class="mt-5">
 				<div class="mb-2 flex items-center justify-between">
 					<span class="text-laya-micro uppercase tracking-wider text-surface-400">Connectors</span>
@@ -430,7 +430,7 @@
 						{#each CONNECTOR_ORDER as key (key)}
 							{@const c = account.connectors.connectors[key]}
 							{#if c}
-								{@const action = connectorAction(c, account.default)}
+								{@const action = agentOf(account) === 'claude_code' ? connectorAction(c, account.default) : null}
 								<div class="flex items-center justify-between gap-2 rounded-lg border border-surface-700 bg-surface-900 px-3 py-2">
 									<div class="min-w-0">
 										<div class="text-laya-secondary font-medium text-surface-100">{c.label}</div>
@@ -460,7 +460,14 @@
 						</p>
 					{/if}
 				{:else}
-					<p class="text-laya-secondary text-surface-500">Not checked yet. Re-check lists this account's connectors.</p>
+					<p class="text-laya-secondary text-surface-500">Not checked yet. Re-check lists this login's connectors.</p>
+				{/if}
+				{#if agentOf(account) === 'codex_cli'}
+					<p class="mt-2 text-laya-micro text-surface-500">
+						Codex reads platforms through the MCP servers of this login (add them with
+						<code>{account.home ? `CODEX_HOME=${account.home} ` : ''}codex mcp add …</code> and <code>codex mcp login</code>). Collecting, My work and re-checks can run here; sending and
+						actions run on Claude Code.
+					</p>
 				{/if}
 			</div>
 		{/if}

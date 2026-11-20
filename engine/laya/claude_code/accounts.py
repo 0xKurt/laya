@@ -698,16 +698,19 @@ class Assignment:
     all_tools: list[str]
     # role -> tool name of every platform available on this account
     platform_tools: dict[str, dict[str, str]] = field(default_factory=dict)
+    # The coding agent of the login (claude_code, or codex_cli for read turns).
+    agent_id: str = AGENT_ID
 
     def source_fields(self) -> dict[str, Any]:
         """What a collector's ``source`` carries so every turn of the sweep
-        (collector, re-check, linked documents) runs on this account."""
+        (collector, re-check, linked documents) runs on this login."""
         return {
             "tools": dict(self.tools),
             "deny_tools": list(self.all_tools),
             "account_id": self.account_id,
             "account_env": dict(self.env),
             "account_platform_tools": {p: dict(t) for p, t in self.platform_tools.items()},
+            "agent_id": self.agent_id,
         }
 
 
@@ -722,6 +725,10 @@ async def platform_assignment(
     """
     from laya.claude_code import discover
 
+    if await agent_of(account_id) == "codex_cli":
+        from laya.claude_code import codex_accounts
+
+        return await codex_accounts.platform_assignment(account_id, platform, roles, force=force)
     if account_id != DEFAULT_ID:
         matrix = await stored_connectors(account_id)
         state = (((matrix or {}).get("connectors") or {}).get(platform) or {}).get("state")
@@ -741,65 +748,99 @@ async def platform_assignment(
     ), None
 
 
-async def pick_for_platform(platform: str, roles: tuple[str, ...] = ()) -> Assignment | None:
-    """The account a collector, My work, action or send turn of ``platform`` runs on.
+# Agents whose logins may run a platform's read turns (collecting, My work,
+# re-checks, linked documents). Sending and write actions pass ``READ_WRITE_AGENTS``:
+# only Claude Code's per-tool deny (--allowedTools / --disallowedTools) has been
+# verified end to end for a turn that changes something.
+READ_AGENTS = ("claude_code", "codex_cli")
+READ_WRITE_AGENTS = ("claude_code",)
 
-    Only accounts that pass :func:`platform_assignment`. Among them the
-    account inference routing uses now when it has room, else the one with
+
+async def _platform_candidates(agents: tuple[str, ...]) -> list[tuple[str, str]]:
+    """(agent, login) pairs in preference order: Claude Code logins, then Codex logins."""
+    pairs: list[tuple[str, str]] = [(AGENT_ID, a) for a in await eligible_ids()] if AGENT_ID in agents else []
+    if "codex_cli" in agents:
+        from laya.claude_code import codex_accounts
+        from laya.config import detect_agent_paths
+
+        if detect_agent_paths().get("codex_cli"):
+            pairs += [("codex_cli", a) for a in await codex_accounts.eligible_ids()]
+    return pairs
+
+
+async def _windows_any(agent_id: str, login_id: str, now: float) -> dict[str, dict]:
+    mod = login_module(agent_id)
+    return await mod.windows_of(login_id, now)
+
+
+async def pick_for_platform(
+    platform: str, roles: tuple[str, ...] = (), agents: tuple[str, ...] = READ_AGENTS,
+) -> Assignment | None:
+    """The login a collector, My work, action or send turn of ``platform`` runs on.
+
+    Only logins of ``agents`` that pass :func:`platform_assignment`. Among them
+    the Claude account inference uses now when it has room, else the one with
     most headroom that is under its thresholds, else the first. None when no
-    account can run the platform. Never fails over: a turn that changes
+    login can run the platform. Never fails over: a turn that changes
     something must not run twice.
     """
-    order = await eligible_ids()
+    pairs = await _platform_candidates(agents)
     ready: dict[str, Assignment] = {}
-    for account_id in order:
+    for agent_id, login_id in pairs:
         try:
-            assignment, reason = await platform_assignment(account_id, platform, roles)
+            assignment, reason = await platform_assignment(login_id, platform, roles)
         except Exception as e:
             assignment, reason = None, str(e)
         if assignment is not None:
-            ready[account_id] = assignment
+            ready[login_id] = assignment
         else:
-            log.debug("claude_account_not_eligible", account=account_id, platform=platform, reason=reason)
+            log.debug("login_not_eligible", agent=agent_id, login=login_id, platform=platform, reason=reason)
     if not ready:
         return None
-    candidates = [a for a in order if a in ready]
+    candidates = [(a, lid) for a, lid in pairs if lid in ready]
     if len(candidates) == 1:
-        return ready[candidates[0]]
+        return ready[candidates[0][1]]
     now = time.time()
     thresholds = _thresholds()
-    windows = {a: await windows_of(a, now) for a in candidates}
-    free = [a for a in candidates if not account_over(windows[a], thresholds)]
+    windows = {lid: await _windows_any(a, lid, now) for a, lid in candidates}
+    ids = [lid for _, lid in candidates]
+    free = [lid for lid in ids if not account_over(windows[lid], thresholds)]
     if _route.current in free:
         return ready[_route.current]
     if free:
-        return ready[max(free, key=lambda a: (headroom(windows[a], thresholds), -candidates.index(a)))]
-    return ready[candidates[0]]
+        return ready[max(free, key=lambda a: (headroom(windows[a], thresholds), -ids.index(a)))]
+    return ready[ids[0]]
 
 
 async def account_label(account_id: str) -> str:
-    """How an account is named in a message: its email, else what it is."""
+    """How a login is named in a message: its email, else what it is."""
     if account_id == DEFAULT_ID:
         return "the Claude Code CLI login"
+    if await agent_of(account_id) == "codex_cli":
+        from laya.claude_code import codex_accounts
+
+        return await codex_accounts.label(account_id)
     row = await get_row(account_id)
     return (row or {}).get("email") or f"account {account_id}"
 
 
-async def platform_unavailable_reason(platform: str, roles: tuple[str, ...] = ()) -> str:
-    """Why :func:`pick_for_platform` found no account for ``platform``, per account."""
+async def platform_unavailable_reason(
+    platform: str, roles: tuple[str, ...] = (), agents: tuple[str, ...] = READ_AGENTS,
+) -> str:
+    """Why :func:`pick_for_platform` found no login for ``platform``, per login."""
     label = store.LABELS.get(platform, platform)
-    order = await eligible_ids()
-    if not order:
+    pairs = await _platform_candidates(agents)
+    if not pairs:
         return (f"No login is eligible to read {label}: every added login is signed out "
                 "or a duplicate. Sign in again in Settings → Models → Access.")
     reasons: list[str] = []
-    for account_id in order:
+    for _agent, login_id in pairs:
         try:
-            _, reason = await platform_assignment(account_id, platform, roles)
+            _, reason = await platform_assignment(login_id, platform, roles)
         except Exception as e:
             reason = str(e)
         if reason:
-            reasons.append(f"{await account_label(account_id)}: {reason}")
+            reasons.append(f"{await account_label(login_id)}: {reason}")
     detail = f" ({'; '.join(reasons)})" if reasons else ""
     return (f"No login has {label} connected{detail}. "
             "Check the connectors in Settings → Models → Access.")
@@ -812,7 +853,8 @@ async def limit_reached(account_id: str) -> str | None:
     """A readable reason when one of the account's usage windows is used up
     (rejected, or at 100 %), else None. Never raises."""
     try:
-        windows = await windows_of(account_id)
+        mod = login_module(await agent_of(account_id) or AGENT_ID)
+        windows = await mod.windows_of(account_id)
     except Exception as e:  # unknown usage never blocks a turn
         log.debug("claude_account_windows_failed", account=account_id, error=str(e))
         return None

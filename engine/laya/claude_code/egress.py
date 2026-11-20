@@ -412,7 +412,9 @@ class ClaudeCodeBackend(EgressBackend):
         source = await store.get_source(platform)
         # The send runs on a Claude account that has the platform and its send
         # tool, with that account's own tool names; it is never failed over.
-        assignment = await accounts.pick_for_platform(platform, (SEND_ROLES[platform],))
+        assignment = await accounts.pick_for_platform(
+            platform, (SEND_ROLES[platform],), agents=accounts.READ_WRITE_AGENTS,
+        )
         if assignment is None:
             return EgressResult(success=False, error=(
                 f"No login has {label} with its send tool connected. "

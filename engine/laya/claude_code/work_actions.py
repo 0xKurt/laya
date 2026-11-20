@@ -248,7 +248,7 @@ async def _linear_context() -> tuple[dict[str, Any], dict[str, str], list[str], 
     source = await store.get_source("linear")
     if source is None:
         raise ActionError("Linear is not connected through Claude Code.", 404)
-    assignment = await accounts.pick_for_platform("linear")
+    assignment = await accounts.pick_for_platform("linear", agents=accounts.READ_WRITE_AGENTS)
     if assignment is None:
         raise ActionError(
             "No login has Linear connected. Check the connectors in Settings → Models → Access.", 409

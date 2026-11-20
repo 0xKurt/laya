@@ -654,10 +654,11 @@ def _build_args(
         # --ephemeral keeps the call out of the user's session history, and
         # --ignore-user-config skips $CODEX_HOME/config.toml (the user's MCP servers,
         # profiles and instructions) while keeping the login — the analogue of
-        # Claude Code's --safe-mode above.
+        # Claude Code's --safe-mode above; --disable apps also leaves out the ChatGPT
+        # apps (connectors) server Codex adds on its own.
         prompt = f"{system_text}\n\n{user_prompt}" if system_text else user_prompt
         args = [binary, "exec", "--json", "--sandbox", "read-only",
-                "--skip-git-repo-check", "--ephemeral", "--ignore-user-config"]
+                "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--disable", "apps"]
         if model_string:
             args += ["--model", model_string]
         if native and response_schema:

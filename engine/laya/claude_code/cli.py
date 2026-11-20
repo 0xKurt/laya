@@ -212,19 +212,98 @@ async def run_collect(
     deny: list[str] | None = None,
     env: dict[str, str] | None = None,
     account_id: str | None = None,
+    agent_id: str | None = None,
 ) -> dict[str, Any]:
     """One read-only collector turn; returns the schema-validated structured output.
 
-    ``env`` / ``account_id``: the Claude account the turn runs on (none = the
-    CLI's own login)."""
+    ``env`` / ``account_id``: the login the turn runs on (none = the Claude Code
+    CLI's own login); ``agent_id`` its coding agent (``codex_cli`` runs the turn
+    with ``codex exec``, see :func:`_run_codex_collect`)."""
     if not tools:
         raise ClaudeCodeError(f"no read tools discovered for {platform}")
+    if agent_id == "codex_cli":
+        return await _run_codex_collect(
+            f"claude_code_{platform}", prompt, schema, tools, timeout=timeout, env=env, login_id=account_id,
+        )
     data = await _run_turn(
         f"claude_code_{platform}", prompt,
         tools=tools, model=model, schema=schema, timeout=timeout, deny=deny,
         env=env, account_id=account_id,
     )
     return data["structured_output"]
+
+
+_CODEX_TOOL_NOTE = (
+    "\n\nTool names above are written as mcp__<server>__<tool>; call the tool <tool> of "
+    "MCP server <server>. Only those tools are available."
+)
+
+
+async def _run_codex_collect(
+    step: str,
+    prompt: str,
+    schema: dict,
+    tools: list[str],
+    *,
+    timeout: float,
+    env: dict[str, str] | None,
+    login_id: str | None,
+) -> dict[str, Any]:
+    """One read-only turn on a Codex login: ``codex exec`` with only ``tools``
+    visible (every other MCP server off, ``enabled_tools`` on the needed one,
+    ChatGPT apps off), the schema as ``--output-schema`` in strict form (else as
+    a prompt instruction). Usage-limit errors are recorded for the login."""
+    from laya.claude_code import codex_accounts
+    from laya.llm import agent_backend as ab
+    from laya.llm.client import log_to_audit
+
+    login_id = login_id or codex_accounts.DEFAULT_ID
+    found = codex_accounts.cached_listing(login_id) or await codex_accounts.listing(login_id)
+    strict = ab.strict_schema(schema)
+    text = prompt + _CODEX_TOOL_NOTE
+    if strict is None:
+        text += ab._SCHEMA_INSTRUCTION.format(schema_text=json.dumps(schema, indent=2))
+    fd, schema_path = tempfile.mkstemp(prefix="laya-codex-schema-", suffix=".json")
+    with os.fdopen(fd, "w") as f:
+        json.dump(strict or {}, f)
+    args = [get_agent_binary("codex_cli"), "exec", "--json", "--sandbox", "read-only",
+            "--skip-git-repo-check", "--ephemeral", *found.restrict_args(tools)]
+    if strict is not None:
+        args += ["--output-schema", schema_path]
+    args.append(text)
+    model = "agent/codex_cli"
+    start = time.monotonic()
+    meta = {"codex_login": login_id}
+    try:
+        lines = await _run_process(args, timeout, env)
+    except (ClaudeCodeError, OSError) as e:
+        await log_to_audit(event_id=None, card_id=None, step=step, model=model, input_tokens=0,
+                           output_tokens=0, latency_ms=int((time.monotonic() - start) * 1000),
+                           success=False, error=str(e)[:500], metadata=meta)
+        raise ClaudeCodeError(str(e).replace("claude", "codex")) from e
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(schema_path)
+    out = ab._parse_output("codex_cli", lines, native_schema=strict is not None)
+    info = codex_accounts.limit_info(out.get("error"))
+    if info:
+        await codex_accounts.record(login_id, info)
+    parsed = out.get("parsed") if strict is not None else ab._extract_json(out.get("content") or "")
+    parsed = ab.relax_optional(parsed, schema) if parsed is not None else None
+    ok = not out.get("error") and parsed is not None
+    if ok:
+        valid, err = ab._validate_against_schema(parsed, schema)
+        ok = valid
+        out["error"] = None if valid else f"reply did not match the schema: {err}"
+    await log_to_audit(
+        event_id=None, card_id=None, step=step, model=model,
+        input_tokens=out.get("input_tokens") or 0, output_tokens=out.get("output_tokens") or 0,
+        latency_ms=int((time.monotonic() - start) * 1000), success=ok,
+        error=None if ok else str(out.get("error") or "no reply")[:500], metadata=meta,
+    )
+    if not ok:
+        raise ClaudeCodeError(f"{step} failed on Codex: {str(out.get('error') or 'no reply')[:300]}")
+    return parsed
 
 
 async def run_send(

@@ -251,8 +251,12 @@ async def remove_account(account_id: str) -> dict[str, Any]:
 @router.post("/accounts/{account_id}/connectors/check")
 async def check_account_connectors(account_id: str) -> dict[str, Any]:
     try:
+        if await accounts.agent_of(account_id) == codex_accounts.AGENT_ID:
+            return await codex_accounts.check_connectors(account_id)
         return await accounts.check_connectors(account_id)
-    except accounts.AccountError as e:
+    except (accounts.AccountError, codex_accounts.AppServerError) as e:
+        if isinstance(e, codex_accounts.AppServerError):
+            raise HTTPException(status_code=502, detail=str(e)) from e
         raise _account_error(e) from e
 
 

@@ -328,7 +328,7 @@ def merge_issues(out: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 async def fetch_linear(source: dict[str, Any]) -> list[dict[str, Any]]:
-    """The user's open Linear issues, read on a Claude account that has Linear
+    """The user's open Linear issues, read on a login that has Linear
     (``accounts.pick_for_platform``) with that account's own tool name."""
     from laya.claude_code import accounts
 
@@ -346,6 +346,7 @@ async def fetch_linear(source: dict[str, Any]) -> list[dict[str, Any]]:
         deny=assignment.all_tools,
         env=assignment.env or None,
         account_id=assignment.account_id,
+        agent_id=assignment.agent_id,
     )
     return merge_issues(out)
 
