@@ -14,7 +14,8 @@
 	import { CODING_AGENTS } from '$lib/config';
 	import ModelSelect from './ModelSelect.svelte';
 	import AccessConfig from './AccessConfig.svelte';
-	import { AUTO_MODEL, agentModelOptions, describeAutoRole, getAgentModels, getAutoRouting, setApiFallback, type AutoRouting, type ModelOption } from '$lib/api/modelAccess';
+	import { AUTO_MODEL, describeAutoRole, getAutoRouting, setApiFallback, type AutoRouting } from '$lib/api/modelAccess';
+	import AgentModelSelect from '$lib/components/pickers/AgentModelSelect.svelte';
 
 	let guideTooltip = $state<{ text: string; top: number; left: number } | null>(null);
 
@@ -101,20 +102,6 @@
 		} finally {
 			await loadAutoRouting();
 		}
-	}
-	// Models each installed agent offers (Claude Code's aliases, the models Codex lists);
-	// a role whose model is not among them is typed in after "Custom…".
-	let agentKnownModels = $state<Record<string, ModelOption[]>>({});
-	let customAgentModel = $state<Record<string, boolean>>({});
-	const CUSTOM_MODEL = '__custom__';
-	function handleAgentModelSelect(role: string) {
-		return (e: Event) => {
-			if ((e.target as HTMLSelectElement).value === CUSTOM_MODEL) {
-				customAgentModel[role] = true;
-				return;
-			}
-			handleAgentModelInput(role)(e);
-		};
 	}
 	const AGENT_MODEL_PLACEHOLDERS: Record<string, string> = {
 		claude_code: 'e.g. claude-sonnet-4-6 — blank uses Claude Code’s default',
@@ -403,9 +390,6 @@
 			} catch (e) {
 				console.error('Failed to load agent backends:', e);
 			}
-			getAgentModels()
-				.then((m) => (agentKnownModels = m.agents))
-				.catch((e) => console.error('Failed to load agent models:', e));
 			await Promise.all([fetchModels(), loadBudget(), loadAgentBudget(), loadAutoRouting()]);
 			autoTimer = setInterval(loadAutoRouting, 60_000);
 		} catch (e) {
@@ -497,14 +481,9 @@
 		saveModels();
 	}
 
-	function handleAgentModelInput(role: string) {
-		return (e: Event) => {
-			const typed = (e.target as HTMLInputElement).value.trim();
-			models[role as keyof typeof models] = typed
-				? `agent/${selectedAgent}/${typed}`
-				: `agent/${selectedAgent}`;
-			saveModels();
-		};
+	function setAgentModel(role: string, typed: string) {
+		models[role as keyof typeof models] = typed ? `agent/${selectedAgent}/${typed}` : `agent/${selectedAgent}`;
+		saveModels();
 	}
 
 	async function saveApiKey(provider: string) {
@@ -1086,38 +1065,15 @@
 									? describeAutoRole(autoRouting?.roles[role.id])
 									: models[role.id as keyof typeof models]}
 							</div>
-						{:else if agentMode && agentRolesFor(selectedAgent).includes(role.id) && !customAgentModel[role.id]}
-							<select
-								id="{role.id}-model"
-								value={agentModelString(role.id)}
-								onchange={handleAgentModelSelect(role.id)}
-								class="w-full rounded-md border px-3 py-2 text-laya-base text-surface-100 focus:outline-none {$glassTheme ? 'glass-input' : 'border-surface-600 bg-surface-700 focus:border-surface-500'}"
-							>
-								{#each agentModelOptions(agentKnownModels[selectedAgent] ?? [], agentModelString(role.id)) as o (o.value)}
-									<option value={o.value}>{o.label}</option>
-								{/each}
-								<option value={CUSTOM_MODEL}>Custom…</option>
-							</select>
 						{:else if agentMode && agentRolesFor(selectedAgent).includes(role.id)}
-							<div class="flex items-center gap-2">
-								<!-- svelte-ignore a11y_autofocus -->
-								<input
-									id="{role.id}-model"
-									type="text"
-									autofocus
-									value={agentModelString(role.id)}
-									onchange={handleAgentModelInput(role.id)}
-									placeholder={AGENT_MODEL_PLACEHOLDERS[selectedAgent] || 'Model string (blank = agent default)'}
-									spellcheck="false"
-									autocapitalize="off"
-									class="w-full rounded-md border px-3 py-2 font-mono text-laya-base text-surface-100 placeholder:text-surface-500 focus:outline-none {$glassTheme ? 'glass-input' : 'border-surface-600 bg-surface-700 focus:border-surface-500'}"
-								/>
-								<button
-									type="button"
-									onclick={() => (customAgentModel[role.id] = false)}
-									class="shrink-0 text-laya-secondary text-surface-400 hover:text-surface-200"
-								>List</button>
-							</div>
+							<AgentModelSelect
+								id="{role.id}-model"
+								agentId={selectedAgent}
+								value={agentModelString(role.id)}
+								onchange={(typed) => setAgentModel(role.id, typed)}
+								placeholder={AGENT_MODEL_PLACEHOLDERS[selectedAgent] || 'Model string (blank = agent default)'}
+								class="w-full rounded-md border px-3 py-2 text-laya-base text-surface-100 placeholder:text-surface-500 focus:outline-none {$glassTheme ? 'glass-input' : 'border-surface-600 bg-surface-700 focus:border-surface-500'}"
+							/>
 						{:else}
 							<ModelSelect
 								id="{role.id}-model"

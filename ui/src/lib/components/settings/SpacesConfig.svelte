@@ -9,6 +9,7 @@
 	import type { Space, Source, AvailableWorkflow, Repo, ProviderModels, AgentBackend } from '$lib/api/types';
 	import { CODING_AGENTS, agentLabel } from '$lib/config';
 	import ModelSelect from './ModelSelect.svelte';
+	import AgentModelSelect from '$lib/components/pickers/AgentModelSelect.svelte';
 
 	const providers = [
 		{ id: 'anthropic', label: 'Anthropic' },
@@ -133,13 +134,8 @@
 		}
 	}
 
-	function handleFormAgentInput(role: string) {
-		return (e: Event) => {
-			const typed = (e.target as HTMLInputElement).value.trim();
-			formModelAccessors[role].set(
-				typed ? `agent/${formSelectedAgent}/${typed}` : `agent/${formSelectedAgent}`
-			);
-		};
+	function setFormAgentModel(role: string, typed: string) {
+		formModelAccessors[role].set(typed ? `agent/${formSelectedAgent}/${typed}` : `agent/${formSelectedAgent}`);
 	}
 
 	// Source assignment state
@@ -1037,9 +1033,9 @@
 					</div>
 					<div class="w-48 shrink-0">
 						{#if formAgentMode}
-							<input type="text" value={formAgentModelString('router')} onchange={handleFormAgentInput('router')}
-								placeholder={AGENT_MODEL_PH[formSelectedAgent] || 'model (blank = default)'} spellcheck="false" autocapitalize="off"
-								class="w-full rounded-md border px-3 py-2 font-mono text-laya-base text-surface-100 placeholder:text-surface-500 focus:outline-none {$glassTheme ? 'glass-input' : 'border-surface-600 bg-surface-700 focus:border-surface-500'}" />
+							<AgentModelSelect id="space-router-model" agentId={formSelectedAgent} value={formAgentModelString('router')} onchange={(m) => setFormAgentModel('router', m)}
+								placeholder={AGENT_MODEL_PH[formSelectedAgent] || 'model (blank = default)'}
+								class="w-full rounded-md border px-3 py-2 text-laya-base text-surface-100 placeholder:text-surface-500 focus:outline-none {$glassTheme ? 'glass-input' : 'border-surface-600 bg-surface-700 focus:border-surface-500'}" />
 						{:else}
 							<ModelSelect
 								bind:value={formRouterModel}
@@ -1058,9 +1054,9 @@
 					</div>
 					<div class="w-48 shrink-0">
 						{#if formAgentMode}
-							<input type="text" value={formAgentModelString('stager')} onchange={handleFormAgentInput('stager')}
-								placeholder={AGENT_MODEL_PH[formSelectedAgent] || 'model (blank = default)'} spellcheck="false" autocapitalize="off"
-								class="w-full rounded-md border px-3 py-2 font-mono text-laya-base text-surface-100 placeholder:text-surface-500 focus:outline-none {$glassTheme ? 'glass-input' : 'border-surface-600 bg-surface-700 focus:border-surface-500'}" />
+							<AgentModelSelect id="space-stager-model" agentId={formSelectedAgent} value={formAgentModelString('stager')} onchange={(m) => setFormAgentModel('stager', m)}
+								placeholder={AGENT_MODEL_PH[formSelectedAgent] || 'model (blank = default)'}
+								class="w-full rounded-md border px-3 py-2 text-laya-base text-surface-100 placeholder:text-surface-500 focus:outline-none {$glassTheme ? 'glass-input' : 'border-surface-600 bg-surface-700 focus:border-surface-500'}" />
 						{:else}
 							<ModelSelect
 								bind:value={formStagerModel}
@@ -1110,9 +1106,9 @@
 					</div>
 					<div class="w-48 shrink-0">
 						{#if formAgentMode}
-							<input type="text" value={formAgentModelString('omni')} onchange={handleFormAgentInput('omni')}
-								placeholder={AGENT_MODEL_PH[formSelectedAgent] || 'model (blank = default)'} spellcheck="false" autocapitalize="off"
-								class="w-full rounded-md border px-3 py-2 font-mono text-laya-base text-surface-100 placeholder:text-surface-500 focus:outline-none {$glassTheme ? 'glass-input' : 'border-surface-600 bg-surface-700 focus:border-surface-500'}" />
+							<AgentModelSelect id="space-omni-model" agentId={formSelectedAgent} value={formAgentModelString('omni')} onchange={(m) => setFormAgentModel('omni', m)}
+								placeholder={AGENT_MODEL_PH[formSelectedAgent] || 'model (blank = default)'}
+								class="w-full rounded-md border px-3 py-2 text-laya-base text-surface-100 placeholder:text-surface-500 focus:outline-none {$glassTheme ? 'glass-input' : 'border-surface-600 bg-surface-700 focus:border-surface-500'}" />
 						{:else}
 							<ModelSelect
 								bind:value={formOmniModel}
