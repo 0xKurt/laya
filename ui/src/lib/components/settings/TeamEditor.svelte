@@ -5,6 +5,10 @@
 	import { engineApi } from '$lib/api/engine';
 	import { glassTheme } from '$lib/stores/glassTheme';
 	import type { TeamMember } from '$lib/api/types';
+	import ChipInput from '$lib/components/pickers/ChipInput.svelte';
+	import { normalizeEmail } from '$lib/utils/pickers';
+	import { selfAccountSuggestions, aliasError } from '$lib/utils/teamChips';
+	import type { ChipSuggestion } from '$lib/utils/pickers';
 
 	const roles: TeamMember['role'][] = ['self', 'manager', 'teammate', 'external', 'bot'];
 	const roleLabels: Record<TeamMember['role'], string> = {
@@ -27,8 +31,12 @@
 	let formEmail = $state('');
 	let formRole = $state<TeamMember['role']>('teammate');
 	let formNotes = $state('');
-	let formAliases = $state('');
-	let formAccounts = $state('');
+	let formAliases = $state<string[]>([]);
+	let formAccounts = $state<string[]>([]);
+	// The accounts and emails the coding agent logins read (Slack user id, GitHub
+	// login, …), offered as one-click chips on your own entry.
+	let accountSuggestions = $state<ChipSuggestion[]>([]);
+	let aliasSuggestions = $state<ChipSuggestion[]>([]);
 
 	let hasSelf = $derived(members.some((m) => m.role === 'self'));
 
@@ -43,15 +51,13 @@
 	/** Whether the current form is for the 'self' role */
 	let isSelfForm = $derived(formRole === 'self');
 
-	function parseList(raw: string): string[] {
-		return raw.split(',').map((s) => s.trim()).filter(Boolean);
-	}
-
-	function joinList(arr: string[]): string {
-		return arr.join(', ');
-	}
-
 	onMount(async () => {
+		selfAccountSuggestions()
+			.then((s) => {
+				accountSuggestions = s.accounts;
+				aliasSuggestions = s.aliases;
+			})
+			.catch(() => {});
 		try {
 			const data = await engineApi.getTeam();
 			members = data.members;
@@ -79,8 +85,8 @@
 		formEmail = '';
 		formRole = 'teammate';
 		formNotes = '';
-		formAliases = '';
-		formAccounts = '';
+		formAliases = [];
+		formAccounts = [];
 		showAddForm = false;
 		editingIndex = null;
 	}
@@ -91,8 +97,8 @@
 			email: formEmail,
 			role: formRole,
 			notes: formNotes,
-			aliases: parseList(formAliases),
-			accounts: parseList(formAccounts),
+			aliases: [...formAliases],
+			accounts: [...formAccounts],
 		};
 	}
 
@@ -108,8 +114,8 @@
 		formEmail = m.email;
 		formRole = m.role;
 		formNotes = m.notes;
-		formAliases = joinList(m.aliases ?? []);
-		formAccounts = joinList(m.accounts ?? []);
+		formAliases = [...(m.aliases ?? [])];
+		formAccounts = [...(m.accounts ?? [])];
 		editingIndex = index;
 		showAddForm = false;
 	}
@@ -219,8 +225,32 @@
 					{/each}
 				</select>
 				{#if isSelfForm}
-					<input bind:value={formAliases} placeholder="Other emails (comma-separated)" class="rounded-lg border border-surface-600 bg-surface-900 px-3 py-2 text-laya-base text-surface-50 placeholder-surface-500" />
-					<input bind:value={formAccounts} placeholder="Platform accounts, e.g. jdoe, jane.doe (comma-separated)" class="col-span-full rounded-lg border border-surface-600 bg-surface-900 px-3 py-2 text-laya-base text-surface-50 placeholder-surface-500" />
+					<div class="col-span-full">
+						<span class="mb-1 block text-laya-secondary text-surface-400">Other emails</span>
+						<ChipInput
+							bind:values={formAliases}
+							id="team-self-aliases"
+							label="Add another email"
+							placeholder="name@example.com, then Enter"
+							normalize={normalizeEmail}
+							validate={aliasError}
+							suggestions={aliasSuggestions.filter((s) => s.value !== formEmail.trim().toLowerCase())}
+							suggestionsLabel="Emails your connected accounts use"
+							emptyText=""
+						/>
+					</div>
+					<div class="col-span-full">
+						<span class="mb-1 block text-laya-secondary text-surface-400">Platform accounts</span>
+						<ChipInput
+							bind:values={formAccounts}
+							id="team-self-accounts"
+							label="Add a platform account"
+							placeholder="Username or user id, then Enter"
+							suggestions={accountSuggestions}
+							suggestionsLabel="Accounts your connected sources signed in as"
+							emptyText="Your usernames on Slack, GitHub and other tools, so Laya knows which messages are yours."
+						/>
+					</div>
 				{/if}
 				<input bind:value={formNotes} placeholder="Notes (optional)" class="rounded-lg border border-surface-600 bg-surface-900 px-3 py-2 text-laya-base text-surface-50 placeholder-surface-500" />
 			</div>
