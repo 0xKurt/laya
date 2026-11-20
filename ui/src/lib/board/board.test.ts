@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, it, expect } from 'vitest';
-import type { ActionCard, TagAssignment } from '$lib/api/types';
+import type { TagAssignment } from '$lib/api/types';
 import {
 	EMPTY_FILTERS,
 	applyMove,
@@ -10,10 +10,13 @@ import {
 	isFiltering,
 	laneOf,
 	matchesFilters,
+	mergeVisibleOrder,
 	planMove,
+	withLaneOrder,
 	presentPlatforms,
 	withoutLaneTags,
-	youMinutesByLane
+	youMinutesByLane,
+	type BoardCard
 } from './board';
 
 const TODO: TagAssignment = { tag_id: 11, tag_name: 'lane:todo', is_system: true, assigned_by: 'user' };
@@ -21,7 +24,7 @@ const DOING: TagAssignment = { tag_id: 12, tag_name: 'lane:in-progress', is_syst
 const BUG: TagAssignment = { tag_id: 3, tag_name: 'bug', is_system: false, assigned_by: 'stager' };
 const IDS = { todo: 11, in_progress: 12 };
 
-function card(over: Partial<ActionCard> = {}): ActionCard {
+function card(over: Partial<BoardCard> = {}): BoardCard {
 	return {
 		card_id: 'c1',
 		event_id: 'e1',
@@ -103,6 +106,64 @@ describe('groupByLane', () => {
 		);
 		expect(lanes.backlog.map((c) => c.card_id)).toEqual(['high-old', 'med-new', 'med-old', 'low-new']);
 		expect(lanes.done.map((c) => c.card_id)).toEqual(['d']);
+	});
+});
+
+describe('manual order', () => {
+	const ids = (cards: { card_id: string }[]) => cards.map((c) => c.card_id);
+
+	it('puts unplaced cards on top (priority, then latest activity), then placed cards by position', () => {
+		const lanes = groupByLane(
+			[
+				card({ card_id: 'p2', lane: 'backlog', position: 2 }),
+				card({ card_id: 'p0', lane: 'backlog', position: 0, priority: 'LOW' }),
+				card({ card_id: 'new-med', created_at: '2026-11-12' }),
+				card({ card_id: 'new-med-active', created_at: '2026-11-01', group_active_at: '2026-11-15' }),
+				card({ card_id: 'new-crit', priority: 'CRITICAL', created_at: '2026-11-01' }),
+				card({ card_id: 'p1', lane: 'backlog', position: 1, priority: 'CRITICAL' })
+			],
+			EMPTY_FILTERS
+		);
+		expect(ids(lanes.backlog)).toEqual(['new-crit', 'new-med-active', 'new-med', 'p0', 'p1', 'p2']);
+	});
+
+	it('ignores a position from another lane (the card moved by a status change)', () => {
+		const lanes = groupByLane(
+			[
+				card({ card_id: 'placed', tags: [TODO], lane: 'todo', position: 0 }),
+				card({ card_id: 'stale', tags: [TODO], lane: 'backlog', position: 5, priority: 'LOW' })
+			],
+			EMPTY_FILTERS
+		);
+		expect(ids(lanes.todo)).toEqual(['stale', 'placed']);
+	});
+
+	it('keeps Done newest first whatever the positions', () => {
+		const lanes = groupByLane(
+			[
+				card({ card_id: 'old', status: 'done', resolved_at: '2026-11-10', lane: 'done', position: 0 }),
+				card({ card_id: 'new', status: 'done', resolved_at: '2026-11-12', lane: 'done', position: 1 })
+			],
+			EMPTY_FILTERS
+		);
+		expect(ids(lanes.done)).toEqual(['new', 'old']);
+	});
+
+	it('places cards optimistically', () => {
+		const moved = withLaneOrder([card({ card_id: 'a' }), card({ card_id: 'b' }), card({ card_id: 'c' })], 'backlog', ['c', 'a']);
+		expect(moved.map((c) => [c.card_id, c.position ?? null])).toEqual([['a', 1], ['b', null], ['c', 0]]);
+		expect(ids(groupByLane(moved, EMPTY_FILTERS).backlog)).toEqual(['b', 'c', 'a']);
+	});
+
+	it('merges a filtered drop back into the full lane order', () => {
+		// Visible: a, c, e. Hidden: b (after a), d (after c), x (on top).
+		const lane = ['x', 'a', 'b', 'c', 'd', 'e'];
+		expect(mergeVisibleOrder(lane, ['a', 'c', 'e'])).toEqual(lane);
+		expect(mergeVisibleOrder(lane, ['c', 'a', 'e'])).toEqual(['x', 'c', 'd', 'a', 'b', 'e']);
+		// A card dropped in from another lane.
+		expect(mergeVisibleOrder(lane, ['a', 'n', 'c', 'e'])).toEqual(['x', 'a', 'b', 'n', 'c', 'd', 'e']);
+		// A card that left the lane is not in `laneIds`; its hidden follower stays in place.
+		expect(mergeVisibleOrder(['x', 'b', 'c', 'd', 'e'], ['e', 'c'])).toEqual(['x', 'b', 'e', 'c', 'd']);
 	});
 });
 

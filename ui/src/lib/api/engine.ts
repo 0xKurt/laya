@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { MyWork } from '$lib/work/work';
+import type { BoardCard, OrderedLane } from '$lib/board/board';
 import type {
 	TeamConfig,
 	RulesConfig,
@@ -407,9 +408,15 @@ export const engineApi = {
 	getSessionClaims: (cardId: string) =>
 		request<{ card_id: string; claims: SessionClaim[] }>(`/cards/${encodeURIComponent(cardId)}/session-claims`),
 	getBoard: (spaceId?: string) =>
-		request<{ cards: ActionCard[]; lane_tags: { todo: number; in_progress: number } }>(
+		request<{ cards: BoardCard[]; lane_tags: { todo: number; in_progress: number } }>(
 			spaceId ? `/board?space_id=${encodeURIComponent(spaceId)}` : '/board'
 		),
+	/** Store the full order of a board lane (top first). */
+	setBoardOrder: (lane: OrderedLane, cardIds: string[]) =>
+		request<{ lane: string; card_ids: string[] }>('/board/order', {
+			method: 'PUT',
+			body: JSON.stringify({ lane, card_ids: cardIds })
+		}),
 	reopenCard: (cardId: string) =>
 		request<{ status: string; card_id: string }>(`/cards/${cardId}/reopen`, {
 			method: 'POST'
