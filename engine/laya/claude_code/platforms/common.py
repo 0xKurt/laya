@@ -176,7 +176,7 @@ async def run_turn(source: dict[str, Any], platform: str, prompt: str, schema: d
     config = source.get("config") or {}
     return await cli.run_collect(
         platform, prompt, schema, read_tools(source, platform),
-        model=config.get("model") or "haiku",
+        model=config.get("model") or cli.AUTOMATIC_MODEL,
         deny=source.get("deny_tools") or [],
         env=source.get("account_env") or None,
         account_id=source.get("account_id"),

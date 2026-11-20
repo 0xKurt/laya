@@ -36,6 +36,9 @@ log = structlog.get_logger()
 
 DEFAULT_TIMEOUT = 600.0
 
+# A source's model when none is stored: Automatic (see claude_code/collect_models.py).
+AUTOMATIC_MODEL = "agent/auto"
+
 # Cache reads cost a tenth of fresh input tokens.
 _CACHE_READ_WEIGHT = 0.1
 
@@ -158,9 +161,10 @@ async def _run_turn(
     account_id: str | None = None,
 ) -> dict[str, Any]:
     from laya.llm.client import log_to_audit
-    from laya.claude_code import accounts
+    from laya.claude_code import accounts, collect_models
 
     account_id = account_id or accounts.DEFAULT_ID
+    model = collect_models.model_for(model, "claude_code") or "haiku"
     args = build_args(
         get_agent_binary("claude_code"), prompt,
         tools=tools, model=model, schema=schema, deny=deny,
@@ -207,7 +211,7 @@ async def run_collect(
     prompt: str,
     schema: dict,
     tools: list[str],
-    model: str = "haiku",
+    model: str = AUTOMATIC_MODEL,
     timeout: float = DEFAULT_TIMEOUT,
     deny: list[str] | None = None,
     env: dict[str, str] | None = None,
@@ -218,12 +222,14 @@ async def run_collect(
 
     ``env`` / ``account_id``: the login the turn runs on (none = the Claude Code
     CLI's own login); ``agent_id`` its coding agent (``codex_cli`` runs the turn
-    with ``codex exec``, see :func:`_run_codex_collect`)."""
+    with ``codex exec``, see :func:`_run_codex_collect`). ``model`` is the
+    source's stored model, resolved for that agent by claude_code/collect_models.py."""
     if not tools:
         raise ClaudeCodeError(f"no read tools discovered for {platform}")
     if agent_id == "codex_cli":
         return await _run_codex_collect(
             f"claude_code_{platform}", prompt, schema, tools, timeout=timeout, env=env, login_id=account_id,
+            model=model,
         )
     data = await _run_turn(
         f"claude_code_{platform}", prompt,
@@ -248,12 +254,13 @@ async def _run_codex_collect(
     timeout: float,
     env: dict[str, str] | None,
     login_id: str | None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """One read-only turn on a Codex login: ``codex exec`` with only ``tools``
     visible (every other MCP server off, ``enabled_tools`` on the needed one,
     ChatGPT apps off), the schema as ``--output-schema`` in strict form (else as
     a prompt instruction). Usage-limit errors are recorded for the login."""
-    from laya.claude_code import codex_accounts
+    from laya.claude_code import codex_accounts, collect_models
     from laya.llm import agent_backend as ab
     from laya.llm.client import log_to_audit
 
@@ -270,8 +277,11 @@ async def _run_codex_collect(
             "--skip-git-repo-check", "--ephemeral", *found.restrict_args(tools)]
     if strict is not None:
         args += ["--output-schema", schema_path]
+    codex_model = collect_models.model_for(model, "codex_cli")
+    if codex_model:
+        args += ["-m", codex_model]
     args.append(text)
-    model = "agent/codex_cli"
+    model = f"agent/codex_cli/{codex_model}" if codex_model else "agent/codex_cli"
     start = time.monotonic()
     meta = {"codex_login": login_id}
     try:
@@ -310,7 +320,7 @@ async def run_send(
     platform: str,
     prompt: str,
     tool: str,
-    model: str = "haiku",
+    model: str = AUTOMATIC_MODEL,
     timeout: float = DEFAULT_TIMEOUT,
     schema: dict | None = None,
     deny: list[str] | None = None,

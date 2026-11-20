@@ -71,7 +71,7 @@ COMMON_DEFAULTS: dict[str, Any] = {
     "active_hours": {"start": "08:00", "end": "19:00", "days": [0, 1, 2, 3, 4]},
     # Empty means the system's local time zone.
     "timezone": "",
-    "model": "haiku",
+    "model": "agent/auto",
     "initial_lookback_hours": 12,
     "recheck_after_hours": 6,
 }

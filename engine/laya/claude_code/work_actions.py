@@ -272,7 +272,7 @@ def _deny(all_tools: list[str], tool: str) -> list[str]:
 
 
 def _model(source: dict[str, Any]) -> str:
-    return store.merged_config("linear", source.get("config")).get("model") or "haiku"
+    return store.merged_config("linear", source.get("config")).get("model") or cli.AUTOMATIC_MODEL
 
 
 def sort_states(states: list[dict[str, Any]]) -> list[dict[str, Any]]:
