@@ -24,7 +24,7 @@ describe('visibleViews', () => {
 		expect(visibleViews(['board', 'omni']).map((v) => v.label)).toEqual([
 			'Pulse',
 			'My work',
-			'Claude',
+			'Assistant',
 			'Coherence',
 			'Corpus'
 		]);

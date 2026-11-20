@@ -2,16 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Which Claude terminal tab receives "Reference in Claude", and the hand-off
- * of a reference to the terminal page when no tab is open yet.
+ * The Assistant view's active tab, and "Send to Assistant", which goes to the
+ * docked assistant session in the side panel.
  *
  * The sessions themselves live in the engine; this store only remembers the
  * most recently active tab (also across reloads, in localStorage).
  */
 
 import { get, writable } from 'svelte/store';
-import { goto } from '$app/navigation';
 import { engineApi } from '$lib/api/engine';
+import { routeReference } from '$lib/claude/assistantReference';
+import { sidePanel } from '$lib/stores/sidePanel';
 
 const ACTIVE_KEY = 'laya.terminal.activeId';
 
@@ -36,12 +37,6 @@ activeTerminalId.subscribe((id) => {
 	}
 });
 
-/**
- * A reference waiting for a terminal: set when no tab is open, consumed by the
- * terminal page once the new tab's process has started.
- */
-export const pendingReference = writable<string | null>(null);
-
 /** Shows a short toast without depending on the page that is open. */
 export function showClaudeToast(message: string, variant: 'info' | 'warning' = 'info'): void {
 	if (typeof document === 'undefined') return;
@@ -57,25 +52,33 @@ export function showClaudeToast(message: string, variant: 'info' | 'warning' = '
 	setTimeout(() => el.remove(), 2500);
 }
 
+/** The docked assistant's terminal once it is attached and at its prompt (session id). */
+export const assistantReady = writable<string | null>(null);
+
+/** A reference waiting for the docked assistant to become ready (inserted once). */
+export const assistantPendingReference = writable<string | null>(null);
+
+/** Bumped to ask the docked assistant's terminal to take focus. */
+export const assistantFocusRequest = writable(0);
+
 /**
- * Inserts `text` into the most recently active running terminal tab, or opens
- * `/terminal` with a new tab and inserts it there once claude has started.
+ * Inserts `text` into the docked assistant session: opens the side panel when
+ * it is closed, inserts once (no Enter) and focuses the terminal, or queues the
+ * text while the session is starting. See `lib/claude/assistantReference.ts`.
  */
 export async function referenceInClaude(text: string): Promise<void> {
 	try {
-		const { sessions } = await engineApi.listClaudeTerminals();
-		const running = sessions.filter((s) => s.running);
-		const activeId = get(activeTerminalId);
-		const target = running.find((s) => s.id === activeId) ?? running[running.length - 1];
-		if (target) {
-			await engineApi.sendClaudeTerminalInput(target.id, text);
-			activeTerminalId.set(target.id);
-			showClaudeToast('Referenced in Claude');
-			return;
-		}
-		pendingReference.set(text);
-		await goto('/terminal');
+		const outcome = await routeReference(text, {
+			state: () => get(sidePanel),
+			running: async () => (await engineApi.listClaudeTerminals()).sessions.filter((s) => s.running).map((s) => s.id),
+			openPanel: () => sidePanel.openAssistant(),
+			readyId: () => get(assistantReady),
+			send: (id, t) => engineApi.sendClaudeTerminalInput(id, t).then(() => undefined),
+			focus: () => assistantFocusRequest.update((n) => n + 1),
+			queue: (t) => assistantPendingReference.set(t)
+		});
+		if (outcome !== 'queued') showClaudeToast('Sent to Assistant');
 	} catch (e) {
-		showClaudeToast(`Could not reference in Claude: ${e instanceof Error ? e.message : String(e)}`, 'warning');
+		showClaudeToast(`Could not send to Assistant: ${e instanceof Error ? e.message : String(e)}`, 'warning');
 	}
 }

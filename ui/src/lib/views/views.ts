@@ -18,7 +18,7 @@ export const VIEWS: readonly ViewItem[] = [
 	{ id: 'pulse', label: 'Pulse', href: '/feed' },
 	{ id: 'board', label: 'Board', href: '/board' },
 	{ id: 'work', label: 'My work', href: '/work' },
-	{ id: 'claude', label: 'Claude', href: '/terminal' },
+	{ id: 'claude', label: 'Assistant', href: '/terminal' },
 	{ id: 'omni', label: 'Omni', href: '/omni' },
 	{ id: 'coherence', label: 'Coherence', href: '/coherence' },
 	{ id: 'corpus', label: 'Corpus', href: '/corpus' }

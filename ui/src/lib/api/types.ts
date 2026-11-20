@@ -1979,6 +1979,9 @@ export interface ClaudeTerminalSession {
 	pid: number | null;
 	/** Why the session runs without Laya's MCP server, when it does. */
 	note: string | null;
+	/** Coding agent the session runs (`claude_code`, `codex_cli`). */
+	agent?: string;
+	agent_label?: string;
 }
 
 /** A closed Claude terminal session; `resumable` when Claude Code stored its conversation. */
@@ -1991,12 +1994,27 @@ export interface ClaudeTerminalClosedSession {
 	last_active_at: string | null;
 	closed_at: string | null;
 	resumable: boolean;
+	agent?: string;
+	agent_label?: string;
+}
+
+/** A coding agent the terminal knows; `available` when it can start it now. */
+export interface ClaudeTerminalAgent {
+	id: string;
+	label: string;
+	installed: boolean;
+	supported: boolean;
+	available: boolean;
+	/** Why it cannot be started (not supported yet, not installed). */
+	reason: string | null;
 }
 
 export interface ClaudeTerminalList {
 	sessions: ClaudeTerminalSession[];
 	closed: ClaudeTerminalClosedSession[];
 	default_cwd: string;
+	agents?: ClaudeTerminalAgent[];
+	default_agent?: string;
 }
 
 export interface ClaudeTerminalCreate {
@@ -2006,6 +2024,8 @@ export interface ClaudeTerminalCreate {
 	resume?: string;
 	cols?: number;
 	rows?: number;
+	/** Coding agent for a new session (default: the configured one when available). */
+	agent?: string;
 }
 
 /**

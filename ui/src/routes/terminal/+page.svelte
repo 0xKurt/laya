@@ -4,15 +4,21 @@
 	import { onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import { engineApi } from '$lib/api/engine';
-	import type { ClaudeTerminalClosedSession, ClaudeTerminalSession } from '$lib/api/types';
+	import type { ClaudeTerminalAgent, ClaudeTerminalClosedSession, ClaudeTerminalSession } from '$lib/api/types';
 	import TerminalView from '$lib/components/claude/TerminalView.svelte';
-	import { activeTerminalId, pendingReference, showClaudeToast } from '$lib/stores/claudeTerminal';
+	import { activeTerminalId } from '$lib/stores/claudeTerminal';
+	import { sidePanel } from '$lib/stores/sidePanel';
 	import { timeAgo } from '$lib/utils/datetime';
 
 	// Sessions run in the engine; this page lists them and attaches a view to each.
 	let sessions = $state<ClaudeTerminalSession[]>([]);
 	let closed = $state<ClaudeTerminalClosedSession[]>([]);
 	let defaultCwd = $state('');
+	let agents = $state<ClaudeTerminalAgent[]>([]);
+	let defaultAgent = $state('claude_code');
+	let newAgent = $state('');
+	// Fixed position: the tab strip scrolls horizontally and would clip an absolute menu.
+	let agentMenu = $state<{ x: number; y: number } | null>(null);
 	let activeId = $state<string | null>(get(activeTerminalId));
 	let loading = $state(true);
 	let error = $state<string | null>(null);
@@ -26,8 +32,11 @@
 	let renameValue = $state('');
 	let confirmCloseId = $state<string | null>(null);
 
-	// A reference to insert once the tab with this id has started.
-	let referenceFor: { id: string; text: string } | null = null;
+	// The side panel's assistant session is drawn here only after "Open here";
+	// one session never has two views (they would fight over the PTY size).
+	const dockedId = $derived($sidePanel.sessionId);
+	const dockedHere = $derived($sidePanel.host === 'view');
+	const agentLabel = (id: string | undefined) => agents.find((a) => a.id === id)?.label ?? 'Claude Code';
 
 	const active = $derived(sessions.find((s) => s.id === activeId) ?? null);
 	const recentCwds = $derived(
@@ -44,10 +53,14 @@
 		sessions = list.sessions;
 		closed = list.closed;
 		defaultCwd = list.default_cwd;
+		agents = list.agents ?? [];
+		// The configured agent when it can start, else the first available one.
+		const available = agents.filter((a) => a.available);
+		defaultAgent = available.find((a) => a.id === list.default_agent)?.id ?? available[0]?.id ?? 'claude_code';
 		if (!sessions.some((s) => s.id === activeId)) activate(sessions.at(-1)?.id ?? null);
 	}
 
-	async function start(opts: { cwd?: string; name?: string; resume?: string } = {}): Promise<ClaudeTerminalSession | null> {
+	async function start(opts: { cwd?: string; name?: string; resume?: string; agent?: string } = {}): Promise<ClaudeTerminalSession | null> {
 		if (starting) return null;
 		starting = true;
 		error = null;
@@ -55,7 +68,8 @@
 			const created = await engineApi.createClaudeTerminal({
 				cwd: opts.cwd?.trim() || undefined,
 				name: opts.name?.trim() || undefined,
-				resume: opts.resume
+				resume: opts.resume,
+				agent: opts.resume ? undefined : opts.agent || undefined
 			});
 			sessions = [...sessions.filter((s) => s.id !== created.id), created];
 			closed = closed.filter((c) => c.id !== created.id);
@@ -70,7 +84,7 @@
 	}
 
 	async function startFromForm() {
-		const created = await start({ cwd: newCwd, name: newName });
+		const created = await start({ cwd: newCwd, name: newName, agent: newAgent || defaultAgent });
 		if (created) {
 			newOpen = false;
 			newName = '';
@@ -128,58 +142,17 @@
 		sessions = sessions.map((s) => (s.id === id ? { ...s, running: false, exit_code: code } : s));
 	}
 
-	function onStarted(id: string) {
-		if (!referenceFor || referenceFor.id !== id) return;
-		const { text } = referenceFor;
-		referenceFor = null;
-		// claude's first output arrives before its prompt reads input; give it a moment.
-		setTimeout(async () => {
-			try {
-				await engineApi.sendClaudeTerminalInput(id, text);
-				showClaudeToast('Referenced in Claude');
-			} catch (e) {
-				showClaudeToast(`Could not reference in Claude: ${e instanceof Error ? e.message : String(e)}`, 'warning');
-			}
-		}, 1500);
-	}
-
-	async function takePendingReference() {
-		const text = get(pendingReference);
-		if (!text) return;
-		pendingReference.set(null);
-		const running = sessions.filter((s) => s.running);
-		const target = running.find((s) => s.id === activeId) ?? running.at(-1);
-		if (target) {
-			activate(target.id);
-			try {
-				await engineApi.sendClaudeTerminalInput(target.id, text);
-				showClaudeToast('Referenced in Claude');
-			} catch (e) {
-				showClaudeToast(`Could not reference in Claude: ${e instanceof Error ? e.message : String(e)}`, 'warning');
-			}
-			return;
-		}
-		const created = await start();
-		if (created) referenceFor = { id: created.id, text };
-	}
-
 	onMount(() => {
 		(async () => {
 			try {
 				await refresh();
 				newCwd = defaultCwd;
-				await takePendingReference();
 			} catch (e) {
 				error = e instanceof Error ? e.message : String(e);
 			} finally {
 				loading = false;
 			}
 		})();
-		// A reference made while this page is open (e.g. from a card detail panel).
-		const unsubscribe = pendingReference.subscribe((text) => {
-			if (text && !loading) takePendingReference();
-		});
-		return unsubscribe;
 	});
 
 	function closedLabel(c: ClaudeTerminalClosedSession): string {
@@ -188,12 +161,12 @@
 	}
 </script>
 
-<svelte:head><title>Claude · Laya</title></svelte:head>
+<svelte:head><title>Assistant · Laya</title></svelte:head>
 
 <div class="flex h-full min-h-0 flex-col">
 	<!-- Tab bar -->
 	<div class="flex shrink-0 items-center gap-1 border-b border-surface-800 px-3 py-1.5">
-		<div class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" role="tablist" aria-label="Claude sessions">
+		<div class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" role="tablist" aria-label="Sessions">
 			{#each sessions as s (s.id)}
 				<div
 					class="group relative flex max-w-[16rem] shrink-0 items-center rounded-md text-laya-secondary transition-colors
@@ -217,12 +190,14 @@
 							role="tab"
 							aria-selected={s.id === activeId}
 							class="flex min-w-0 items-center gap-1.5 py-1 pl-2.5 pr-1"
-							title={`${s.cwd}\nDouble-click to rename`}
+							title={`${s.agent_label ?? 'Claude Code'} · ${s.cwd}\nDouble-click to rename`}
 							onclick={() => activate(s.id)}
 							ondblclick={() => beginRename(s)}
 						>
 							<span class="h-1.5 w-1.5 shrink-0 rounded-full {s.running ? 'bg-emerald-400' : 'bg-surface-600'}"></span>
 							<span class="truncate">{s.name}</span>
+							{#if s.agent && s.agent !== 'claude_code'}<span class="shrink-0 rounded bg-surface-700/60 px-1 text-laya-micro text-surface-300">{s.agent_label}</span>{/if}
+							{#if s.id === dockedId}<span class="shrink-0 rounded bg-laya-orange/15 px-1 text-laya-micro text-laya-orange" title="The assistant session of the side panel">docked</span>{/if}
 						</button>
 					{/if}
 					<button
@@ -246,16 +221,45 @@
 					{/if}
 				</div>
 			{/each}
-			<button
-				type="button"
-				aria-label="New Claude session"
-				title="New session in {defaultCwd || 'the default folder'}"
-				disabled={starting}
-				class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-surface-400 hover:bg-surface-800 hover:text-surface-100 disabled:opacity-40"
-				onclick={() => start()}
-			>
-				<svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14" /></svg>
-			</button>
+<div class="relative shrink-0">
+				<button
+					type="button"
+					aria-label="New session"
+					aria-haspopup="menu"
+					aria-expanded={agentMenu !== null}
+					title="New session in {defaultCwd || 'the default folder'}"
+					disabled={starting}
+					class="flex h-6 w-6 items-center justify-center rounded-md text-surface-400 hover:bg-surface-800 hover:text-surface-100 disabled:opacity-40"
+					onclick={(e) => {
+						const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+						agentMenu = agentMenu ? null : { x: r.left, y: r.bottom + 4 };
+					}}
+				>
+					<svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14" /></svg>
+				</button>
+				{#if agentMenu}
+					<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+					<div class="fixed inset-0 z-20" onclick={() => (agentMenu = null)}></div>
+					<div role="menu" style="left: {agentMenu.x}px; top: {agentMenu.y}px;" class="fixed z-30 w-72 rounded-lg border border-surface-700 bg-surface-900 py-1 shadow-xl">
+						{#each agents as a (a.id)}
+							<button
+								type="button"
+								role="menuitem"
+								disabled={!a.available || starting}
+								title={a.reason ?? `New ${a.label} session in ${defaultCwd}`}
+								class="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-laya-micro text-surface-200 hover:bg-surface-800 disabled:cursor-not-allowed disabled:opacity-40"
+								onclick={() => {
+									agentMenu = null;
+									start({ agent: a.id });
+								}}
+							>
+								<span>{a.label}{a.id === defaultAgent ? ' (default)' : ''}</span>
+								{#if !a.available}<span class="truncate text-surface-500">{a.reason}</span>{/if}
+							</button>
+						{/each}
+					</div>
+				{/if}
+			</div>
 		</div>
 
 		<div class="relative flex shrink-0 items-center gap-1">
@@ -296,6 +300,17 @@
 					<datalist id="terminal-cwds">
 						{#each recentCwds as cwd (cwd)}<option value={cwd}></option>{/each}
 					</datalist>
+					<label class="mt-2 block text-laya-micro font-medium text-surface-400" for="terminal-agent">Agent</label>
+					<select
+						id="terminal-agent"
+						class="mt-1 w-full rounded-md border border-surface-700 bg-surface-950 px-2 py-1 text-laya-micro text-surface-100 outline-none focus:border-laya-orange/60"
+						value={newAgent || defaultAgent}
+						onchange={(e) => (newAgent = (e.currentTarget as HTMLSelectElement).value)}
+					>
+						{#each agents as a (a.id)}
+							<option value={a.id} disabled={!a.available}>{a.label}{a.available ? '' : ` — ${a.reason}`}</option>
+						{/each}
+					</select>
 					<label class="mt-2 block text-laya-micro font-medium text-surface-400" for="terminal-name">Name (optional)</label>
 					<input
 						id="terminal-name"
@@ -342,23 +357,35 @@
 	<!-- Terminals: one view per open session; only the active one is shown. -->
 	<div class="relative min-h-0 flex-1 bg-surface-950 p-2">
 		{#each sessions as s (s.id)}
-			<TerminalView
-				sessionId={s.id}
-				visible={s.id === activeId}
-				onstarted={() => onStarted(s.id)}
-				onexit={(code) => markExited(s.id, code)}
-				oninput={() => activeTerminalId.set(s.id)}
-			/>
+			{#if s.id === dockedId && !dockedHere}
+				{#if s.id === activeId}
+					<div class="flex h-full flex-col items-center justify-center gap-3 text-center">
+						<p class="text-laya-secondary text-surface-400">This session is docked in the side panel.</p>
+						<button
+							type="button"
+							class="rounded-md bg-laya-orange/20 px-3 py-1.5 text-laya-secondary font-medium text-laya-orange hover:bg-laya-orange/30"
+							onclick={() => sidePanel.setHost('view')}
+						>Open here</button>
+					</div>
+				{/if}
+			{:else}
+				<TerminalView
+					sessionId={s.id}
+					visible={s.id === activeId}
+					onexit={(code) => markExited(s.id, code)}
+					oninput={() => activeTerminalId.set(s.id)}
+				/>
+			{/if}
 		{/each}
 		{#if !loading && sessions.length === 0}
 			<div class="flex h-full flex-col items-center justify-center gap-3 text-center">
-				<p class="text-laya-secondary text-surface-400">No Claude session is open.</p>
+				<p class="text-laya-secondary text-surface-400">No session is open.</p>
 				<button
 					type="button"
 					disabled={starting}
 					class="rounded-md bg-laya-orange/20 px-3 py-1.5 text-laya-secondary font-medium text-laya-orange hover:bg-laya-orange/30 disabled:opacity-40"
-					onclick={() => start()}
-				>{starting ? 'Starting…' : 'Start Claude'}</button>
+					onclick={() => start({ agent: defaultAgent })}
+				>{starting ? 'Starting…' : `Start ${agentLabel(defaultAgent)}`}</button>
 				<p class="text-laya-micro text-surface-500">in {defaultCwd}</p>
 			</div>
 		{/if}
