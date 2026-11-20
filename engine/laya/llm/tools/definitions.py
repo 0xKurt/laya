@@ -17,6 +17,7 @@ def get_all_tool_definitions() -> list[dict]:
     return [
         *_read_tools(),
         *_document_tools(),
+        *_assistant_read_tools(),
         *_write_tools(),
         *_settings_read_tools(),
         *_settings_write_tools(),
@@ -117,6 +118,7 @@ def read_tool_names() -> set[str]:
     return (
         _names_of(_read_tools())
         | _names_of(_document_tools())
+        | _names_of(_assistant_read_tools())
         | _names_of(_settings_read_tools())
         | _names_of(_rules_read_tools())
     )
@@ -623,6 +625,28 @@ def _document_tools() -> list[dict]:
                     },
                     "required": ["document_id"],
                 },
+            },
+        },
+    ]
+
+
+def _assistant_read_tools() -> list[dict]:
+    """Read tools for the Claude terminal's assistant (MCP only, not in Laya's chat)."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "today",
+                "description": (
+                    "The user's day in one call: board lanes (In progress, To do, top of "
+                    "Backlog by priority) with links, effort (you / agent) and last activity; "
+                    "My work from its cache (assigned Linear issues by state; own pull "
+                    "requests that need action, wait on review or are ready to merge; with "
+                    "the cache age); cards closed today; open items whose last activity is "
+                    "older than stale_after_hours, due for a live re-check. Laya's stored "
+                    "data, not live: verify an item in its source before calling it open."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
             },
         },
     ]

@@ -95,7 +95,7 @@ async def get_entity(entity_id: str) -> dict[str, Any]:
 
     # Find related cards via the entity_id FK on action_cards
     related_cards = await db.execute_fetchall(
-        """SELECT card_id, header, summary, status, priority, created_at
+        """SELECT card_id, header, summary, status, priority, created_at, source_url
            FROM action_cards
            WHERE entity_id = ?
            ORDER BY created_at DESC LIMIT 20""",
@@ -109,6 +109,7 @@ async def get_entity(entity_id: str) -> dict[str, Any]:
             "status": c["status"],
             "priority": c["priority"],
             "created_at": c["created_at"],
+            "source_url": c["source_url"],
         }
         for c in related_cards
     ]

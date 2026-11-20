@@ -27,6 +27,8 @@ a = Analysis(
         (str(engine_dir / 'laya' / 'db' / 'migrations'), 'laya/db/migrations'),
         # Include prompt templates
         (str(engine_dir / 'laya' / 'llm' / 'prompts'), 'laya/llm/prompts'),
+        # MCP server instructions for the Claude terminal (claude_code/assistant.py)
+        (str(engine_dir / 'laya' / 'claude_code' / 'assistant_instructions.md'), 'laya/claude_code'),
         # LiteLLM data files (model pricing JSON, etc.)
         *litellm_data,
     ],

@@ -199,7 +199,11 @@ def build_mcp_server() -> Server:
     Settings are re-read inside each handler so toggling scope or auth in the
     UI takes effect on the next call without restarting the engine.
     """
-    server: Server = Server("laya")
+    from laya.claude_code.assistant import server_instructions
+
+    # The instructions tell an MCP client (the Claude terminal) what Laya is and
+    # how to use its tools; re-read per session so an edit needs no restart.
+    server: Server = Server("laya", instructions=server_instructions())
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:

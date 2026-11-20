@@ -88,7 +88,7 @@ async def _search_semantic(
 
     rows = await db.execute_fetchall(
         f"""SELECT card_id, event_id, entity_id, context_id, header, summary,
-                   status, priority, persona, category, created_at, space_id
+                   status, priority, persona, category, created_at, space_id, source_url
             FROM action_cards WHERE card_id IN ({ph}){status_clause}""",
         hydrate_params,
     )
@@ -135,7 +135,7 @@ async def _search_keyword(
 
 _CARD_SELECT_COLS = (
     "card_id, event_id, entity_id, context_id, header, summary, "
-    "status, priority, persona, category, created_at, space_id"
+    "status, priority, persona, category, created_at, space_id, source_url"
 )
 _CARD_SELECT_COLS_C = ", ".join(f"c.{c}" for c in _CARD_SELECT_COLS.split(", "))
 
@@ -270,6 +270,7 @@ def _group_rows(rows: list[Any]) -> "OrderedDict[str | None, list[dict[str, Any]
             "persona": r["persona"],
             "category": r["category"],
             "created_at": r["created_at"],
+            "source_url": r["source_url"],
         }
         groups.setdefault(eid, []).append(card)
     return groups
@@ -393,7 +394,7 @@ async def get_card(card_id: str) -> dict[str, Any]:
                   intelligence, staged_output, suggested_actions, status, priority,
                   persona, category, created_at, resolved_at,
                   status_reason, status_set_by,
-                  confidence, space_id, has_workspace
+                  confidence, space_id, has_workspace, source_url
            FROM action_cards WHERE card_id = ?""",
         (card_id,),
     )
@@ -419,6 +420,7 @@ async def get_card(card_id: str) -> dict[str, Any]:
         "confidence": r["confidence"],
         "space_id": r["space_id"],
         "has_workspace": bool(r["has_workspace"]),
+        "source_url": r["source_url"],
     }
     # Present only on a card Laya set to done because its work item concluded:
     # the one-sentence reason the stager gave.
@@ -477,7 +479,7 @@ async def get_cards_for_event(event_id: str) -> dict[str, Any]:
     db = await get_db()
     rows = await db.execute_fetchall(
         """SELECT card_id, entity_id, context_id, header, summary, status,
-                  priority, persona, category, created_at
+                  priority, persona, category, created_at, source_url
            FROM action_cards WHERE event_id = ?
            ORDER BY created_at DESC""",
         (event_id,),
@@ -496,6 +498,7 @@ async def get_cards_for_event(event_id: str) -> dict[str, Any]:
                 "persona": r["persona"],
                 "category": r["category"],
                 "created_at": r["created_at"],
+                "source_url": r["source_url"],
             }
             for r in rows
         ],
@@ -520,7 +523,7 @@ async def get_cards_by_entity(
         )
         rows = await db.execute_fetchall(
             """SELECT card_id, event_id, entity_id, context_id, header, summary,
-                      intelligence, status, priority, persona, category, created_at
+                      intelligence, status, priority, persona, category, created_at, source_url
                FROM action_cards WHERE entity_id = ? AND space_id = ?
                ORDER BY created_at DESC LIMIT ? OFFSET ?""",
             (entity_id, space_id, capped_limit, offset),
@@ -532,7 +535,7 @@ async def get_cards_by_entity(
         )
         rows = await db.execute_fetchall(
             """SELECT card_id, event_id, entity_id, context_id, header, summary,
-                      intelligence, status, priority, persona, category, created_at
+                      intelligence, status, priority, persona, category, created_at, source_url
                FROM action_cards WHERE entity_id = ?
                ORDER BY created_at DESC LIMIT ? OFFSET ?""",
             (entity_id, capped_limit, offset),
@@ -555,6 +558,7 @@ async def get_cards_by_entity(
                 "persona": r["persona"],
                 "category": r["category"],
                 "created_at": r["created_at"],
+                "source_url": r["source_url"],
             }
             for r in rows
         ],

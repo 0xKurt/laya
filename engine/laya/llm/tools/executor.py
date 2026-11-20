@@ -29,6 +29,12 @@ from laya.llm.tools import (
 
 log = structlog.get_logger()
 
+
+async def _today(space_id: str | None = None) -> dict[str, Any]:
+    from laya.claude_code.assistant import today
+
+    return await today(space_id=space_id)
+
 # Registry: tool_name -> async handler function
 _TOOL_HANDLERS: dict[str, Any] = {}
 
@@ -58,6 +64,8 @@ def _register_tools() -> None:
         "list_documents": document_tools.list_documents,
         "search_documents": document_tools.search_documents,
         "read_document": document_tools.read_document,
+        # The Claude terminal assistant's overview (read-only)
+        "today": _today,
         # Write tools
         "dismiss_card": card_tools.dismiss_card,
         "mark_card_done": card_tools.mark_card_done,
