@@ -149,11 +149,12 @@ def test_gemini_args_readonly_and_trusts_workspace():
     assert env.get("GEMINI_CLI_TRUST_WORKSPACE") == "true"     # skip trust prompt
 
 
-def test_codex_args_exec_readonly_never_approve():
+def test_codex_args_exec_readonly():
     args, _ = _args("codex_cli")
     assert "exec" in args
     assert args[args.index("--sandbox") + 1] == "read-only"
-    assert args[args.index("--ask-for-approval") + 1] == "never"
+    # `codex exec` has no approval prompt and rejects --ask-for-approval.
+    assert "--ask-for-approval" not in args
 
 
 def test_unknown_agent_rejected():

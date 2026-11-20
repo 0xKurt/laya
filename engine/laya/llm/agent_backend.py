@@ -15,10 +15,12 @@ maps it into the same ``LLMResponse`` and keeps the shared audit-log + budget si
 effects, so the contract is identical to the LiteLLM path.
 
 Capability tiers (validated against the real CLIs):
-  - **native** (Claude Code): ``--json-schema`` forces schema-valid output, returned
-    pre-parsed in the ``structured_output`` field — same tool-based enforcement the
-    Anthropic API uses.
-  - **best_effort** (Codex / Gemini / Pi): no schema flag, so we inject the schema as
+  - **native** (Claude Code, Codex): Claude Code's ``--json-schema`` forces schema-valid
+    output, returned pre-parsed in the ``structured_output`` field — same tool-based
+    enforcement the Anthropic API uses. Codex's ``--output-schema`` constrains the final
+    message with OpenAI structured outputs (strict mode), so the schema is converted to
+    the strict form first (:func:`strict_schema`) and the reply parsed from the message.
+  - **best_effort** (Gemini / Pi): no schema flag, so we inject the schema as
     a text instruction (the same one client.py uses for local providers), parse the
     JSON out of the reply, validate it, and retry on failure.
 
@@ -57,7 +59,7 @@ log = structlog.get_logger()
 # "best_effort" agents get the schema as a prompt instruction + validate/retry.
 AGENT_TIERS: dict[str, str] = {
     "claude_code": "native",
-    "codex_cli": "best_effort",
+    "codex_cli": "native",
     "gemini_cli": "best_effort",
     "pi_cli": "best_effort",
 }
@@ -253,6 +255,115 @@ def _validate_against_schema(parsed: dict, response_schema: dict) -> tuple[bool,
         return False, str(e).splitlines()[0] if str(e) else "schema validation failed"
 
 
+# Keywords OpenAI structured outputs (strict mode) does not accept; they are dropped
+# from the schema given to Codex. The full schema still validates the reply.
+_STRICT_DROP_KEYS = frozenset({
+    "default", "examples", "minLength", "maxLength", "uniqueItems", "minProperties",
+    "maxProperties", "patternProperties", "$schema", "format", "pattern",
+})
+
+
+class _NotStrict(ValueError):
+    """The schema has a part strict mode cannot express (e.g. a free-form object)."""
+
+
+def _strict_node(node: Any) -> Any:
+    if isinstance(node, list):
+        return [_strict_node(n) for n in node]
+    if not isinstance(node, dict):
+        return node
+    out = {k: _strict_node(v) for k, v in node.items() if k not in _STRICT_DROP_KEYS}
+    if "oneOf" in out:
+        out["anyOf"] = out.pop("oneOf")
+    if "allOf" in out:
+        raise _NotStrict("allOf")
+    types = out.get("type")
+    is_object = types == "object" or (isinstance(types, list) and "object" in types) or "properties" in out
+    if is_object:
+        props = out.get("properties")
+        if not isinstance(props, dict) or not props:
+            raise _NotStrict("object without properties")
+        required = set(node.get("required") or [])
+        for key, sub in list(props.items()):
+            if key not in required:
+                props[key] = _nullable(sub)
+        out["required"] = list(props)
+        out["additionalProperties"] = False
+    return out
+
+
+def _nullable(sub: Any) -> Any:
+    """``sub`` that also accepts null (how strict mode expresses an optional field)."""
+    if not isinstance(sub, dict):
+        return sub
+    sub = dict(sub)
+    t = sub.get("type")
+    if isinstance(t, str):
+        if t != "null":
+            sub["type"] = [t, "null"]
+        if "enum" in sub and None not in sub["enum"]:
+            sub["enum"] = [*sub["enum"], None]
+        return sub
+    if isinstance(t, list):
+        if "null" not in t:
+            sub["type"] = [*t, "null"]
+        if "enum" in sub and None not in sub["enum"]:
+            sub["enum"] = [*sub["enum"], None]
+        return sub
+    if "anyOf" in sub:
+        if not any(isinstance(a, dict) and a.get("type") == "null" for a in sub["anyOf"]):
+            sub["anyOf"] = [*sub["anyOf"], {"type": "null"}]
+        return sub
+    return {"anyOf": [sub, {"type": "null"}]}
+
+
+def strict_schema(schema: dict) -> dict | None:
+    """``schema`` in the form OpenAI structured outputs (strict) accepts, or None.
+
+    Every object lists all its properties as required and forbids others; a
+    property that was optional accepts null instead. None when the schema cannot
+    be expressed that way (not an object at the top, a free-form object, allOf).
+    """
+    if not isinstance(schema, dict):
+        return None
+    try:
+        out = _strict_node(schema)
+    except _NotStrict:
+        return None
+    if out.get("type") != "object" and "properties" not in out:
+        return None
+    return out
+
+
+def relax_optional(parsed: Any, schema: Any) -> Any:
+    """Drop the null values strict mode produced for properties ``schema`` does not
+    require, so the reply validates against the original schema."""
+    if not isinstance(schema, dict):
+        return parsed
+    if isinstance(parsed, dict) and isinstance(schema.get("properties"), dict):
+        required = set(schema.get("required") or [])
+        out = {}
+        for key, value in parsed.items():
+            sub = schema["properties"].get(key)
+            if value is None and key not in required and key in schema["properties"]:
+                continue
+            out[key] = relax_optional(value, sub) if sub is not None else value
+        return out
+    if isinstance(parsed, list) and isinstance(schema.get("items"), dict):
+        return [relax_optional(v, schema["items"]) for v in parsed]
+    return parsed
+
+
+# Codex refused the output schema itself (not the reply): the call is retried with
+# the schema as a prompt instruction.
+_SCHEMA_REJECTED_RE = re.compile(
+    r"invalid_json_schema|invalid schema|output[_ -]schema|response_format|text\.format",
+    re.IGNORECASE,
+)
+# Set once Codex refused an output schema; later calls use the prompt instruction.
+_codex_schema_unsupported = False
+
+
 # ── per-agent process runner ─────────────────────────────────────────────
 
 
@@ -264,8 +375,12 @@ def _build_args(
     model_string: str | None,
     response_schema: dict | None,
     native: bool,
+    workdir: str | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     """Build the argv + env for one agent invocation. env overrides only.
+
+    ``workdir`` is the call's ephemeral working directory; Codex's output schema
+    file is written there.
 
     NON-INTERACTIVE GUARANTEE (text processing must never block on a human): every agent
     runs in one-shot headless mode with stdin closed (AgentProcess spawns with
@@ -331,14 +446,23 @@ def _build_args(
         return args, env
 
     if agent_id == "codex_cli":
-        # exec = the non-interactive automation mode (runs to completion, never prompts);
-        # --sandbox read-only = pure inference; --ask-for-approval never = explicitly never
-        # pause for an approval decision.
+        # exec = the non-interactive automation mode: it runs to completion and never
+        # asks for an approval (exec has no --ask-for-approval flag); --sandbox read-only
+        # = pure inference. --skip-git-repo-check lets it run in the empty temp cwd,
+        # --ephemeral keeps the call out of the user's session history, and
+        # --ignore-user-config skips $CODEX_HOME/config.toml (the user's MCP servers,
+        # profiles and instructions) while keeping the login — the analogue of
+        # Claude Code's --safe-mode above.
         prompt = f"{system_text}\n\n{user_prompt}" if system_text else user_prompt
         args = [binary, "exec", "--json", "--sandbox", "read-only",
-                "--ask-for-approval", "never"]
+                "--skip-git-repo-check", "--ephemeral", "--ignore-user-config"]
         if model_string:
             args += ["--model", model_string]
+        if native and response_schema:
+            schema_path = os.path.join(workdir or tempfile.gettempdir(), "laya-output-schema.json")
+            with open(schema_path, "w", encoding="utf-8") as f:
+                json.dump(strict_schema(response_schema.get("schema", response_schema)), f)
+            args += ["--output-schema", schema_path]
         args.append(prompt)
         return args, env
 
@@ -423,7 +547,7 @@ def _parse_output(agent_id: str, lines: list[str], native_schema: bool) -> dict[
     if agent_id == "pi_cli":
         return _parse_pi(lines, out)
     if agent_id == "codex_cli":
-        return _parse_codex(lines, out)
+        return _parse_codex(lines, out, native_schema)
 
     return out
 
@@ -479,8 +603,17 @@ def _parse_pi(lines: list[str], out: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _parse_codex(lines: list[str], out: dict[str, Any]) -> dict[str, Any]:
-    """Accumulate Codex's final agent_message + usage from its JSONL events."""
+def _parse_codex(lines: list[str], out: dict[str, Any], native_schema: bool = False) -> dict[str, Any]:
+    """Accumulate Codex's final agent_message + usage from its JSONL events.
+
+    A turn fails with ``turn.failed`` (its ``error.message``); an ``error`` event
+    alone fails it only when no ``turn.completed`` follows (Codex also reports
+    retried stream errors this way). With an output schema the final message is
+    the JSON reply.
+    """
+    error_event: str | None = None
+    failed: str | None = None
+    completed = False
     for line in lines:
         line = line.strip()
         if not line.startswith("{"):
@@ -490,23 +623,37 @@ def _parse_codex(lines: list[str], out: dict[str, Any]) -> dict[str, Any]:
         except json.JSONDecodeError:
             continue
         etype = ev.get("type", "")
-        if etype.startswith("item.") :
+        if etype.startswith("item."):
             item = ev.get("item") or {}
             if item.get("type") in ("agent_message", "assistant_message"):
                 text = item.get("text") or item.get("message") or ""
                 if text:
                     out["content"] = str(text)
         elif etype == "turn.completed":
+            completed = True
             usage = ev.get("usage") or {}
-            out["input_tokens"] = int(usage.get("input_tokens", usage.get("input", 0)))
-            out["output_tokens"] = int(usage.get("output_tokens", usage.get("output", 0)))
+            total_in = int(usage.get("input_tokens", usage.get("input", 0)) or 0)
+            cached = int(usage.get("cached_input_tokens") or 0)
+            # input_tokens includes the cached part; cache reads are weighted like
+            # Claude Code's (see CACHE_READ_WEIGHT).
+            out["input_tokens"] = int(total_in - cached + cached * CACHE_READ_WEIGHT)
+            out["output_tokens"] = int(usage.get("output_tokens", usage.get("output", 0)) or 0)
+        elif etype == "turn.failed":
+            err = ev.get("error")
+            failed = str((err.get("message") if isinstance(err, dict) else err) or "codex turn failed")
         elif etype == "error":
-            out["error"] = str(ev.get("message") or ev.get("error") or "codex error")
+            error_event = str(ev.get("message") or ev.get("error") or "codex error")
+    if failed:
+        out["error"] = failed
+    elif error_event and not completed:
+        out["error"] = error_event
+    if native_schema and out["content"] and not out["error"]:
+        out["parsed"] = _extract_json(out["content"])
     return out
 
 
 class AgentRateLimited(RuntimeError):
-    """The Claude account's usage limit rejected the turn."""
+    """The login's usage limit (a Claude account, a Codex login) rejected the turn."""
 
 
 async def _run_agent_routed(agent_id: str, *args: Any) -> dict[str, Any]:
@@ -515,6 +662,12 @@ async def _run_agent_routed(agent_id: str, *args: Any) -> dict[str, Any]:
     A rejection by that account's usage limit is retried once on the next
     account with room. The result carries the account in ``account_id``.
     """
+    if agent_id == "codex_cli":
+        from laya.claude_code import codex_accounts
+
+        result = await _run_agent(agent_id, *args, account_id=codex_accounts.DEFAULT_ID)
+        result["account_id"] = codex_accounts.DEFAULT_ID
+        return result
     if agent_id != "claude_code":
         return await _run_agent(agent_id, *args)
     from laya.claude_code import accounts
@@ -550,16 +703,17 @@ async def _run_agent(
     rate-limit signal is recorded for ``account_id`` before any error is raised.
     A rejection by the account's usage limit raises :class:`AgentRateLimited`.
     """
-    args, env = _build_args(
-        agent_id, binary, system_text, user_prompt, model_string, response_schema, native
-    )
-    if account_env:
-        env = {**env, **account_env}
     # Ephemeral, empty working dir: the agent has no repo to read or write, reinforcing
     # the tool/sandbox flags above. Cleaned up regardless of outcome.
     tmpdir = tempfile.mkdtemp(prefix="laya-agent-llm-")
     proc = AgentProcess()
     try:
+        args, env = _build_args(
+            agent_id, binary, system_text, user_prompt, model_string, response_schema, native,
+            workdir=tmpdir,
+        )
+        if account_env:
+            env = {**env, **account_env}
         await proc.spawn(args=args, cwd=tmpdir, env=env or None)
 
         async def _collect() -> list[str]:
@@ -589,6 +743,18 @@ async def _run_agent(
         await accounts.record(account_id, result.get("rate_limit_info"), rejected=rejected)
         if result.get("error") and rejected:
             raise AgentRateLimited(f"Agent '{agent_id}' error: {result['error']}")
+    elif agent_id == "codex_cli":
+        from laya.claude_code import codex_accounts
+
+        # A usage limit arrives as the turn's error (JSONL), or on stderr when the
+        # CLI failed before printing events.
+        info = codex_accounts.limit_info(result.get("error")) or (
+            None if result.get("content") else codex_accounts.limit_info(proc.stderr_output)
+        )
+        if info:
+            result["rate_limit_info"] = info
+            await codex_accounts.record(account_id, info)
+            raise AgentRateLimited(f"Agent '{agent_id}' error: {info['message']}")
     if result.get("error"):
         stderr_tail = proc.stderr_output
         raise RuntimeError(
@@ -616,6 +782,7 @@ async def agent_llm_call(
     a prompt instruction, then the reply is parsed + validated + retried up to
     ``num_retries`` times before giving up (``parsed=None``, like the LiteLLM path).
     """
+    global _codex_schema_unsupported
     agent_id, model_string = parse_agent_model_id(model_id)
     if agent_id not in AGENT_TIERS:
         raise ValueError(f"Unknown agent backend: {agent_id!r}")
@@ -628,18 +795,25 @@ async def agent_llm_call(
 
     binary = get_agent_binary(agent_id)
     native = AGENT_TIERS[agent_id] == "native"
+    if agent_id == "codex_cli" and response_schema and (
+        _codex_schema_unsupported
+        or strict_schema(response_schema.get("schema", response_schema)) is None
+    ):
+        native = False
     system_text, user_prompt = _split_messages(messages)
 
-    # Prepend the non-interactive directive ahead of the (unchanged) stage system prompt
-    # so the agent answers directly instead of asking clarifying questions.
-    base_system = (
-        _NONINTERACTIVE_DIRECTIVE + ("\n\n" + system_text if system_text else "")
-    ).strip()
-    # Best-effort agents have no schema flag — give them the schema as text, the same
-    # way client.py does for local providers without native structured output.
-    if response_schema and not native:
-        schema_text = json.dumps(response_schema.get("schema", response_schema), indent=2)
-        base_system = (base_system + _SCHEMA_INSTRUCTION.format(schema_text=schema_text)).strip()
+    def system_for(native_call: bool) -> str:
+        # The non-interactive directive goes ahead of the (unchanged) stage system
+        # prompt so the agent answers directly instead of asking clarifying questions.
+        # Without a native schema flag the schema is given as text, the same way
+        # client.py does for local providers without native structured output.
+        text = (_NONINTERACTIVE_DIRECTIVE + ("\n\n" + system_text if system_text else "")).strip()
+        if response_schema and not native_call:
+            schema_text = json.dumps(response_schema.get("schema", response_schema), indent=2)
+            text = (text + _SCHEMA_INSTRUCTION.format(schema_text=schema_text)).strip()
+        return text
+
+    base_system = system_for(native)
 
     from laya.pipeline.queue import get_model_timeout
 
@@ -649,21 +823,37 @@ async def agent_llm_call(
     last_usage = {"input_tokens": 0, "output_tokens": 0}
     last_extra: dict[str, Any] = {}
     retry_feedback = ""
+    parsed = None
 
     async with _get_semaphore():
-        for attempt in range(attempts):
+        attempt = 0
+        while attempt < attempts:
             system_for_attempt = base_system
             if retry_feedback:
                 system_for_attempt = (base_system + retry_feedback).strip()
 
             start = time.monotonic()
-            result = await _run_agent_routed(
-                agent_id, binary, system_for_attempt, user_prompt, model_string,
-                response_schema, native, timeout,
-            )
+            try:
+                result = await _run_agent_routed(
+                    agent_id, binary, system_for_attempt, user_prompt, model_string,
+                    response_schema, native, timeout,
+                )
+            except RuntimeError as e:
+                if isinstance(e, AgentRateLimited) or not (
+                    agent_id == "codex_cli" and native and _SCHEMA_REJECTED_RE.search(str(e))
+                ):
+                    raise
+                # Codex refused the strict output schema itself: this and later calls
+                # give the schema as a prompt instruction instead.
+                _codex_schema_unsupported = True
+                native = False
+                base_system = system_for(False)
+                log.warning("codex_output_schema_refused", error=str(e)[:300])
+                continue
+            attempt += 1
             log.info(
                 "agent_llm_attempt",
-                agent_id=agent_id, attempt=attempt + 1, native=native,
+                agent_id=agent_id, attempt=attempt, native=native,
                 latency_ms=int((time.monotonic() - start) * 1000),
                 output_tokens=result.get("output_tokens", 0),
             )
@@ -684,8 +874,14 @@ async def agent_llm_call(
                 parsed = None
                 break
 
-            # Native agents return the validated object directly.
-            parsed = result["parsed"] if native else _extract_json(result["content"])
+            # Native agents return the object directly (Codex: strict-mode nulls of
+            # optional fields dropped again).
+            if native:
+                parsed = result["parsed"]
+                if agent_id == "codex_cli":
+                    parsed = relax_optional(parsed, response_schema.get("schema", response_schema))
+            else:
+                parsed = _extract_json(result["content"])
             if parsed is not None:
                 ok, err = _validate_against_schema(parsed, response_schema)
                 if ok:
@@ -701,7 +897,7 @@ async def agent_llm_call(
                 )
             log.warning(
                 "agent_llm_invalid_output",
-                agent_id=agent_id, attempt=attempt + 1, will_retry=attempt + 1 < attempts,
+                agent_id=agent_id, attempt=attempt, will_retry=attempt < attempts,
             )
 
     return AgentResult(
