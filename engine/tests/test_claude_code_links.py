@@ -101,7 +101,7 @@ async def test_enrich_reads_github_and_batches_documents_in_one_turn(db, budget_
     args, kwargs = turn.await_args.args, turn.await_args.kwargs
     assert args[0] == "links"
     assert args[3] == ["mcp__drive__read_file_content", "mcp__notion__notion-fetch"]
-    assert kwargs["deny"] == ["mcp__notion__notion-create-pages"] and kwargs["model"] == "haiku"
+    assert kwargs["deny"] == ["mcp__notion__notion-create-pages"] and kwargs["model"] == "agent/auto"
     body = out.content.body
     section = body.split("\n\nLinked documents:\n")[1]
     assert section.splitlines() == [

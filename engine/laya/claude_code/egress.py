@@ -434,7 +434,7 @@ class ClaudeCodeBackend(EgressBackend):
         if errors:
             return EgressResult(success=False, error=f"Invalid {label} payload: " + "; ".join(errors))
 
-        model = store.merged_config(platform, (source or {}).get("config")).get("model") or "haiku"
+        model = store.merged_config(platform, (source or {}).get("config")).get("model") or cli.AUTOMATIC_MODEL
         deny = sorted(set(assignment.all_tools) - {tool})
         try:
             data = await cli.run_send(

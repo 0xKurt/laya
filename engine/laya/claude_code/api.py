@@ -64,6 +64,22 @@ async def get_status() -> dict[str, Any]:
     return await build_status(found)
 
 
+@router.get("/agent-models")
+async def agent_models() -> dict[str, Any]:
+    """Models the pickers offer: per agent (``agents``, the plain model names the
+    agent takes), and the explicit collector models grouped by the agents with a
+    login collector turns can run on (``collect``, stored as
+    ``agent/<agent_id>/<model>``; ``automatic`` = the Automatic value)."""
+    from laya.claude_code import collect_models
+    from laya.llm.agent_backend import AGENT_TIERS
+
+    return {
+        "agents": {a: collect_models.known_models(a) for a in AGENT_TIERS},
+        "collect": await collect_models.choices(),
+        "automatic": collect_models.AUTOMATIC,
+    }
+
+
 @router.get("/my-work")
 async def get_my_work(refresh: bool = False) -> dict[str, Any]:
     """The user's open Linear issues and own open GitHub pull requests, as

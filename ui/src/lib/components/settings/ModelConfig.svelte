@@ -15,6 +15,7 @@
 	import ModelSelect from './ModelSelect.svelte';
 	import AccessConfig from './AccessConfig.svelte';
 	import { AUTO_MODEL, describeAutoRole, getAutoRouting, setApiFallback, type AutoRouting } from '$lib/api/modelAccess';
+	import AgentModelSelect from '$lib/components/pickers/AgentModelSelect.svelte';
 
 	let guideTooltip = $state<{ text: string; top: number; left: number } | null>(null);
 
@@ -480,14 +481,9 @@
 		saveModels();
 	}
 
-	function handleAgentModelInput(role: string) {
-		return (e: Event) => {
-			const typed = (e.target as HTMLInputElement).value.trim();
-			models[role as keyof typeof models] = typed
-				? `agent/${selectedAgent}/${typed}`
-				: `agent/${selectedAgent}`;
-			saveModels();
-		};
+	function setAgentModel(role: string, typed: string) {
+		models[role as keyof typeof models] = typed ? `agent/${selectedAgent}/${typed}` : `agent/${selectedAgent}`;
+		saveModels();
 	}
 
 	async function saveApiKey(provider: string) {
@@ -1070,15 +1066,13 @@
 									: models[role.id as keyof typeof models]}
 							</div>
 						{:else if agentMode && agentRolesFor(selectedAgent).includes(role.id)}
-							<input
+							<AgentModelSelect
 								id="{role.id}-model"
-								type="text"
+								agentId={selectedAgent}
 								value={agentModelString(role.id)}
-								onchange={handleAgentModelInput(role.id)}
+								onchange={(typed) => setAgentModel(role.id, typed)}
 								placeholder={AGENT_MODEL_PLACEHOLDERS[selectedAgent] || 'Model string (blank = agent default)'}
-								spellcheck="false"
-								autocapitalize="off"
-								class="w-full rounded-md border px-3 py-2 font-mono text-laya-base text-surface-100 placeholder:text-surface-500 focus:outline-none {$glassTheme ? 'glass-input' : 'border-surface-600 bg-surface-700 focus:border-surface-500'}"
+								class="w-full rounded-md border px-3 py-2 text-laya-base text-surface-100 placeholder:text-surface-500 focus:outline-none {$glassTheme ? 'glass-input' : 'border-surface-600 bg-surface-700 focus:border-surface-500'}"
 							/>
 						{:else}
 							<ModelSelect

@@ -341,7 +341,7 @@ async def fetch_linear(source: dict[str, Any]) -> list[dict[str, Any]]:
     tool = assignment.tools["list_issues"]
     out = await cli.run_collect(
         "linear_my_work", linear_prompt(tool), LINEAR_SCHEMA, [tool],
-        model=(source.get("config") or {}).get("model") or "haiku",
+        model=(source.get("config") or {}).get("model") or cli.AUTOMATIC_MODEL,
         timeout=LINEAR_TIMEOUT,
         deny=assignment.all_tools,
         env=assignment.env or None,

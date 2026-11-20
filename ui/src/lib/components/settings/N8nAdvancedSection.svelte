@@ -9,6 +9,7 @@
 	import { reducedMotion } from '$lib/stores/reducedMotion';
 	import { parseBackendDate } from '$lib/utils/datetime';
 	import PlatformIcon from './PlatformIcon.svelte';
+	import { platformLabel } from '$lib/utils/cardVisuals';
 	import type {
 		N8nTestResult,
 		N8nBootstrapResponse,
@@ -17,6 +18,11 @@
 		Source
 	} from '$lib/api/types';
 
+	// Platforms that have an n8n executor workflow (engine config.py `n8n.webhooks`).
+	const WEBHOOK_PLATFORMS = [
+		'github', 'bitbucket', 'bitbucket_server', 'jira', 'linear', 'slack', 'gmail',
+		'calendar', 'google_calendar', 'outlook', 'outlook_calendar'
+	];
 	const DEFAULT_WEBHOOKS: Record<string, string> = {
 		jira: 'jira-executor',
 		bitbucket: 'bitbucket-executor',
@@ -823,12 +829,16 @@
 
 					{#if showAddWebhook}
 						<div class="mt-4 flex gap-3">
-							<input
-								type="text"
+							<select
 								bind:value={newPlatform}
-								placeholder="Platform (e.g. github)"
-								class="rounded-md border border-surface-600 bg-surface-700 px-3 py-2 text-laya-base text-surface-100 placeholder:text-surface-500"
-							/>
+								aria-label="Platform"
+								class="rounded-md border border-surface-600 bg-surface-700 px-3 py-2 text-laya-base text-surface-100"
+							>
+								<option value="" disabled>Platform</option>
+								{#each WEBHOOK_PLATFORMS.filter((p) => !(p in webhooks)) as p (p)}
+									<option value={p}>{platformLabel(p)}</option>
+								{/each}
+							</select>
 							<input
 								type="text"
 								bind:value={newPath}

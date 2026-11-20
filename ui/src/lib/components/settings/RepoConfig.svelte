@@ -209,7 +209,15 @@
 			<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
 				<input bind:value={formName} placeholder="Name (e.g. payments-service)" class="rounded-lg border border-surface-600 bg-surface-900 px-3 py-2 text-laya-base text-surface-50 placeholder-surface-500" />
 				<input bind:value={formPath} placeholder="Local path (e.g. /home/user/repos/payments)" class="rounded-lg border border-surface-600 bg-surface-900 px-3 py-2 text-laya-base text-surface-50 placeholder-surface-500" />
-				<input bind:value={formPlatform} placeholder="Platform (e.g. github, bitbucket)" class="rounded-lg border border-surface-600 bg-surface-900 px-3 py-2 text-laya-base text-surface-50 placeholder-surface-500" />
+				<select bind:value={formPlatform} aria-label="Platform" class="rounded-lg border border-surface-600 bg-surface-900 px-3 py-2 text-laya-base text-surface-50">
+					<option value="" disabled>Platform</option>
+					{#each [['github', 'GitHub'], ['bitbucket', 'Bitbucket'], ['bitbucket_server', 'Bitbucket Server']] as [value, label] (value)}
+						<option {value}>{label}</option>
+					{/each}
+					{#if formPlatform && !['github', 'bitbucket', 'bitbucket_server'].includes(formPlatform)}
+						<option value={formPlatform}>{formPlatform}</option>
+					{/if}
+				</select>
 				<input bind:value={formRemoteId} placeholder="Remote ID (e.g. org/repo)" class="rounded-lg border border-surface-600 bg-surface-900 px-3 py-2 text-laya-base text-surface-50 placeholder-surface-500" />
 				<input bind:value={formHost} placeholder="Host (e.g. bitbucket.org; leave blank for cloud)" class="rounded-lg border border-surface-600 bg-surface-900 px-3 py-2 text-laya-base text-surface-50 placeholder-surface-500" />
 			</div>

@@ -14,7 +14,6 @@
 	import { STATUS_STYLE, statusTint } from '$lib/utils/integrationHealth';
 	import {
 		CLAUDE_CODE_LABELS,
-		MODELS,
 		WEEKDAYS,
 		claudeCodeProblem,
 		claudeCodeState,
@@ -29,6 +28,7 @@
 	import SenderChips from '$lib/components/pickers/SenderChips.svelte';
 	import TimezoneSelect from '$lib/components/pickers/TimezoneSelect.svelte';
 	import DurationSelect from '$lib/components/pickers/DurationSelect.svelte';
+	import { AUTO_MODEL, collectModelGroups, getAgentModels, type ModelGroup } from '$lib/api/modelAccess';
 
 	let {
 		platform,
@@ -64,6 +64,19 @@
 		github: 'Reads your pull requests, reviews and mentions through the GitHub CLI (gh). No token or n8n needed.',
 		notion: 'Reads pages and comments that involve you through the Notion connector of your coding agent login. No integration or n8n needed.'
 	};
+
+	// Explicit collector models of the agents with a login; Automatic is always offered.
+	let modelGroups = $state<ModelGroup[]>([]);
+	$effect(() => {
+		if (!showSettings) return;
+		getAgentModels()
+			.then((m) => (modelGroups = m.collect))
+			.catch(() => (modelGroups = []));
+	});
+
+	function modelAgentLabel(value: string): string {
+		return modelGroups.find((g) => g.models.some((m) => m.value === value))?.label ?? 'matching';
+	}
 
 	let busy = $state<null | 'connect' | 'disconnect' | 'sync' | 'discover' | 'enable' | 'save'>(null);
 	let actionError = $state<string | null>(null);
@@ -359,10 +372,20 @@
 						<div>
 							<label for="cc-{platform}-model" class={labelClass}>Model</label>
 							<select id="cc-{platform}-model" bind:value={form.model} class={inputClass}>
-								{#each MODELS as m (m.value)}
-									<option value={m.value}>{m.label}</option>
+								<option value={AUTO_MODEL}>Automatic</option>
+								{#each collectModelGroups(modelGroups, form.model) as g (g.agent_id)}
+									<optgroup label={g.label}>
+										{#each g.models as m (m.value)}
+											<option value={m.value}>{m.label}</option>
+										{/each}
+									</optgroup>
 								{/each}
 							</select>
+							<p class={helpClass}>
+								{form.model === AUTO_MODEL
+									? 'A light model of whichever coding agent login runs the sweep.'
+									: `Used when the sweep runs on a ${modelAgentLabel(form.model)} login; on another agent's login Laya picks automatically.`}
+							</p>
 						</div>
 					</div>
 

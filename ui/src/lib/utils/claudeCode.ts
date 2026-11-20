@@ -14,6 +14,7 @@ import type {
 	ClaudeCodePlatformStatus,
 	EgressConnection
 } from '$lib/api/types';
+import { normalizeCollectModel } from '$lib/api/modelAccess';
 
 export const CLAUDE_CODE_PLATFORMS: ClaudeCodePlatform[] = ['slack', 'gmail', 'linear', 'github', 'notion'];
 
@@ -144,12 +145,6 @@ export const PLATFORM_KEYS: Record<ClaudeCodePlatform, (keyof ClaudeCodeConfig)[
 	notion: []
 };
 
-export const MODELS = [
-	{ value: 'haiku', label: 'Haiku (fast, light on your usage)' },
-	{ value: 'sonnet', label: 'Sonnet' },
-	{ value: 'opus', label: 'Opus' }
-];
-
 export const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 export function configToForm(c: ClaudeCodeConfig): ClaudeCodeForm {
@@ -159,7 +154,7 @@ export function configToForm(c: ClaudeCodeConfig): ClaudeCodeForm {
 		end: c.active_hours?.end ?? '19:00',
 		days: [...(c.active_hours?.days ?? [0, 1, 2, 3, 4])].sort((a, b) => a - b),
 		timezone: c.timezone ?? '',
-		model: c.model || 'haiku',
+		model: normalizeCollectModel(c.model),
 		initial_lookback_hours: c.initial_lookback_hours,
 		recheck_after_hours: c.recheck_after_hours,
 		context_messages: c.context_messages ?? 8,

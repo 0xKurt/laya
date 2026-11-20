@@ -6,6 +6,7 @@
 	import { glassTheme } from '$lib/stores/glassTheme';
 	import { CODING_AGENTS, DEFAULT_AGENT_PATHS, AGENT_BINARY_NAMES } from '$lib/config';
 	import AssistantSettings from './AssistantSettings.svelte';
+	import { isTauri } from '$lib/utils/fileDrop';
 
 	let selected = $state('claude_code');
 	let agentPaths = $state<Record<string, string>>({ ...DEFAULT_AGENT_PATHS });
@@ -15,12 +16,24 @@
 	let error = $state<string | null>(null);
 
 	const hasAgent = $derived(selected !== 'none');
+	// What auto-detection finds now, per agent; the stored path differs only when chosen by hand.
+	let detectedPaths = $state<Record<string, string> | null>(null);
+	const desktop = isTauri();
+	let typingPath = $state(false);
+	let typedPath = $state('');
+	const customPath = $derived(
+		detectedPaths !== null && !!agentPaths[selected] && agentPaths[selected] !== (detectedPaths[selected] || '')
+	);
 
 	onMount(async () => {
 		try {
 			const settings = await engineApi.getSettings();
 			selected = settings.coding_agent || 'claude_code';
 			agentPaths = settings.agent_paths || { ...DEFAULT_AGENT_PATHS };
+			engineApi
+				.detectAgentPaths()
+				.then((r) => (detectedPaths = r.agent_paths))
+				.catch(() => {});
 		} catch {
 			error = 'Failed to load settings';
 		} finally {
@@ -46,6 +59,7 @@
 		error = null;
 		try {
 			const result = await engineApi.detectAgentPaths();
+			detectedPaths = result.agent_paths;
 			agentPaths = result.agent_paths;
 			await engineApi.updateSettings({ agent_paths: result.agent_paths });
 		} catch {
@@ -53,6 +67,30 @@
 		} finally {
 			detecting = false;
 		}
+	}
+
+	/** The native file dialog (desktop app); the browser build types the path instead. */
+	async function chooseBinary() {
+		error = null;
+		if (!desktop) {
+			typedPath = agentPaths[selected] || '';
+			typingPath = true;
+			return;
+		}
+		try {
+			const { invoke } = await import('@tauri-apps/api/core');
+			const picked = await invoke<string | null>('plugin:dialog|open', {
+				options: { multiple: false, directory: false, title: `Choose the ${AGENT_BINARY_NAMES[selected] || selected} binary` }
+			});
+			if (picked) await saveAgentPath(selected, picked);
+		} catch (e) {
+			error = String(e ?? '') || 'Could not open the file dialog';
+		}
+	}
+
+	async function resetToDetected() {
+		typingPath = false;
+		await saveAgentPath(selected, detectedPaths?.[selected] || '');
 	}
 
 	async function saveAgentPath(agentType: string, path: string) {
@@ -124,7 +162,7 @@
 				<h3 class="text-laya-base font-medium">Agent Binary Path</h3>
 				<p class="text-laya-secondary text-surface-400">
 					{#if hasAgent}
-						Path to the agent CLI binary. Auto-detected on startup, or set manually.
+						The agent's CLI binary. Detected automatically; choose another file to override it.
 					{:else}
 						Enable a coding agent above to configure the binary path
 					{/if}
@@ -143,20 +181,47 @@
 
 		{#if hasAgent}
 			{#key selected}
-				<div class="flex items-center gap-2">
-					<input
-						type="text"
-						class="flex-1 rounded-md border border-surface-600 bg-surface-900 px-3 py-2 text-laya-base text-surface-200 placeholder-surface-500 focus:border-laya-orange focus:outline-none"
-						placeholder="/path/to/{AGENT_BINARY_NAMES[selected] || selected}"
-						value={agentPaths[selected] || ''}
-						onchange={(e) => saveAgentPath(selected, (e.target as HTMLInputElement).value)}
-						disabled={!hasAgent}
-					/>
+				<div class="flex flex-wrap items-center gap-2">
+					{#if agentPaths[selected]}
+						<code class="min-w-0 flex-1 truncate rounded-md bg-surface-900 px-3 py-2 font-mono text-laya-base text-surface-200" title={agentPaths[selected]}>{agentPaths[selected]}</code>
+						<span class="text-laya-micro {customPath ? 'text-laya-amber' : 'text-green-400/70'}">{customPath ? 'chosen' : 'detected'}</span>
+					{:else}
+						<span class="flex-1 text-laya-secondary text-yellow-400/70">Not found. Install {AGENT_BINARY_NAMES[selected] || selected} or choose its binary.</span>
+					{/if}
+					<button
+						class="rounded-md border border-surface-600 bg-surface-700 px-3 py-1.5 text-laya-secondary font-medium transition-colors hover:bg-surface-600"
+						onclick={chooseBinary}
+					>Choose file…</button>
+					{#if customPath}
+						<button class="text-laya-secondary text-surface-400 hover:text-surface-200" onclick={resetToDetected}>Reset to detected</button>
+					{/if}
 				</div>
-				{#if agentPaths[selected]}
-					<p class="mt-1.5 text-laya-secondary text-green-400/70">{agentPaths[selected]}</p>
-				{:else}
-					<p class="mt-1.5 text-laya-secondary text-yellow-400/70">No path configured — agent may not be found in bundled app mode</p>
+				{#if customPath}
+					<p class="mt-1.5 text-laya-micro text-surface-500">Detected: <span class="font-mono">{detectedPaths?.[selected] || 'nothing found'}</span></p>
+				{/if}
+				{#if typingPath}
+					<form
+						class="mt-2 flex items-center gap-2"
+						onsubmit={(e) => {
+							e.preventDefault();
+							typingPath = false;
+							if (typedPath.trim()) saveAgentPath(selected, typedPath.trim());
+						}}
+					>
+						<!-- svelte-ignore a11y_autofocus -->
+						<input
+							type="text"
+							autofocus
+							aria-label="Binary path"
+							bind:value={typedPath}
+							spellcheck="false"
+							class="flex-1 rounded-md border border-surface-600 bg-surface-900 px-3 py-2 font-mono text-laya-base text-surface-200 placeholder-surface-500 focus:border-laya-orange focus:outline-none"
+							placeholder="/path/to/{AGENT_BINARY_NAMES[selected] || selected}"
+						/>
+						<button type="submit" class="rounded-md bg-surface-600 px-3 py-1.5 text-laya-secondary font-medium hover:bg-surface-500">Use</button>
+						<button type="button" class="text-laya-secondary text-surface-400 hover:text-surface-200" onclick={() => (typingPath = false)}>Cancel</button>
+					</form>
+					<p class="mt-1 text-laya-micro text-surface-500">The file dialog is available in the desktop app; here the path is typed.</p>
 				{/if}
 			{/key}
 		{/if}

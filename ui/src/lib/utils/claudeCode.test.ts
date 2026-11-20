@@ -20,7 +20,7 @@ const COMMON: ClaudeCodeConfig = {
 	interval_minutes: 60,
 	active_hours: { start: '08:00', end: '19:00', days: [0, 1, 2, 3, 4] },
 	timezone: '',
-	model: 'haiku',
+	model: 'agent/auto',
 	initial_lookback_hours: 12,
 	recheck_after_hours: 6
 };
@@ -133,6 +133,11 @@ describe('config form', () => {
 		expect(formToConfig('gmail', configToForm(gmail)).config).toEqual(gmail);
 		expect(formToConfig('github', configToForm(github)).config).toEqual(github);
 		expect(formToConfig('linear', configToForm(COMMON)).config).toEqual(COMMON);
+	});
+
+	it('reads a stored bare model name as that Claude Code model', () => {
+		expect(configToForm({ ...COMMON, model: 'haiku' }).model).toBe('agent/claude_code/haiku');
+		expect(configToForm({ ...COMMON, model: '' }).model).toBe('agent/auto');
 	});
 
 	it('sends only the platform keys the engine accepts', () => {
