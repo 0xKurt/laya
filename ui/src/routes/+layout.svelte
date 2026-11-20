@@ -6,6 +6,8 @@
 	import { goto } from '$app/navigation';
 	import HealthBadge from '$lib/components/HealthBadge.svelte';
 	import ChatSidebar from '$lib/components/chat/ChatSidebar.svelte';
+	import AssistantPanel from '$lib/components/claude/AssistantPanel.svelte';
+	import { sidePanel } from '$lib/stores/sidePanel';
 	import { initWebSocket, closeWebSocket, lastMessage } from '$lib/stores/websocket';
 	import { startHealthPolling, stopHealthPolling, startupReady } from '$lib/stores/health';
 	import StartupScreen from '$lib/components/StartupScreen.svelte';
@@ -439,6 +441,14 @@
 		}
 		document.addEventListener('keydown', handleChatShortcut);
 
+		// Keyboard shortcut: press '`' to toggle the assistant side panel
+		function handleAssistantShortcut(e: KeyboardEvent) {
+			if (e.key !== '`' || e.metaKey || e.ctrlKey || e.altKey || shortcutBlocked(e)) return;
+			e.preventDefault();
+			sidePanel.toggleAssistant();
+		}
+		document.addEventListener('keydown', handleAssistantShortcut);
+
 		// Keyboard shortcut: press 'r' to toggle recent items drawer
 		function handleRecentShortcut(e: KeyboardEvent) {
 			if (e.key === 'r' && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -555,6 +565,7 @@
 			document.removeEventListener('keydown', handleAgentShortcut);
 			document.removeEventListener('keydown', handleSummaryShortcut);
 			document.removeEventListener('keydown', handleChatShortcut);
+			document.removeEventListener('keydown', handleAssistantShortcut);
 			document.removeEventListener('keydown', handleRecentShortcut);
 			document.removeEventListener('keydown', handleBookmarkShortcut);
 			document.removeEventListener('keydown', handleSearchShortcut);
@@ -763,25 +774,18 @@
 		{#if !isPanelHidden($hiddenViews, 'chat')}
 		<div class="group/tip relative">
 			<button
-				onclick={() => {
-					if ($chatOpen) {
-						chatOpen.set(false);
-					} else {
-						chatListOpen.set(true);
-						chatOpen.set(true);
-					}
-				}}
+				onclick={() => sidePanel.toggleAssistant()}
 				class="rounded-lg p-1.5 transition-colors
-					{$chatOpen
+					{$sidePanel.panel
 						? 'bg-laya-orange/10 text-laya-orange'
 						: 'text-surface-400 hover:text-laya-orange titlebar-hover'}"
-				aria-label="Chat with Laya"
+				aria-label="Assistant"
 			>
 				<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 				</svg>
 			</button>
-			<span class="pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md border border-transparent glass-tooltip px-2 py-1 text-[10px] font-medium opacity-0 transition-opacity duration-75 group-hover/tip:opacity-100">Chat</span>
+			<span class="pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md border border-transparent glass-tooltip px-2 py-1 text-[10px] font-medium opacity-0 transition-opacity duration-75 group-hover/tip:opacity-100">Assistant (`)</span>
 		</div>
 		{/if}
 
@@ -859,7 +863,7 @@
 		<CorpusBanner />
 
 		<!-- Main content — add right padding when chat sidebar is open so content isn't hidden behind it -->
-		<main class="flex-1 overflow-auto p-4 {$chatOpen ? 'pr-[476px]' : ''}">
+		<main class="flex-1 overflow-auto p-4 {$chatOpen ? 'pr-[476px]' : ''}" style:padding-right={$sidePanel.panel === 'assistant' ? 'calc(var(--side-panel-w) + 32px)' : null}>
 			{#key page.url.pathname}
 				<div
 					class="h-full"
@@ -946,6 +950,7 @@
 	</div>
 
 	<ChatSidebar />
+	<AssistantPanel />
 	<ComposeModal />
 	<RunAgentModal />
 	<AddDocumentSheet />

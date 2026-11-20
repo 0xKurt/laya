@@ -34,8 +34,8 @@
 	{onclick}
 	onkeydown={(e) => e.stopPropagation()}
 	disabled={busy}
-	aria-label="Reference in Claude"
-	title="Reference in Claude"
+	aria-label="Send to Assistant"
+	title="Send to Assistant"
 	class="flex items-center justify-center rounded-md transition-all disabled:opacity-40 {className}"
 >
 	<svg class={size} fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">

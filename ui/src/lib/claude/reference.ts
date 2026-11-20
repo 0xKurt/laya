@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * One-line references the "Reference in Claude" button inserts into a Claude
+ * One-line references the "Send to Assistant" button inserts into an assistant
  * terminal tab. They are built only from fields the UI already has; the
  * engine strips control characters again before pasting.
  */

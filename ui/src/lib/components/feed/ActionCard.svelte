@@ -586,7 +586,7 @@
 				</div>
 			{/if}
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
-			<div class="relative" onmouseenter={(e) => showTooltip(e.currentTarget, 'Reference in Claude')} onmouseleave={hideTooltip}>
+			<div class="relative" onmouseenter={(e) => showTooltip(e.currentTarget, 'Send to Assistant')} onmouseleave={hideTooltip}>
 				<ReferenceInClaude
 					reference={() => cardReference(card)}
 					class="h-6 w-6 text-surface-400 hover:bg-laya-orange/15 hover:text-laya-orange opacity-0 group-hover/card:opacity-100 focus-visible:opacity-100"

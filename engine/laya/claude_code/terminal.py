@@ -1,7 +1,11 @@
 # Copyright 2026 Aayush Chawla
 # SPDX-License-Identifier: Apache-2.0
 
-"""Plain terminal sessions that run the user's own ``claude`` CLI in a PTY.
+"""Plain terminal sessions that run the user's own coding agent CLI in a PTY.
+
+The agent (Claude Code by default, or Codex) is chosen per session; how each
+one is started lives in ``terminal_agents.py``. The description below is for
+Claude Code; Codex gets the same MCP server through its own config overrides.
 
 A terminal session is the ``claude`` binary (``config.get_agent_binary("claude_code")``)
 started in a pseudo-terminal with the user's normal environment and Claude Code
@@ -28,7 +32,6 @@ import asyncio
 import contextlib
 import errno
 import fcntl
-import glob
 import os
 import pty
 import re
@@ -44,6 +47,7 @@ from typing import Any
 import structlog
 
 from laya.claude_code import store
+from laya.claude_code import terminal_agents as agents
 from laya.config import get_agent_binary
 from laya.db.sqlite import get_db
 
@@ -90,11 +94,13 @@ class TerminalSession:
     cwd: str
     claude_session_id: str
     created_at: str
+    agent: str = agents.CLAUDE
     process: subprocess.Popen | None = None
     master_fd: int | None = None
     mcp_token: str | None = None
     mcp_config_path: str | None = None
     note: str | None = None
+    spawn_env: dict[str, str] = field(default_factory=dict)
     exit_code: int | None = None
     buffer: bytearray = field(default_factory=bytearray)
     subscribers: set[asyncio.Queue] = field(default_factory=set)
@@ -112,6 +118,8 @@ class TerminalSession:
             "name": self.name,
             "cwd": self.cwd,
             "claude_session_id": self.claude_session_id,
+            "agent": self.agent,
+            "agent_label": agents.AGENT_LABELS.get(self.agent, self.agent),
             "created_at": self.created_at,
             "running": self.running,
             "exit_code": self.exit_code,
@@ -156,7 +164,8 @@ async def _insert_row(s: TerminalSession) -> None:
            ON CONFLICT(id) DO UPDATE SET
                name = excluded.name, cwd = excluded.cwd,
                last_active_at = excluded.last_active_at, closed_at = NULL""",
-        (s.id, s.name, s.cwd, s.claude_session_id, s.created_at, store.now_iso()),
+        (s.id, s.name, s.cwd, agents.encode_ref(s.agent, s.claude_session_id), s.created_at,
+         store.now_iso()),
     )
     await db.commit()
 
@@ -181,19 +190,40 @@ async def _get_row(session_id: str) -> dict[str, Any] | None:
     return dict(rows[0]) if rows else None
 
 
-def _claude_config_dir() -> Path:
-    configured = os.environ.get("CLAUDE_CONFIG_DIR")
-    return Path(configured).expanduser() if configured else Path.home() / ".claude"
-
-
 def has_transcript(claude_session_id: str) -> bool:
-    """True when Claude Code stored a conversation under this id (it can be resumed).
+    """True when the agent stored a conversation under this id (it can be resumed).
 
     Claude Code writes a transcript only once the conversation has a message,
-    so a session that was opened and closed without one cannot be resumed.
+    so a session that was opened and closed without one cannot be resumed. A
+    Codex session is resumable once its thread id is known.
     """
-    pattern = str(_claude_config_dir() / "projects" / "*" / f"{glob.escape(claude_session_id)}.jsonl")
-    return bool(glob.glob(pattern))
+    agent, conversation_id = agents.decode_ref(claude_session_id)
+    if agent == agents.CLAUDE:
+        return agents.claude_has_transcript(conversation_id)
+    return bool(conversation_id)
+
+
+async def _claimed_codex_threads(exclude_id: str) -> set[str]:
+    db = await _db()
+    rows = await db.execute_fetchall(
+        "SELECT id, claude_session_id FROM claude_code_terminal_sessions WHERE claude_session_id LIKE ?",
+        (f"{agents.CODEX}:%",),
+    )
+    return {agents.decode_ref(r["claude_session_id"])[1] for r in rows if r["id"] != exclude_id} - {""}
+
+
+async def _resolve_conversation(session_id: str, stored: str, cwd: str, created_at: str) -> str:
+    """Fill in a Codex session's thread id once codex has created the thread."""
+    agent, conversation_id = agents.decode_ref(stored)
+    if agent != agents.CODEX or conversation_id:
+        return stored
+    claimed = await _claimed_codex_threads(session_id)
+    thread_id = await asyncio.to_thread(agents.resolve_codex_thread, cwd, created_at, claimed)
+    if not thread_id:
+        return stored
+    resolved = agents.encode_ref(agent, thread_id)
+    await _update_row(session_id, claude_session_id=resolved)
+    return resolved
 
 
 async def list_closed(limit: int = CLOSED_LIST_LIMIT) -> list[dict[str, Any]]:
@@ -209,12 +239,34 @@ async def list_closed(limit: int = CLOSED_LIST_LIMIT) -> list[dict[str, Any]]:
         row = dict(r)
         if row["id"] in _sessions:
             continue
+        row["claude_session_id"] = await _resolve_conversation(
+            row["id"], row["claude_session_id"], row["cwd"], row["created_at"])
+        row["agent"], _ = agents.decode_ref(row["claude_session_id"])
+        row["agent_label"] = agents.AGENT_LABELS.get(row["agent"], row["agent"])
         row["resumable"] = has_transcript(row["claude_session_id"])
         out.append(row)
     return out
 
 
 # ── defaults ─────────────────────────────────────────────────────────────
+
+
+def list_agents() -> list[dict[str, Any]]:
+    return agents.agents(get_agent_binary)
+
+
+def default_agent() -> str:
+    from laya.config import load_settings
+
+    return agents.default_agent(load_settings().get("coding_agent"), get_agent_binary)
+
+
+def _check_agent(agent: str) -> None:
+    info = next((a for a in list_agents() if a["id"] == agent), None)
+    if info is None:
+        raise TerminalError(f"Unknown agent: {agent}")
+    if not info["available"]:
+        raise TerminalError(f"{info['label']}: {info['reason']}")
 
 
 def default_cwd() -> str:
@@ -265,7 +317,9 @@ def _mint_mcp(session: TerminalSession) -> None:
             return
         token = turn_tokens.mint(tools, ttl_seconds=None)
         session.mcp_token = token
-        session.mcp_config_path = _write_private_json(build_turn_mcp_config(token, None))
+        config = build_turn_mcp_config(token, None)
+        if session.agent == agents.CLAUDE:
+            session.mcp_config_path = _write_private_json(config)
     except Exception as e:  # MCP wiring is optional; the terminal still starts.
         log.warning("claude_terminal_mcp_unavailable", error=str(e))
         _release_mcp(session)
@@ -288,11 +342,33 @@ def _release_mcp(session: TerminalSession) -> None:
 
 
 def build_args(binary: str, claude_session_id: str, resume: bool, mcp_config_path: str | None) -> list[str]:
-    args = [binary]
-    args += ["--resume", claude_session_id] if resume else ["--session-id", claude_session_id]
-    if mcp_config_path:
-        args += ["--mcp-config", mcp_config_path]
-    return args
+    """Claude Code's command line (kept for callers of the original API)."""
+    return agents.claude_args(binary, claude_session_id, resume, mcp_config_path)
+
+
+def _laya_mcp_url() -> str:
+    from laya.config import ENGINE_HOST, ENGINE_PORT
+
+    return f"http://{ENGINE_HOST}:{ENGINE_PORT}/mcp/"
+
+
+def build_launch(session: TerminalSession, resume: bool) -> agents.Launch:
+    """The command line and extra environment for the session's agent."""
+    binary = get_agent_binary(session.agent)
+    if session.agent == agents.CODEX:
+        from laya.claude_code.assistant import server_instructions
+
+        env = {agents.CODEX_TOKEN_ENV: session.mcp_token} if session.mcp_token else {}
+        return agents.Launch(
+            args=agents.codex_args(
+                binary,
+                session.claude_session_id if resume else None,
+                _laya_mcp_url() if session.mcp_token else None,
+                server_instructions(),
+            ),
+            env=env,
+        )
+    return agents.Launch(args=build_args(binary, session.claude_session_id, resume, session.mcp_config_path))
 
 
 # Variables a running Claude Code process sets for its own children (session
@@ -314,10 +390,12 @@ _PARENT_SESSION_MARKERS = (
 )
 
 
-def _spawn_env() -> dict[str, str]:
+def _spawn_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     from laya.config import _augmented_path
 
     env = dict(os.environ)
+    env.pop(agents.CODEX_TOKEN_ENV, None)
+    env.update(extra or {})
     env["PATH"] = _augmented_path()
     env["TERM"] = "xterm-256color"
     env["COLORTERM"] = "truecolor"
@@ -347,7 +425,7 @@ def _start_process(session: TerminalSession, args: list[str]) -> None:
             stdout=slave,
             stderr=slave,
             cwd=session.cwd,
-            env=_spawn_env(),
+            env=_spawn_env(session.spawn_env),
             start_new_session=True,
             preexec_fn=_make_controlling_tty,
             close_fds=True,
@@ -419,6 +497,7 @@ async def _reap(session: TerminalSession) -> None:
     # The process is gone; its MCP token has no further use.
     _release_mcp(session)
     _broadcast(session, {"type": "exit", "code": code})
+    await _remember_conversation(session)
     log.info("claude_terminal_exited", session_id=session.id, code=code)
 
 
@@ -472,45 +551,63 @@ async def create(
     resume: str | None = None,
     cols: int | None = None,
     rows: int | None = None,
+    agent: str | None = None,
 ) -> dict[str, Any]:
-    """Start ``claude`` in a new PTY, or resume a closed session by its Laya id."""
+    """Start a coding agent in a new PTY, or resume a closed session by its Laya id.
+
+    ``agent`` defaults to the configured coding agent when the terminal can
+    start it, else Claude Code. A resumed session keeps its own agent.
+    """
     if resume:
         if resume in _sessions:
             raise TerminalError("That session is already open", status=409)
         row = await _get_row(resume)
         if row is None:
             raise TerminalError("Terminal session not found", status=404)
+        stored = await _resolve_conversation(row["id"], row["claude_session_id"], row["cwd"], row["created_at"])
+        row_agent, conversation_id = agents.decode_ref(stored)
+        if not conversation_id:
+            raise TerminalError("This session has no conversation to resume", status=409)
         session = TerminalSession(
             id=row["id"],
             name=_clean_name(name, row["name"]),
             cwd=_resolve_cwd(cwd or row["cwd"]),
-            claude_session_id=row["claude_session_id"],
+            claude_session_id=conversation_id,
             created_at=row["created_at"],
+            agent=row_agent,
         )
     else:
+        chosen = agent or default_agent()
+        _check_agent(chosen)
         resolved = _resolve_cwd(cwd)
         session = TerminalSession(
             id=uuid.uuid4().hex,
-            name=_clean_name(name, Path(resolved).name or "Claude"),
+            name=_clean_name(name, Path(resolved).name or agents.AGENT_LABELS.get(chosen, "Claude")),
             cwd=resolved,
-            claude_session_id=str(uuid.uuid4()),
+            # Claude Code takes the id we choose; Codex picks its own (found later).
+            claude_session_id=str(uuid.uuid4()) if chosen == agents.CLAUDE else "",
             created_at=store.now_iso(),
+            agent=chosen,
         )
     if cols and rows:
         session.cols, session.rows = _clamp_size(cols, rows)
 
     _mint_mcp(session)
-    args = build_args(get_agent_binary("claude_code"), session.claude_session_id, bool(resume),
-                      session.mcp_config_path)
+    launch = build_launch(session, bool(resume))
+    session.spawn_env = launch.env
+    args = launch.args
     try:
         _start_process(session, args)
     except (OSError, subprocess.SubprocessError) as e:
         _release_mcp(session)
-        raise TerminalError(f"Could not start claude ({args[0]}): {e}", status=500) from e
+        label = agents.AGENT_LABELS.get(session.agent, session.agent)
+        raise TerminalError(f"Could not start {label} ({args[0]}): {e}", status=500) from e
+    finally:
+        session.spawn_env = {}
 
     _sessions[session.id] = session
     await _insert_row(session)
-    log.info("claude_terminal_started", session_id=session.id, cwd=session.cwd,
+    log.info("claude_terminal_started", session_id=session.id, cwd=session.cwd, agent=session.agent,
              resume=bool(resume), mcp=session.mcp_token is not None)
     return session.to_dict()
 
@@ -569,12 +666,23 @@ async def _terminate(session: TerminalSession) -> None:
     _release_mcp(session)
 
 
+async def _remember_conversation(session: TerminalSession) -> None:
+    """Store a Codex session's thread id (known once codex created the thread)."""
+    if session.agent != agents.CODEX or session.claude_session_id:
+        return
+    with contextlib.suppress(Exception):
+        stored = await _resolve_conversation(
+            session.id, agents.encode_ref(session.agent, ""), session.cwd, session.created_at)
+        session.claude_session_id = agents.decode_ref(stored)[1]
+
+
 async def close(session_id: str) -> None:
     """End the session: kill its process group, revoke its MCP token, keep the row."""
     session = get(session_id)
     _sessions.pop(session_id, None)
     await _terminate(session)
     _broadcast(session, None)
+    await _remember_conversation(session)
     await _update_row(session_id, closed_at=store.now_iso(), last_active_at=store.now_iso())
     log.info("claude_terminal_closed", session_id=session_id)
 

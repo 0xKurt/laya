@@ -295,18 +295,20 @@ async def list_terminal_sessions() -> dict[str, Any]:
         "sessions": terminal.list_open(),
         "closed": await terminal.list_closed(),
         "default_cwd": terminal.default_cwd(),
+        "agents": terminal.list_agents(),
+        "default_agent": terminal.default_agent(),
     }
 
 
 @router.post("/terminal/sessions")
 async def create_terminal_session(body: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
-    """Start `claude` in a new terminal session (`{cwd?, name?, resume?, cols?, rows?}`).
+    """Start a coding agent in a new terminal session (`{cwd?, name?, resume?, cols?, rows?, agent?}`).
 
     `resume` is the id of a closed session; its Claude conversation continues
     with `claude --resume`.
     """
     body = body or {}
-    for key in ("cwd", "name", "resume"):
+    for key in ("cwd", "name", "resume", "agent"):
         if body.get(key) is not None and not isinstance(body[key], str):
             raise HTTPException(status_code=422, detail=f"'{key}' must be a string")
     return await _terminal_acall(
@@ -316,6 +318,7 @@ async def create_terminal_session(body: dict[str, Any] | None = Body(default=Non
         resume=body.get("resume"),
         cols=_int_field(body, "cols"),
         rows=_int_field(body, "rows"),
+        agent=body.get("agent"),
     )
 
 
