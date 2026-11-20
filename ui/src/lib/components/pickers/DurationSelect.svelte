@@ -9,13 +9,25 @@
 		id,
 		unit,
 		presets,
-		class: className = ''
-	}: { value?: number; id: string; unit: DurationUnit; presets: number[]; class?: string } = $props();
+		class: className = '',
+		onchange
+	}: {
+		value?: number;
+		id: string;
+		unit: DurationUnit;
+		presets: number[];
+		class?: string;
+		/** Called with the new value after a change. */
+		onchange?: (value: number) => void;
+	} = $props();
 
 	const options = $derived(durationOptions(presets, Number(value)));
 </script>
 
-<select {id} class={className} value={Number(value)} onchange={(e) => (value = Number(e.currentTarget.value))}>
+<select {id} class={className} value={Number(value)} onchange={(e) => {
+		value = Number(e.currentTarget.value);
+		onchange?.(value);
+	}}>
 	{#each options as o (o)}
 		<option value={o}>{durationLabel(o, unit)}</option>
 	{/each}

@@ -1,6 +1,8 @@
 <!-- Copyright 2026 Aayush Chawla -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <script lang="ts">
+	import DurationSelect from '$lib/components/pickers/DurationSelect.svelte';
+	const RETENTION_PRESETS = [7, 14, 30, 60, 90, 180, 365, 730];
 	import { engineApi } from '$lib/api/engine';
 	import { glassTheme } from '$lib/stores/glassTheme';
 
@@ -154,16 +156,15 @@
 		{:else}
 			<div class="flex flex-col gap-1">
 				<label class="text-laya-secondary font-medium text-surface-300" for="retention-days">
-					Retention period (days)
+					Retention period
 				</label>
-				<input
+				<DurationSelect
 					id="retention-days"
-					type="number"
-					min="1"
-					max="3650"
+					unit="days"
+					presets={RETENTION_PRESETS}
 					bind:value={retentionDays}
-					oninput={() => debouncedSave('card')}
-					class="h-9 w-32 rounded-md border border-surface-600 bg-surface-700 px-3 text-laya-base text-surface-50 focus:border-laya-orange/50 focus:outline-none"
+					onchange={() => debouncedSave('card')}
+					class="h-9 w-32 rounded-md border border-surface-600 bg-surface-700 px-3 text-laya-base text-surface-50 focus:border-laya-orange/50 focus:outline-none !w-40"
 				/>
 			</div>
 
@@ -204,16 +205,15 @@
 		{#if !loading}
 			<div class="flex flex-col gap-1">
 				<label class="text-laya-secondary font-medium text-surface-300" for="chat-retention-days">
-					Retention period (days)
+					Retention period
 				</label>
-				<input
+				<DurationSelect
 					id="chat-retention-days"
-					type="number"
-					min="1"
-					max="3650"
+					unit="days"
+					presets={RETENTION_PRESETS}
 					bind:value={chatRetentionDays}
-					oninput={() => debouncedSave('chat')}
-					class="h-9 w-32 rounded-md border border-surface-600 bg-surface-700 px-3 text-laya-base text-surface-50 focus:border-laya-orange/50 focus:outline-none"
+					onchange={() => debouncedSave('chat')}
+					class="h-9 w-32 rounded-md border border-surface-600 bg-surface-700 px-3 text-laya-base text-surface-50 focus:border-laya-orange/50 focus:outline-none !w-40"
 				/>
 			</div>
 
@@ -247,16 +247,15 @@
 		{#if !loading}
 			<div class="flex flex-col gap-1">
 				<label class="text-laya-secondary font-medium text-surface-300" for="audit-retention-days">
-					Retention period (days)
+					Retention period
 				</label>
-				<input
+				<DurationSelect
 					id="audit-retention-days"
-					type="number"
-					min="1"
-					max="3650"
+					unit="days"
+					presets={RETENTION_PRESETS}
 					bind:value={auditRetentionDays}
-					oninput={() => debouncedSave('audit')}
-					class="h-9 w-32 rounded-md border border-surface-600 bg-surface-700 px-3 text-laya-base text-surface-50 focus:border-laya-orange/50 focus:outline-none"
+					onchange={() => debouncedSave('audit')}
+					class="h-9 w-32 rounded-md border border-surface-600 bg-surface-700 px-3 text-laya-base text-surface-50 focus:border-laya-orange/50 focus:outline-none !w-40"
 				/>
 			</div>
 
@@ -287,16 +286,15 @@
 		{#if !loading}
 			<div class="flex flex-col gap-1">
 				<label class="text-laya-secondary font-medium text-surface-300" for="omni-retention-days">
-					Retention period (days)
+					Retention period
 				</label>
-				<input
+				<DurationSelect
 					id="omni-retention-days"
-					type="number"
-					min="1"
-					max="365"
+					unit="days"
+					presets={RETENTION_PRESETS.filter((d) => d <= 365)}
 					bind:value={omniRetentionDays}
-					oninput={() => debouncedSave('omni')}
-					class="h-9 w-32 rounded-md border border-surface-600 bg-surface-700 px-3 text-laya-base text-surface-50 focus:border-laya-orange/50 focus:outline-none"
+					onchange={() => debouncedSave('omni')}
+					class="h-9 w-32 rounded-md border border-surface-600 bg-surface-700 px-3 text-laya-base text-surface-50 focus:border-laya-orange/50 focus:outline-none !w-40"
 				/>
 			</div>
 
@@ -327,16 +325,15 @@
 		{#if !loading}
 			<div class="flex flex-col gap-1">
 				<label class="text-laya-secondary font-medium text-surface-300" for="ingestion-retention-days">
-					Retention period (days)
+					Retention period
 				</label>
-				<input
+				<DurationSelect
 					id="ingestion-retention-days"
-					type="number"
-					min="1"
-					max="365"
+					unit="days"
+					presets={RETENTION_PRESETS.filter((d) => d <= 365)}
 					bind:value={ingestionErrorsRetentionDays}
-					oninput={() => debouncedSave('ingestion')}
-					class="h-9 w-32 rounded-md border border-surface-600 bg-surface-700 px-3 text-laya-base text-surface-50 focus:border-laya-orange/50 focus:outline-none"
+					onchange={() => debouncedSave('ingestion')}
+					class="h-9 w-32 rounded-md border border-surface-600 bg-surface-700 px-3 text-laya-base text-surface-50 focus:border-laya-orange/50 focus:outline-none !w-40"
 				/>
 			</div>
 
@@ -367,16 +364,15 @@
 		{#if !loading}
 			<div class="flex flex-col gap-1">
 				<label class="text-laya-secondary font-medium text-surface-300" for="firing-retention-days">
-					Retention period (days)
+					Retention period
 				</label>
-				<input
+				<DurationSelect
 					id="firing-retention-days"
-					type="number"
-					min="1"
-					max="3650"
+					unit="days"
+					presets={RETENTION_PRESETS}
 					bind:value={firingLogRetentionDays}
-					oninput={() => debouncedSave('firings')}
-					class="h-9 w-32 rounded-md border border-surface-600 bg-surface-700 px-3 text-laya-base text-surface-50 focus:border-laya-orange/50 focus:outline-none"
+					onchange={() => debouncedSave('firings')}
+					class="h-9 w-32 rounded-md border border-surface-600 bg-surface-700 px-3 text-laya-base text-surface-50 focus:border-laya-orange/50 focus:outline-none !w-40"
 				/>
 			</div>
 

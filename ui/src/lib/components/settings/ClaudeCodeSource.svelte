@@ -74,6 +74,10 @@
 			.catch(() => (modelGroups = []));
 	});
 
+	function modelAgentLabel(value: string): string {
+		return modelGroups.find((g) => g.models.some((m) => m.value === value))?.label ?? 'matching';
+	}
+
 	let busy = $state<null | 'connect' | 'disconnect' | 'sync' | 'discover' | 'enable' | 'save'>(null);
 	let actionError = $state<string | null>(null);
 	let syncResult = $state<string | null>(null);
@@ -380,7 +384,7 @@
 							<p class={helpClass}>
 								{form.model === AUTO_MODEL
 									? 'A light model of whichever coding agent login runs the sweep.'
-									: 'Used when the sweep runs on this agent’s login; on another agent, Automatic.'}
+									: `Used when the sweep runs on a ${modelAgentLabel(form.model)} login; on another agent's login Laya picks automatically.`}
 							</p>
 						</div>
 					</div>
