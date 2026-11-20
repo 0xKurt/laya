@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Pure logic of the Board view (routes/board): which lane a card is in, the
-// filters, and the engine calls a drag from one lane to another needs.
+// filters, the order of the cards in a lane, and the engine calls a drag from
+// one lane to another needs.
 //
 // Lanes come from Laya's own data (docs/claude-code-connector.md, "Board"):
 // In progress = a running workspace agent or executor (status), or the system
@@ -15,6 +16,18 @@ import { sumYouMinutes } from '$lib/sessions/session';
 
 export type Lane = 'backlog' | 'todo' | 'in_progress' | 'done';
 export type DropTarget = Lane | 'archive';
+export type OrderedLane = Exclude<Lane, 'done'>;
+/** Lanes the user orders by hand. Done is always newest first. */
+export const ORDERED_LANES: ReadonlySet<Lane> = new Set<OrderedLane>(['backlog', 'todo', 'in_progress']);
+export function isOrderedLane(lane: Lane): lane is OrderedLane {
+	return ORDERED_LANES.has(lane);
+}
+
+/**
+ * A card as GET /board returns it: `lane` is the lane the engine computed,
+ * `position` its manual place in that lane (null until the user placed it).
+ */
+export type BoardCard = ActionCard & { lane?: Lane; position?: number | null };
 
 export const LANES: { id: Lane; title: string }[] = [
 	{ id: 'backlog', title: 'Backlog' },
@@ -87,19 +100,78 @@ export function presentPlatforms(cards: ActionCard[]): string[] {
 	return [...new Set(cards.map((c) => platformKey(c.entity_id)))].filter(Boolean).sort();
 }
 
-/** Visible cards per lane. Open lanes sort by priority, then newest; Done by newest. */
-export function groupByLane(cards: ActionCard[], f: BoardFilters): Record<Lane, ActionCard[]> {
-	const byLane: Record<Lane, ActionCard[]> = { backlog: [], todo: [], in_progress: [], done: [] };
+/** The latest activity of a card (its group, its source event, or its creation), as a sortable string. */
+export function lastActivity(card: ActionCard): string {
+	return [card.group_active_at, card.event_timestamp, card.created_at].reduce<string>(
+		(max, t) => (t && t > max ? t : max),
+		''
+	);
+}
+
+/** The card's manual position, if it was placed in the lane it is in now. */
+export function positionOf(card: BoardCard): number | null {
+	if (card.position == null || card.lane !== laneOf(card)) return null;
+	return card.position;
+}
+
+/**
+ * Order inside Backlog, To do and In progress: cards without a position
+ * first (priority, then latest activity), then the placed cards by position.
+ */
+export function compareInLane(a: BoardCard, b: BoardCard): number {
+	const pa = positionOf(a);
+	const pb = positionOf(b);
+	if (pa == null && pb == null) {
+		return (
+			(PRIORITY_RANK[a.priority] ?? 9) - (PRIORITY_RANK[b.priority] ?? 9) ||
+			lastActivity(b).localeCompare(lastActivity(a))
+		);
+	}
+	if (pa == null) return -1;
+	if (pb == null) return 1;
+	return pa - pb;
+}
+
+/** Visible cards per lane: the open lanes in their manual order, Done newest first. */
+export function groupByLane<T extends BoardCard>(cards: T[], f: BoardFilters): Record<Lane, T[]> {
+	const byLane: Record<Lane, T[]> = { backlog: [], todo: [], in_progress: [], done: [] };
 	for (const card of cards) {
 		if (HIDDEN_STATUSES.has(card.status) || !matchesFilters(card, f)) continue;
 		byLane[laneOf(card)].push(card);
 	}
+	for (const lane of ORDERED_LANES) byLane[lane].sort(compareInLane);
 	const newest = (a: ActionCard, b: ActionCard) => (b.created_at ?? '').localeCompare(a.created_at ?? '');
-	for (const lane of ['backlog', 'todo', 'in_progress'] as const) {
-		byLane[lane].sort((a, b) => (PRIORITY_RANK[a.priority] ?? 9) - (PRIORITY_RANK[b.priority] ?? 9) || newest(a, b));
-	}
 	byLane.done.sort((a, b) => (b.resolved_at ?? b.updated_at ?? '').localeCompare(a.resolved_at ?? a.updated_at ?? '') || newest(a, b));
 	return byLane;
+}
+
+/**
+ * The full order of a lane after a drop, when only some of its cards were
+ * visible (a filter is on). `laneIds` is the lane's full order before the
+ * drop without a card that left it, `visibleIds` the visible cards in their
+ * new order (a card dropped in included). Each hidden card stays right after the visible card it followed;
+ * hidden cards before the first visible card stay on top.
+ */
+export function mergeVisibleOrder(laneIds: string[], visibleIds: string[]): string[] {
+	const visible = new Set(visibleIds);
+	const leading: string[] = [];
+	const followers = new Map<string, string[]>();
+	let anchor: string | null = null;
+	for (const id of laneIds) {
+		if (visible.has(id)) {
+			anchor = id;
+			continue;
+		}
+		if (anchor == null) leading.push(id);
+		else followers.set(anchor, [...(followers.get(anchor) ?? []), id]);
+	}
+	return [...leading, ...visibleIds.flatMap((id) => [id, ...(followers.get(id) ?? [])])];
+}
+
+/** The cards with `orderedIds` placed in `lane` at positions 0..n-1 (for an optimistic update). */
+export function withLaneOrder<T extends BoardCard>(cards: T[], lane: Lane, orderedIds: string[]): T[] {
+	const index = new Map(orderedIds.map((id, i) => [id, i]));
+	return cards.map((c) => (index.has(c.card_id) ? { ...c, lane, position: index.get(c.card_id)! } : c));
 }
 
 /**
@@ -153,7 +225,7 @@ export function planMove(card: ActionCard, target: DropTarget): MoveStep[] {
 }
 
 /** The card as it looks after `planMove(card, target)` succeeded (for an optimistic update). */
-export function applyMove(card: ActionCard, target: Lane, laneTagIds: LaneTagIds): ActionCard {
+export function applyMove<T extends ActionCard>(card: T, target: Lane, laneTagIds: LaneTagIds): T {
 	const tags = (card.tags ?? []).filter((t) => !t.tag_name.startsWith('lane:'));
 	if (target === 'todo' || target === 'in_progress') {
 		tags.push({

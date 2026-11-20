@@ -113,3 +113,111 @@ async def test_stager_never_sees_or_assigns_lane_tags(db, sample_event):
 
     assert not [n for n in await select_prompt_tags(db, sample_event) if n.startswith("lane:")]
     assert await persist_suggested_tags("c1", ["lane:todo", "billing"]) == ["billing"]
+
+
+async def _lane_ids(client, lane):
+    cards = (await client.get("/board")).json()["cards"]
+    return [c["card_id"] for c in cards if c["lane"] == lane]
+
+
+@pytest.mark.asyncio
+async def test_new_cards_sort_by_priority_then_activity_and_have_no_position(db):
+    await insert_test_card(db, card_id="low", event_id="e1", status="ready", priority="LOW")
+    await insert_test_card(db, card_id="crit", event_id="e2", status="ready", priority="CRITICAL")
+    await insert_test_card(db, card_id="med_old", event_id="e3", status="ready", priority="MEDIUM")
+    await insert_test_card(db, card_id="med_new", event_id="e4", status="ready", priority="MEDIUM")
+    await db.execute("UPDATE action_cards SET created_at = datetime('now', '-2 days') WHERE card_id = 'med_old'")
+    await db.commit()
+
+    async with await _client() as client:
+        cards = (await client.get("/board")).json()["cards"]
+
+    assert [c["card_id"] for c in cards] == ["crit", "med_new", "med_old", "low"]
+    assert {c["lane"] for c in cards} == {"backlog"}
+    assert all(c["position"] is None for c in cards)
+
+
+@pytest.mark.asyncio
+async def test_put_order_persists_and_new_cards_go_on_top(db):
+    for i, cid in enumerate(["a", "b", "c"]):
+        await insert_test_card(db, card_id=cid, event_id=f"e{i}", status="ready")
+
+    async with await _client() as client:
+        resp = await client.put("/board/order", json={"lane": "backlog", "card_ids": ["c", "a", "b", "ghost"]})
+        assert resp.status_code == 200
+        assert resp.json()["card_ids"] == ["c", "a", "b"]  # unknown ids skipped
+        cards = (await client.get("/board")).json()["cards"]
+        assert [(c["card_id"], c["position"]) for c in cards] == [("c", 0.0), ("a", 1.0), ("b", 2.0)]
+
+        await insert_test_card(db, card_id="new", event_id="e9", status="ready", priority="LOW")
+        assert await _lane_ids(client, "backlog") == ["new", "c", "a", "b"]
+
+        # A second order for the lane replaces the first; cards left out lose their place.
+        await client.put("/board/order", json={"lane": "backlog", "card_ids": ["b", "new"]})
+        rows = await db.execute_fetchall("SELECT card_id FROM board_positions ORDER BY position")
+        assert [r["card_id"] for r in rows] == ["b", "new"]
+
+
+@pytest.mark.asyncio
+async def test_position_only_counts_in_the_lane_it_was_set_in(db):
+    await insert_test_card(db, card_id="a", event_id="e1", status="ready")
+    await insert_test_card(db, card_id="b", event_id="e2", status="ready")
+
+    async with await _client() as client:
+        await client.put("/board/order", json={"lane": "backlog", "card_ids": ["a", "b"]})
+        # An agent starts on "a": it is In progress now, its Backlog place is stale.
+        await db.execute("UPDATE action_cards SET status = 'agent_running' WHERE card_id = 'a'")
+        await db.commit()
+        cards = {c["card_id"]: c for c in (await client.get("/board")).json()["cards"]}
+
+    assert cards["a"]["lane"] == "in_progress" and cards["a"]["position"] is None
+    assert cards["b"]["lane"] == "backlog" and cards["b"]["position"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_order_after_a_lane_change_via_tags(db):
+    await insert_test_card(db, card_id="a", event_id="e1", status="ready")
+    await insert_test_card(db, card_id="b", event_id="e2", status="ready")
+
+    async with await _client() as client:
+        lane_tags = (await client.get("/board")).json()["lane_tags"]
+        for cid in ("a", "b"):
+            await client.post(
+                "/tags/assign",
+                json={"tag_name_or_id": lane_tags["todo"], "target_type": "card", "target_id": cid},
+            )
+        await client.put("/board/order", json={"lane": "todo", "card_ids": ["b", "a"]})
+        assert await _lane_ids(client, "todo") == ["b", "a"]
+
+
+@pytest.mark.asyncio
+async def test_done_cards_are_newest_first_and_cannot_be_ordered(db):
+    await insert_test_card(db, card_id="d_old", event_id="e1", status="done")
+    await insert_test_card(db, card_id="d_new", event_id="e2", status="done")
+    await db.execute("UPDATE action_cards SET resolved_at = datetime('now', '-2 days') WHERE card_id = 'd_old'")
+    await db.execute("UPDATE action_cards SET resolved_at = datetime('now', '-1 hours') WHERE card_id = 'd_new'")
+    await db.commit()
+
+    async with await _client() as client:
+        assert await _lane_ids(client, "done") == ["d_new", "d_old"]
+        resp = await client.put("/board/order", json={"lane": "done", "card_ids": ["d_old", "d_new"]})
+        assert resp.status_code == 400
+        resp = await client.put("/board/order", json={"lane": "backlog", "card_ids": ["x", "x"]})
+        assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_positions_of_archived_done_and_deleted_cards_are_pruned(db):
+    for i, cid in enumerate(["keep", "arch", "done", "gone"]):
+        await insert_test_card(db, card_id=cid, event_id=f"e{i}", status="ready")
+
+    async with await _client() as client:
+        await client.put("/board/order", json={"lane": "backlog", "card_ids": ["keep", "arch", "done", "gone"]})
+        await db.execute("UPDATE action_cards SET status = 'archived' WHERE card_id = 'arch'")
+        await db.execute("UPDATE action_cards SET status = 'done' WHERE card_id = 'done'")
+        await db.execute("DELETE FROM action_cards WHERE card_id = 'gone'")
+        await db.commit()
+        await client.get("/board")
+
+    rows = await db.execute_fetchall("SELECT card_id FROM board_positions")
+    assert [r["card_id"] for r in rows] == ["keep"]

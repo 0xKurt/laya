@@ -219,6 +219,10 @@ A send turn: `--allowedTools` = the one tool (Slack `send` role, Gmail `draft` r
 
 `/board` lanes come from Laya's own data: **In progress** = status `agent_running` / `awaiting_input` / `executing`, or system tag `lane:in-progress`; **To do** = system tag `lane:todo`; **Done** = status `done` (last 7 days); **Backlog** = every other active card. Dragging changes the card status (`/cards/{id}/done`, `/reopen`, `/archive`) and the lane tags (`/tags/assign`, `/tags/unassign`). The lane tags are created as system tags on first use.
 
+Order: in Backlog, To do and In progress the user orders cards by hand; Done is always newest first. The order is stored in `board_positions` (`card_id`, `lane`, `position`, `updated_at`), a table `api/board_api.py` creates on first use (no migration). `PUT /board/order {lane, card_ids}` stores a lane's full order after a drop (the UI writes it after the status/tag calls of a lane change). `GET /board` returns each card with `lane` and `position`; a position counts only in the lane it was set in, so a card moved by a status change has none. Cards without a position sit at the top of their lane, by priority, then latest activity. Positions of cards that leave the board (done, archived, dismissed, deleted) are dropped on the next `GET /board`.
+
+Drag and drop: `svelte-dnd-action` (mouse/touch events; HTML5 drag and drop does not reach the page in the Tauri window on macOS). The lifted card follows the pointer, a dashed gap shows where it lands, the other cards slide aside, lanes scroll near their edges, and the Archive column is a drop zone. A press that moves less than 3px is a click. Keyboard: Tab to a card, Space picks it up, arrow keys move it, Tab moves it to another lane, Space drops it; Enter opens it. Pure logic (lanes, sort, filtered-drop merge) in `ui/src/lib/board/board.ts`.
+
 ## Effort and session lane
 
 - Effort: the stager also returns `effort: {you_minutes, agent_minutes, basis}` (Kurt's time: deciding, reviewing, talking; agent time: code, tests, write-ups a Claude session can do). It is stored in the card's `staged_output` and shown on the card; the Board shows the sum of Kurt's time per lane.
