@@ -14,7 +14,7 @@ from fastapi import APIRouter, Body, HTTPException, WebSocket, WebSocketDisconne
 from laya.claude_code import connect as connect_mod
 from laya.claude_code import egress as _egress  # noqa: F401  registers the send connection hooks
 from laya.claude_code import discover as discover_mod
-from laya.claude_code import accounts, codex_accounts, my_work, service, store, terminal, work_actions
+from laya.claude_code import accounts, cli, codex_accounts, my_work, service, store, terminal, work_actions
 from laya.claude_code.discover import SEND_ROLES, Discovery, PlatformDiscovery
 from laya.security.engine_auth import WS_SUBPROTOCOL, offered_subprotocols
 
@@ -132,6 +132,21 @@ def _account_error(e: accounts.AccountError) -> HTTPException:
 async def get_accounts(refresh: bool = False) -> dict[str, Any]:
     """The Claude accounts, their usage, connectors and the running sign-in."""
     return await accounts.overview(refresh=refresh)
+
+
+@router.get("/github/orgs")
+async def github_orgs() -> dict[str, Any]:
+    """The GitHub organizations the `gh` login belongs to (``gh api user/orgs``) and the
+    GitHub source's configured scope (``orgs``; empty = every repository)."""
+    try:
+        data = await cli.run_gh("api", "user/orgs", "--paginate")
+        orgs = sorted({o["login"] for o in data or [] if isinstance(o, dict) and o.get("login")}, key=str.lower)
+        error = None
+    except cli.ClaudeCodeError as e:
+        orgs, error = [], str(e)
+    source = await store.get_source("github")
+    selected = list(((source or {}).get("config") or {}).get("orgs") or [])
+    return {"orgs": orgs, "selected": selected, "connected": source is not None, "error": error}
 
 
 @router.get("/assistant/rules")

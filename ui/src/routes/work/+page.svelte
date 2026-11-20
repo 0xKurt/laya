@@ -2,6 +2,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { getGithubOrgs, scopeLabel } from '$lib/api/workScope';
 	import { engineApi } from '$lib/api/engine';
 	import { lastMessage } from '$lib/stores/websocket';
 	import PlatformIcon from '$lib/components/settings/PlatformIcon.svelte';
@@ -98,6 +99,14 @@
 		if (pollTimer) clearTimeout(pollTimer);
 		pollTimer = isRefreshing(data) ? setTimeout(() => load(), POLL_MS) : null;
 	}
+
+	// The GitHub source's org scope (empty = all repositories); null while unknown or not connected.
+	let scope = $state<string[] | null>(null);
+	onMount(() => {
+		getGithubOrgs()
+			.then((r) => (scope = r.connected ? r.selected : null))
+			.catch(() => (scope = null));
+	});
 
 	onMount(() => {
 		load();
@@ -200,6 +209,12 @@
 			<span class="text-laya-secondary text-surface-400">
 				{filterCounts.assigned} {filterCounts.assigned === 1 ? 'issue' : 'issues'} assigned · {prs.length}
 				{prs.length === 1 ? 'pull request' : 'pull requests'}
+			</span>
+		{/if}
+		{#if scope}
+			<span class="text-laya-micro text-surface-400" data-testid="work-scope">
+				Scope: {scopeLabel(scope)} ·
+				<a href="/settings?tab=integrations&integration=github" class="text-laya-orange/90 hover:underline">Change</a>
 			</span>
 		{/if}
 		<span class="flex-1"></span>

@@ -7,6 +7,7 @@
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import SetupWorkScope from './SetupWorkScope.svelte';
 	import { engineApi } from '$lib/api/engine';
 	import PlatformIcon from '$lib/components/settings/PlatformIcon.svelte';
 	import {
@@ -219,6 +220,10 @@
 				</span>
 			{/if}
 		</div>
+	{/if}
+
+	{#if status?.platforms.github?.connected}
+		<SetupWorkScope />
 	{/if}
 
 	<p class="text-xs text-surface-500">
