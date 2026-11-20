@@ -391,7 +391,7 @@ async def linear_action(identifier: str, action: str, value: Any = None,
             if not issue.get(k) and previous.get(k):
                 issue[k] = previous[k]
         removed = issue["state_type"] in ("completed", "canceled", "cancelled", "duplicate")
-        await my_work.replace_cached_item("linear", identifier, None if removed else issue)
+        await my_work.replace_cached_item("linear", identifier, None if removed else issue, final=issue)
         return {"ok": True, "issue": issue, "removed": removed,
                 "result": {"id": out.get("id"), "url": out.get("url") or None}}
 

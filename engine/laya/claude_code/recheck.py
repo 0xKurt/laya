@@ -52,27 +52,56 @@ _STATE_PREFIX = "recheck:"
 _RECHECKABLE = ("slack", "gmail", "linear", "github")
 
 
-async def due_entities(platform: str, after_hours: float, limit: int = RECHECK_LIMIT) -> list[dict[str, Any]]:
-    """Open cards' entities that are due for a re-check, oldest first."""
-    db = await get_db()
-    cutoff = db_ts(datetime.now(timezone.utc) - timedelta(hours=after_hours))
-    rows = await db.execute_fetchall(
-        """SELECT c.entity_id, e.event_id, e.timestamp, e.subject_type, e.subject_id,
-                  e.subject_url, e.content_metadata
+# Open cards a re-check may conclude: waiting on the user (`ready`,
+# `requires_approval`), not reopened by the user, and their event is the
+# latest of its entity (a newer event means the conversation moved on and the
+# sweep has seen it). Shared with related.py (My work refreshes).
+_OPEN_CARDS_SQL = """SELECT c.card_id, c.header, c.summary, c.source_ref, c.source_url, c.created_at,
+                  c.entity_id, e.event_id, e.timestamp, e.source_platform, e.subject_type,
+                  e.subject_id, e.subject_url, e.content_metadata
            FROM action_cards c JOIN events e ON e.event_id = c.event_id
-           WHERE e.source_connection_id = ?
-             AND c.status IN ('ready', 'requires_approval')
+           WHERE c.status IN ('ready', 'requires_approval')
              AND (c.status_set_by IS NULL OR c.status_set_by != 'user')
-             AND c.created_at <= ?
              AND NOT EXISTS (
                  SELECT 1 FROM events e2
                  WHERE e2.source_platform = e.source_platform
                    AND e2.subject_type = e.subject_type
                    AND e2.subject_id = e.subject_id
                    AND e2.timestamp > e.timestamp)
-           ORDER BY c.created_at ASC""",
-        (connection_id(platform), cutoff),
-    )
+             {extra}
+           ORDER BY c.created_at ASC"""
+
+
+async def open_card_rows(extra: str = "", params: tuple = ()) -> list[Any]:
+    """The open cards a re-check may conclude, oldest first; `extra` adds `AND ...` filters."""
+    db = await get_db()
+    return await db.execute_fetchall(_OPEN_CARDS_SQL.format(extra=extra), params)
+
+
+def entity_of(row: Any) -> dict[str, Any]:
+    """The re-check entity of an open card row."""
+    try:
+        metadata = json.loads(row["content_metadata"] or "{}")
+    except (TypeError, ValueError):
+        metadata = {}
+    created = row["created_at"]
+    return {
+        "entity_id": row["entity_id"],
+        "event_id": row["event_id"],
+        "timestamp": parse_ts(row["timestamp"].replace(" ", "T")),
+        "created_at": parse_ts(created.replace(" ", "T")) if created else None,
+        "subject_type": row["subject_type"],
+        "subject_id": row["subject_id"],
+        "subject_url": row["subject_url"],
+        "metadata": metadata,
+    }
+
+
+async def due_entities(platform: str, after_hours: float, limit: int = RECHECK_LIMIT) -> list[dict[str, Any]]:
+    """Open cards' entities that are due for a re-check, oldest first."""
+    cutoff = db_ts(datetime.now(timezone.utc) - timedelta(hours=after_hours))
+    rows = await open_card_rows("AND e.source_connection_id = ? AND c.created_at <= ?",
+                                (connection_id(platform), cutoff))
     checked = await store.get_state(platform, _STATE_PREFIX)
     recent = datetime.now(timezone.utc) - timedelta(hours=after_hours)
     # Marks older than a week no longer matter: a card that old is due anyway.
@@ -88,22 +117,18 @@ async def due_entities(platform: str, after_hours: float, limit: int = RECHECK_L
         last = checked.get(_STATE_PREFIX + entity)
         if last and parse_ts(last) > recent:
             continue
-        try:
-            metadata = json.loads(r["content_metadata"] or "{}")
-        except (TypeError, ValueError):
-            metadata = {}
-        out.append({
-            "entity_id": entity,
-            "event_id": r["event_id"],
-            "timestamp": parse_ts(r["timestamp"].replace(" ", "T")),
-            "subject_type": r["subject_type"],
-            "subject_id": r["subject_id"],
-            "subject_url": r["subject_url"],
-            "metadata": metadata,
-        })
+        out.append(entity_of(r))
         if len(out) >= limit:
             break
     return out
+
+
+async def mark_checked(platform: str, entity_ids: list[str]) -> None:
+    """Record a re-check of these entities, so the sweep's re-check skips them
+    for `recheck_after_hours`."""
+    now = store.now_iso()
+    for entity_id in entity_ids:
+        await store.set_state(platform, _STATE_PREFIX + entity_id, now)
 
 
 def resolution_event(
@@ -139,6 +164,36 @@ def _platform_keys(metadata: dict[str, Any]) -> dict[str, Any]:
 # ── GitHub (gh) ──────────────────────────────────────────────────────────
 
 
+async def github_item(repo: str, kind: str, number: str) -> dict[str, Any] | None:
+    """The pull request (`kind="pulls"`) or issue from the GitHub API, or None."""
+    try:
+        return await run_gh("api", f"repos/{repo}/{kind}/{number}") or {}
+    except ClaudeCodeError as e:
+        log.debug("claude_code_recheck_github_failed", item=f"{repo}#{number}", error=str(e))
+        return None
+
+
+def github_closed(item: dict[str, Any]) -> tuple[datetime | None, str] | None:
+    """(closed time, note) for a merged or closed pull request / issue, else None."""
+    if item.get("state") != "closed":
+        return None
+    merged = bool(item.get("merged_at"))
+    when = item.get("merged_at") or item.get("closed_at")
+    return (parse_ts(when) if when else None), f"{'Merged' if merged else 'Closed'} on GitHub."
+
+
+def own_resolution_time(entity: dict[str, Any], when: datetime | None) -> datetime:
+    """When an item's own entity counts as resolved.
+
+    A card can come from an event read just after the item was merged or
+    closed (the sweep saw the PR's last update). A conclusion at the merge
+    time would then be older than the card and close nothing, so the time is
+    never before the card's event or its creation.
+    """
+    times = [t for t in (when, entity.get("timestamp"), entity.get("created_at")) if t]
+    return max(times) if times else datetime.now(timezone.utc)
+
+
 async def _check_github(source: dict[str, Any], entities: list[dict[str, Any]]) -> list[LayaEvent]:
     me = ((source.get("identity") or {}).get("github_login") or "").lower()
     events = []
@@ -147,18 +202,15 @@ async def _check_github(source: dict[str, Any], entities: list[dict[str, Any]]) 
         if not repo or not number.isdigit():
             continue
         kind = "pulls" if entity["subject_type"] == "pull_request" else "issues"
-        try:
-            item = await run_gh("api", f"repos/{repo}/{kind}/{number}") or {}
-        except ClaudeCodeError as e:
-            log.debug("claude_code_recheck_github_failed", entity=entity["entity_id"], error=str(e))
+        item = await github_item(repo, kind, number)
+        if item is None:
             continue
-        if item.get("state") == "closed":
-            merged = bool(item.get("merged_at"))
-            when = item.get("merged_at") or item.get("closed_at")
+        closed = github_closed(item)
+        if closed:
+            when, note = closed
             events.append(resolution_event(
-                "github", entity, answered_at=parse_ts(when) if when else None,
-                url=item.get("html_url"), by_user=None,
-                note=f"{'Merged' if merged else 'Closed'} on GitHub.",
+                "github", entity, answered_at=own_resolution_time(entity, when),
+                url=item.get("html_url"), by_user=None, note=note,
             ))
             continue
         since = entity["timestamp"].strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -296,6 +348,19 @@ async def _check_mcp(platform: str, source: dict[str, Any], entities: list[dict[
     return events
 
 
+async def check_entities(platform: str, source: dict[str, Any], entities: list[dict[str, Any]]) -> list[LayaEvent]:
+    """Re-check these entities now and mark them checked; returns the closing events."""
+    if platform not in _RECHECKABLE or not entities:
+        return []
+    if platform == "github":
+        events = await _check_github(source, entities)
+    else:
+        events = await _check_mcp(platform, source, entities)
+    await mark_checked(platform, [e["entity_id"] for e in entities])
+    log.info("claude_code_recheck_done", platform=platform, checked=len(entities), resolved=len(events))
+    return events
+
+
 async def recheck(
     platform: str, source: dict[str, Any], after_hours: float | None = None
 ) -> list[LayaEvent]:
@@ -309,14 +374,4 @@ async def recheck(
     if after_hours is None:
         after_hours = float(config.get("recheck_after_hours", 6))
     entities = await due_entities(platform, after_hours)
-    if not entities:
-        return []
-    if platform == "github":
-        events = await _check_github(source, entities)
-    else:
-        events = await _check_mcp(platform, source, entities)
-    now = store.now_iso()
-    for entity in entities:
-        await store.set_state(platform, _STATE_PREFIX + entity["entity_id"], now)
-    log.info("claude_code_recheck_done", platform=platform, checked=len(entities), resolved=len(events))
-    return events
+    return await check_entities(platform, source, entities)
