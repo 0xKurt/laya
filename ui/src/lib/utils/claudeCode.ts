@@ -276,14 +276,14 @@ export function selfMemberFromIdentities(
 }
 
 /**
- * Models that run every Laya role on the user's Claude subscription through
- * Claude Code. Chat and Coherence (trace) stream through Claude Code with
- * Laya's read-only tools over MCP.
+ * Models that run every Laya role "Automatic": each call on whichever coding
+ * agent subscription login has room (Settings → Models → Access). Chat and
+ * Coherence (trace) run only on an agent that streams.
  */
-export const CLAUDE_SUBSCRIPTION_MODELS = {
-	router: 'agent/claude_code/haiku',
-	omni: 'agent/claude_code/haiku',
-	stager: 'agent/claude_code/sonnet',
-	chat: 'agent/claude_code/sonnet',
-	trace: 'agent/claude_code/sonnet'
+export const AUTOMATIC_MODELS = {
+	router: 'agent/auto',
+	omni: 'agent/auto',
+	stager: 'agent/auto',
+	chat: 'agent/auto',
+	trace: 'agent/auto'
 } as const;

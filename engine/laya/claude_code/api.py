@@ -134,6 +134,55 @@ async def get_accounts(refresh: bool = False) -> dict[str, Any]:
     return await accounts.overview(refresh=refresh)
 
 
+@router.get("/auto")
+async def auto_routing() -> dict[str, Any]:
+    """What each role set to Automatic (``agent/auto``) runs on right now."""
+    from laya.config import load_settings
+    from laya.llm import agent_backend as ab
+
+    settings = load_settings()
+    models = settings.get("models") or {}
+    picks = {
+        False: await ab.choose_auto_agent(streaming=False, commit=False),
+        True: await ab.choose_auto_agent(streaming=True, commit=False),
+    }
+    labels = accounts.LOGIN_AGENTS
+
+    async def login_label(agent_id: str, login: str | None) -> str | None:
+        if login is None:
+            return None
+        if agent_id == codex_accounts.AGENT_ID:
+            return await codex_accounts.label(login)
+        return await accounts.account_label(login)
+
+    roles: dict[str, Any] = {}
+    for role in ("router", "stager", "omni", "chat", "trace"):
+        if models.get(role) != ab.AUTO_MODEL:
+            roles[role] = {"automatic": False, "model": models.get(role)}
+            continue
+        streaming = role in ("chat", "trace")
+        agent_id = picks[streaming]
+        if agent_id is not None:
+            login, _ = await ab._agent_state(agent_id)
+            roles[role] = {
+                "automatic": True, "via": "agent", "agent_id": agent_id, "agent_label": labels.get(agent_id, agent_id),
+                "login": login, "login_label": await login_label(agent_id, login),
+                "model": ab.auto_model_for(agent_id, role),
+            }
+            continue
+        fallback = ab.api_fallback_model(role)
+        roles[role] = {
+            "automatic": True, "via": "api" if fallback else "none", "model": fallback,
+            "reason": None if fallback else (
+                "No streaming agent login (Claude Code) with room." if streaming
+                else "No coding agent login with room."),
+        }
+    return {
+        "roles": roles,
+        "api_fallback": bool((settings.get("model_access") or {}).get("api_fallback")),
+    }
+
+
 @router.get("/accounts/login")
 async def current_login() -> dict[str, Any]:
     """The latest sign-in (account or connector, running or ended), or null."""

@@ -112,8 +112,11 @@ class AgentResult:
     cost_usd: float | None = None
     # Native usage-limit signal (Claude Code's rate_limit_info), for agent budgeting.
     rate_limit_info: dict | None = None
-    # The Claude account the call ran on (claude_code/accounts.py); None for other agents.
+    # The login the call ran on (claude_code/accounts.py, codex_accounts.py); None for
+    # agents without logins.
     account_id: str | None = None
+    # For an Automatic call (``agent/auto/<role>``): the concrete agent model it ran on.
+    resolved_model: str = ""
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -362,6 +365,205 @@ _SCHEMA_REJECTED_RE = re.compile(
 )
 # Set once Codex refused an output schema; later calls use the prompt instruction.
 _codex_schema_unsupported = False
+
+
+# ── Automatic (``agent/auto``) ───────────────────────────────────────────
+
+# The role model value "Automatic": each call runs on whichever agent login has room
+# (see :func:`choose_auto_agent`). Expanded per call to ``agent/auto/<role>``.
+AUTO_MODEL = "agent/auto"
+AUTO_AGENT = "auto"
+# Agents that can run a streaming turn (chat, Coherence) with Laya's tools.
+STREAMING_AGENTS = ("claude_code",)
+# Model per agent and role weight under Automatic; a missing entry = the agent's default.
+_LIGHT_ROLES = frozenset({"router", "omni", "group_summary"})
+AUTO_ROLE_MODELS: dict[str, dict[str, str]] = {
+    "claude_code": {"light": "haiku", "heavy": "sonnet"},
+    "codex_cli": {},
+}
+# API models used under Automatic when every subscription login is exhausted and the
+# user allowed API keys (settings ``model_access.api_fallback``), per provider with a key.
+API_FALLBACK_MODELS: dict[str, dict[str, str]] = {
+    "anthropic": {"light": "claude-haiku-4-5", "heavy": "claude-sonnet-4-6"},
+    "openai": {"light": "gpt-4o-mini", "heavy": "gpt-4o"},
+    "google": {"light": "gemini-2.5-flash", "heavy": "gemini-2.5-pro"},
+}
+
+
+class NoAgentAvailable(RuntimeError):
+    """Automatic found no agent login with room (and no API fallback)."""
+
+
+def _weight(role: str) -> str:
+    return "light" if role in _LIGHT_ROLES else "heavy"
+
+
+def auto_model_for(agent_id: str, role: str) -> str:
+    """The concrete ``agent/<id>[/<model>]`` an Automatic call of ``role`` runs as."""
+    model = AUTO_ROLE_MODELS.get(agent_id, {}).get(_weight(role))
+    return f"agent/{agent_id}/{model}" if model else f"agent/{agent_id}"
+
+
+def _auto_order(streaming: bool) -> list[str]:
+    """Agents Automatic may use, best first: native structured output before
+    best-effort, then the order of ``accounts.LOGIN_AGENTS``; installed ones only."""
+    from laya.claude_code.accounts import LOGIN_AGENTS
+
+    detected = detect_agent_paths()
+    agents = [a for a in LOGIN_AGENTS if detected.get(a)]
+    if streaming:
+        agents = [a for a in agents if a in STREAMING_AGENTS]
+    return sorted(agents, key=lambda a: (AGENT_TIERS.get(a) != "native", list(LOGIN_AGENTS).index(a)))
+
+
+async def _agent_state(agent_id: str) -> tuple[str | None, dict[str, dict]]:
+    """(the login the agent would run on now, that login's usage windows), or
+    (None, {}) when the agent has no login it can use."""
+    from laya.claude_code import accounts
+
+    logins = accounts.login_module(agent_id)
+    if logins is None:
+        return None, {}
+    if agent_id == "claude_code":
+        order = await accounts.eligible_ids()
+        if order == [accounts.DEFAULT_ID] and not (await accounts.default_status()).get("logged_in"):
+            return None, {}
+        login = await accounts.current_account()
+    else:
+        login = await logins.current_login()
+    if login is None:
+        return None, {}
+    return login, await logins.windows_of(login)
+
+
+_auto_routes: dict[str, Any] = {}
+
+
+async def choose_auto_agent(
+    streaming: bool = False, exclude: tuple[str, ...] = (), commit: bool = True,
+) -> str | None:
+    """The agent an Automatic call runs on, or None when no agent has a login with room.
+
+    Candidates are the installed agents with a usable login (streaming turns: only
+    agents that stream), minus ``exclude``; each is judged by the windows of the login
+    it would run on. The choice is sticky with the same hysteresis and dwell as the
+    choice between one agent's logins (``accounts.choose``), kept per kind of call.
+    """
+    from laya.claude_code.accounts import _Route, _thresholds, account_over, choose
+
+    order: list[str] = []
+    windows: dict[str, dict[str, dict]] = {}
+    for agent_id in _auto_order(streaming):
+        if agent_id in exclude:
+            continue
+        try:
+            login, w = await _agent_state(agent_id)
+        except Exception as e:
+            log.warning("auto_agent_state_failed", agent_id=agent_id, error=str(e))
+            continue
+        if login is None:
+            continue
+        order.append(agent_id)
+        windows[agent_id] = w
+    thresholds = _thresholds()
+    if not order or all(account_over(windows[a], thresholds) for a in order):
+        return None
+    key = "stream" if streaming else "stage"
+    route = _auto_routes.setdefault(key, _Route())
+    now = time.time()
+    chosen = choose(order, windows, thresholds, route.current, route.since, now)
+    if account_over(windows[chosen], thresholds):
+        return None
+    if commit and chosen != route.current:
+        log.info("auto_agent_switch", kind=key, previous=route.current, agent_id=chosen)
+        route.current, route.since = chosen, now
+    return chosen
+
+
+def api_fallback_model(role: str) -> str | None:
+    """The API model an Automatic call of ``role`` falls back to, or None.
+
+    Only when the user turned on ``model_access.api_fallback`` and a provider key
+    exists; the first provider with a key in ``API_FALLBACK_MODELS`` order.
+    """
+    from laya.config import load_settings
+
+    if not (load_settings().get("model_access") or {}).get("api_fallback"):
+        return None
+    try:
+        from laya.security.keychain import has_api_key
+    except Exception:
+        return None
+    for provider, models in API_FALLBACK_MODELS.items():
+        if has_api_key(provider):
+            return models[_weight(role)]
+    return None
+
+
+async def expand_auto(model: str, role: str, streaming: bool = False) -> str:
+    """Resolve the Automatic model value for one call of ``role``.
+
+    ``agent/auto`` becomes ``agent/auto/<role>`` while an agent login has room; when
+    none has, the API fallback model (if the user allows API keys and the $ budget is
+    not paused). Any other model is returned unchanged.
+    """
+    if model != AUTO_MODEL:
+        return model
+    if await choose_auto_agent(streaming, commit=False) is not None:
+        return f"{AUTO_MODEL}/{role}"
+    fallback = api_fallback_model(role)
+    if fallback:
+        try:
+            from laya.pipeline.budget import is_budget_paused
+
+            if await is_budget_paused():
+                fallback = None
+        except Exception:
+            pass
+    if fallback:
+        log.info("auto_api_fallback", role=role, model=fallback)
+        return fallback
+    return f"{AUTO_MODEL}/{role}"
+
+
+async def _auto_exhausted(streaming: bool) -> Exception:
+    """The error for an Automatic call that found no login with room. When every
+    login of every agent is over its threshold the agent budget pauses until the
+    first of them recovers, and the call is refused like any budget-paused call."""
+    from laya.claude_code import accounts
+    from laya.pipeline import agent_budget
+
+    thresholds = accounts._thresholds()
+    untils: list[str] = []
+    reasons: list[str] = []
+    for agent_id in _auto_order(streaming):
+        logins = accounts.login_module(agent_id)
+        if logins is None:
+            continue
+        try:
+            blocked, until, why = await logins.native_block(thresholds)
+        except Exception:
+            continue
+        if not blocked:
+            break
+        if until:
+            untils.append(until)
+        reasons.append(why)
+    else:
+        if untils:
+            try:
+                await agent_budget.pause_for_agent_budget(min(untils), "; ".join(reasons))
+            except Exception as e:
+                log.warning("auto_pause_failed", error=str(e))
+            return agent_budget.AgentBudgetRefused(
+                "Automatic: every subscription login is over its usage limit; processing resumes "
+                "when the first one resets."
+            )
+    kinds = "streaming agent (Claude Code)" if streaming else "coding agent"
+    return NoAgentAvailable(
+        f"Automatic: no {kinds} login with room. Add or sign in to a login in Settings → Models → "
+        "Access, or allow API keys when subscriptions are exhausted."
+    )
 
 
 # ── per-agent process runner ─────────────────────────────────────────────
@@ -781,6 +983,10 @@ async def agent_llm_call(
     """
     global _codex_schema_unsupported
     agent_id, model_string = parse_agent_model_id(model_id)
+    if agent_id == AUTO_AGENT:
+        return await _auto_llm_call(
+            model_string or "stager", messages, response_schema, max_tokens, temperature, num_retries,
+        )
     if agent_id not in AGENT_TIERS:
         raise ValueError(f"Unknown agent backend: {agent_id!r}")
 
@@ -909,6 +1115,35 @@ async def agent_llm_call(
         rate_limit_info=last_extra.get("rate_limit_info"),
         account_id=last_extra.get("account_id"),
     )
+
+
+async def _auto_llm_call(
+    role: str,
+    messages: list[dict[str, Any]],
+    response_schema: dict | None,
+    max_tokens: int,
+    temperature: float,
+    num_retries: int,
+) -> AgentResult:
+    """An Automatic call: on the agent :func:`choose_auto_agent` picks; when that
+    agent's logins are all rejected by their usage limits, on the next agent."""
+    tried: list[str] = []
+    while True:
+        agent_id = await choose_auto_agent(streaming=False, exclude=tuple(tried))
+        if agent_id is None:
+            raise await _auto_exhausted(streaming=False)
+        concrete = auto_model_for(agent_id, role)
+        try:
+            result = await agent_llm_call(
+                concrete, messages, response_schema=response_schema, max_tokens=max_tokens,
+                temperature=temperature, num_retries=num_retries,
+            )
+        except AgentRateLimited:
+            log.info("auto_agent_failover", failed=agent_id, role=role)
+            tried.append(agent_id)
+            continue
+        result.resolved_model = concrete
+        return result
 
 
 # ── streaming turn (chat / Coherence) ────────────────────────────────────
@@ -1208,6 +1443,14 @@ async def agent_llm_stream(
     from laya.pipeline.agent_budget import AgentBudgetRefused, enforce_daily_call_limit
 
     agent_id, model_string = parse_agent_model_id(model_id)
+    if agent_id == AUTO_AGENT:
+        chosen = await choose_auto_agent(streaming=True)
+        if chosen is None:
+            err = await _auto_exhausted(streaming=True)
+            yield StreamEvent(type="error", content=str(err), model=model_id)
+            return
+        model_id = auto_model_for(chosen, model_string or step)
+        agent_id, model_string = parse_agent_model_id(model_id)
     if agent_id != "claude_code":
         yield StreamEvent(
             type="error",

@@ -1,7 +1,7 @@
 <!-- Copyright 2026 Aayush Chawla -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { engineApi } from '$lib/api/engine';
 	import { glassTheme } from '$lib/stores/glassTheme';
@@ -14,6 +14,7 @@
 	import { CODING_AGENTS } from '$lib/config';
 	import ModelSelect from './ModelSelect.svelte';
 	import AccessConfig from './AccessConfig.svelte';
+	import { AUTO_MODEL, describeAutoRole, getAutoRouting, setApiFallback, type AutoRouting } from '$lib/api/modelAccess';
 
 	let guideTooltip = $state<{ text: string; top: number; left: number } | null>(null);
 
@@ -71,12 +72,36 @@
 		router: 'claude-haiku-4-5', stager: 'claude-sonnet-4-6', omni: 'claude-sonnet-4-6',
 		chat: 'claude-sonnet-4-6', trace: 'claude-sonnet-4-6'
 	};
+	// "Automatic" serves every role: each call runs on whichever agent login has room
+	// (streaming roles only on agents that stream).
+	const AUTO_ID = 'auto';
 	function agentRolesFor(agentId: string): string[] {
-		return STREAMING_AGENTS.includes(agentId) ? ALL_AGENT_ROLES : AGENT_ROLES;
+		return agentId === AUTO_ID || STREAMING_AGENTS.includes(agentId) ? ALL_AGENT_ROLES : AGENT_ROLES;
 	}
-	const AGENT_LABELS: Record<string, string> = Object.fromEntries(
-		CODING_AGENTS.filter((a) => a.value !== 'none').map((a) => [a.value, a.label])
-	);
+	const AGENT_LABELS: Record<string, string> = {
+		[AUTO_ID]: 'Automatic',
+		...Object.fromEntries(CODING_AGENTS.filter((a) => a.value !== 'none').map((a) => [a.value, a.label]))
+	};
+	let autoRouting = $state<AutoRouting | null>(null);
+	let autoTimer: ReturnType<typeof setInterval> | null = null;
+	async function loadAutoRouting() {
+		try {
+			autoRouting = await getAutoRouting();
+		} catch (e) {
+			console.error('Failed to load automatic routing:', e);
+		}
+	}
+	onDestroy(() => {
+		if (autoTimer) clearInterval(autoTimer);
+	});
+	async function toggleApiFallback() {
+		const next = !(autoRouting?.api_fallback ?? false);
+		try {
+			await setApiFallback(next);
+		} finally {
+			await loadAutoRouting();
+		}
+	}
 	const AGENT_MODEL_PLACEHOLDERS: Record<string, string> = {
 		claude_code: 'e.g. claude-sonnet-4-6 — blank uses Claude Code’s default',
 		codex_cli: 'e.g. gpt-5-codex — blank uses Codex’s default',
@@ -85,7 +110,7 @@
 	};
 
 	let agentMode = $state(false);
-	let selectedAgent = $state('claude_code');
+	let selectedAgent = $state('auto');
 	let agentBackends = $state<AgentBackend[]>([]);
 	let providerBackup = $state<Record<string, string>>({});
 	let selectedBackend = $derived(agentBackends.find((b) => b.agent_id === selectedAgent));
@@ -364,7 +389,8 @@
 			} catch (e) {
 				console.error('Failed to load agent backends:', e);
 			}
-			await Promise.all([fetchModels(), loadBudget(), loadAgentBudget()]);
+			await Promise.all([fetchModels(), loadBudget(), loadAgentBudget(), loadAutoRouting()]);
+			autoTimer = setInterval(loadAutoRouting, 60_000);
 		} catch (e) {
 			console.error('Failed to load settings:', e);
 		}
@@ -391,6 +417,7 @@
 		} finally {
 			saving = false;
 		}
+		void loadAutoRouting();
 	}
 
 	function handleModelChange(role: string) {
@@ -422,7 +449,7 @@
 			for (const r of agentRolesFor(selectedAgent)) {
 				if (!parseAgentModel(models[r as keyof typeof models])) {
 					providerBackup[r] = models[r as keyof typeof models];
-					models[r as keyof typeof models] = `agent/${selectedAgent}`;
+					models[r as keyof typeof models] = selectedAgent === AUTO_ID ? AUTO_MODEL : `agent/${selectedAgent}`;
 				}
 			}
 		} else {
@@ -444,8 +471,8 @@
 			const key = r as keyof typeof models;
 			if (roles.includes(r)) {
 				if (!parseAgentModel(models[key])) providerBackup[r] = models[key];
-				const ms = agentModelString(r);
-				models[key] = ms ? `agent/${agentId}/${ms}` : `agent/${agentId}`;
+				const ms = agentId === AUTO_ID || parseAgentModel(models[key])?.agentId === AUTO_ID ? '' : agentModelString(r);
+				models[key] = agentId === AUTO_ID ? AUTO_MODEL : ms ? `agent/${agentId}/${ms}` : `agent/${agentId}`;
 			} else if (parseAgentModel(models[key])) {
 				models[key] = providerBackup[r] || DEFAULT_MODELS[r];
 			}
@@ -959,7 +986,10 @@
 					</button>
 				</div>
 				<p class="mt-2 text-laya-micro text-surface-500">
-					{#if agentMode}
+					{#if agentMode && selectedAgent === AUTO_ID}
+						Automatic: every call runs on whichever subscription login has room (Access below), moving to the next login
+						or agent when one reaches its limit. Chat &amp; Coherence run only on an agent that streams (Claude Code).
+					{:else if agentMode}
 						Stages run through an installed CLI agent on its own subscription — no API key or local VRAM. Chat &amp; Coherence need an agent that streams (Claude Code, with Laya's read-only tools); with other agents they keep using a model provider.
 					{:else}
 						Use cloud or local-provider models for every stage.
@@ -968,6 +998,14 @@
 
 				{#if agentMode}
 					<div class="mt-3 flex flex-wrap gap-2">
+						<button
+							type="button"
+							onclick={() => selectAgent(AUTO_ID)}
+							class="flex items-center gap-2 rounded-md border px-3 py-1.5 text-laya-base transition-colors {selectedAgent === AUTO_ID ? 'border-laya-orange/40 bg-laya-orange/10 text-laya-orange' : 'border-surface-600 text-surface-300 hover:border-surface-500'}"
+						>
+							Automatic
+							<span class="rounded bg-surface-700 px-1.5 py-0.5 text-laya-micro text-surface-400">any login with room</span>
+						</button>
 						{#each agentBackends as b}
 							<button
 								type="button"
@@ -986,7 +1024,18 @@
 							</button>
 						{/each}
 					</div>
-					{#if selectedBackend?.hint}
+					{#if selectedAgent === AUTO_ID}
+						<label class="mt-3 flex cursor-pointer items-center gap-2 text-laya-secondary text-surface-300">
+							<input
+								type="checkbox"
+								class="accent-laya-orange"
+								checked={autoRouting?.api_fallback ?? false}
+								onchange={toggleApiFallback}
+							/>
+							Use API keys when subscriptions are exhausted
+							<span class="text-laya-micro text-surface-500">(off by default; counts toward the monthly $ budget)</span>
+						</label>
+					{:else if selectedBackend?.hint}
 						<p class="mt-2 text-laya-micro text-surface-500">{selectedBackend.hint}</p>
 					{/if}
 				{/if}
@@ -1010,7 +1059,17 @@
 								<circle cx="12" cy="12" r="10" stroke-width="2" />
 							</svg>
 						</div>
-						{#if agentMode && agentRolesFor(selectedAgent).includes(role.id)}
+						{#if agentMode && selectedAgent === AUTO_ID}
+							<div
+								id="{role.id}-model"
+								data-auto-role={role.id}
+								class="rounded-md border border-surface-700 px-3 py-2 text-laya-base {autoRouting?.roles[role.id]?.via === 'none' ? 'text-amber-300' : 'text-surface-200'}"
+							>
+								{models[role.id as keyof typeof models] === AUTO_MODEL
+									? describeAutoRole(autoRouting?.roles[role.id])
+									: models[role.id as keyof typeof models]}
+							</div>
+						{:else if agentMode && agentRolesFor(selectedAgent).includes(role.id)}
 							<input
 								id="{role.id}-model"
 								type="text"

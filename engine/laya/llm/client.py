@@ -269,6 +269,17 @@ async def _get_space_api_key(provider: str, space_id: str) -> str | None:
     return None
 
 
+async def _expand_auto(model: str, role: str, streaming: bool) -> str:
+    """The model an "Automatic" (``agent/auto``) role runs one call on: ``agent/auto/<role>``
+    while an agent login has room, else the API fallback model with its provider prefix."""
+    from laya.llm import agent_backend
+
+    expanded = await agent_backend.expand_auto(model, role, streaming=streaming)
+    if expanded != model and not agent_backend.is_agent_model(expanded) and "/" not in expanded:
+        return _add_provider_prefix(expanded)
+    return expanded
+
+
 def _get_model_for_role(role: str) -> str:
     """Look up the configured model for a given role (router, stager, chat).
 
@@ -797,6 +808,9 @@ async def llm_call(
     # effects and LLMResponse shape so the contract is identical to the API path.
     from laya.llm import agent_backend
 
+    # "Automatic" (agent/auto) picks an agent login per call, or the API fallback model.
+    model = await _expand_auto(model, role, streaming=bool(tools))
+
     if agent_backend.is_agent_model(model) and tools:
         # The agent runs the tool loop itself (Laya's read tools over MCP) and returns
         # the final text with no tool calls, so the caller's loop ends here.
@@ -842,6 +856,8 @@ async def llm_call(
             if response_schema and not result.parsed:
                 _audit_success = False
                 _audit_error = "Structured output requested but agent response was not valid JSON"
+            # An Automatic call is logged as the agent model it ran on.
+            model = ar.resolved_model or model
             _meta: dict[str, Any] = {"backend": "agent", "agent_model": model}
             if ar.cost_usd is not None:
                 _meta["cost_usd"] = ar.cost_usd
@@ -1252,6 +1268,8 @@ async def llm_call_streaming(
     # runs the tool loop itself against Laya's MCP endpoint (read tools only). It yields
     # tool_status events instead of tool_calls and does its own audit + budget accounting.
     from laya.llm import agent_backend
+
+    model = await _expand_auto(model, role, streaming=True)
 
     if agent_backend.is_agent_model(model):
         async for event in agent_backend.agent_llm_stream(

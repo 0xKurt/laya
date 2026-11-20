@@ -548,10 +548,10 @@ async def test_first_sweep_runs_outside_active_hours(db, files):
 async def test_connect_without_api_key_uses_subscription_models(db, files):
     await connect.connect("slack")
     models = files.settings["models"]
-    assert models["router"] == "agent/claude_code/haiku"
-    assert models["stager"] == "agent/claude_code/sonnet"
+    assert models["router"] == "agent/auto"
+    assert models["stager"] == "agent/auto"
     assert models["omni"] == "ollama/llama3"          # a local model the user chose stays
-    assert models["chat"] == "agent/claude_code/sonnet"
+    assert models["chat"] == "agent/auto"
 
 
 @pytest.mark.asyncio
@@ -570,4 +570,4 @@ async def test_service_start_switches_models_when_sources_exist(db, files):
     with patch.object(service, "_loop", new_callable=AsyncMock):
         await service.start_service()
         await service.stop_service()
-    assert files.settings["models"]["router"] == "agent/claude_code/haiku"
+    assert files.settings["models"]["router"] == "agent/auto"

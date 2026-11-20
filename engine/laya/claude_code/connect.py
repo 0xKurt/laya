@@ -194,16 +194,11 @@ async def ensure_source_row(platform: str, space_id: str | None) -> str:
 # ── connect / disconnect / configure ─────────────────────────────────────
 
 
-# Stage models on the Claude subscription, used when no API key is configured:
-# without a key an API model cannot process a single event, so a user who
-# connects through Claude Code would get no cards at all.
-SUBSCRIPTION_MODELS = {
-    "router": "agent/claude_code/haiku",
-    "stager": "agent/claude_code/sonnet",
-    "omni": "agent/claude_code/haiku",
-    "chat": "agent/claude_code/sonnet",
-    "trace": "agent/claude_code/sonnet",
-}
+# Stage models on the user's subscription logins ("Automatic": whichever coding
+# agent login has room), used when no API key is configured: without a key an API
+# model cannot process a single event, so a user who connects through a coding
+# agent would get no cards at all.
+SUBSCRIPTION_MODELS = {role: "agent/auto" for role in ("router", "stager", "omni", "chat", "trace")}
 
 
 def _has_llm_key() -> bool:
@@ -214,7 +209,7 @@ def _has_llm_key() -> bool:
 
 
 def use_subscription_models() -> list[str]:
-    """Point the stage models at the Claude subscription when there is no API key.
+    """Point the stage models at Automatic (subscription logins) when there is no API key.
 
     Only roles still on an API model change; agent and local models the user
     chose stay. Returns the roles changed (visible in Settings → Models).

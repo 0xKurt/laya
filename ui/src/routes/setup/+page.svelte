@@ -7,7 +7,8 @@
 	import type { CustomProvider, DiscoveredModel } from '$lib/api/types';
 	import { CODING_AGENTS } from '$lib/config';
 	import SetupClaudeCode from '$lib/components/setup/SetupClaudeCode.svelte';
-	import { CLAUDE_SUBSCRIPTION_MODELS, selfMemberFromIdentities } from '$lib/utils/claudeCode';
+	import { AUTOMATIC_MODELS, selfMemberFromIdentities } from '$lib/utils/claudeCode';
+	import SetupModelAccess from '$lib/components/setup/SetupModelAccess.svelte';
 	import type { ClaudeCodeIdentity, ClaudeCodePlatform } from '$lib/api/types';
 
 	interface RepoDetection {
@@ -129,18 +130,8 @@
 	// Step 3 via Claude Code: the identities its discovery found (prefill step 5).
 	let toolsVia = $state<'n8n' | 'claude_code'>('n8n');
 	let claudeCodeIdentities = $state<Partial<Record<ClaudeCodePlatform, ClaudeCodeIdentity>>>({});
-	// Step 4: run Laya's stages on the Claude subscription too. This concerns
-	// Claude Code, not the coding agent, so it is offered whatever agent is picked.
-	let useClaudeSubscription = $state(true);
-	// Whether the Claude Code CLI was found (null until step 4 has checked).
-	let claudeCliFound = $state<boolean | null>(null);
-	$effect(() => {
-		if (step !== 4 || claudeCliFound !== null) return;
-		engineApi
-			.detectAgentPaths()
-			.then((r) => (claudeCliFound = !!r.agent_paths?.claude_code))
-			.catch(() => (claudeCliFound = null));
-	});
+	// Step 1 (Model access): run every role "Automatic" on the subscription logins found.
+	let useAutomatic = $state(true);
 
 	// Step 5: Team
 	let members = $state<Array<{ name: string; email: string; role: 'self' | 'manager' | 'teammate' | 'external' | 'bot'; accounts?: string[]; aliases?: string[] }>>([
@@ -422,8 +413,8 @@
 	async function finish() {
 		// Step 4: Save agent + repos
 		await engineApi.updateSettings({ coding_agent: codingAgent });
-		if (useClaudeSubscription) {
-			await engineApi.updateSettings({ models: CLAUDE_SUBSCRIPTION_MODELS } as any);
+		if (useAutomatic) {
+			await engineApi.updateSettings({ models: AUTOMATIC_MODELS } as any);
 		}
 		const allRepos = [...savedRepos];
 		if (repoName.trim() && repoPath.trim()) {
@@ -512,10 +503,15 @@
 	<!-- Step 1: Welcome + API Key -->
 	{#if step === 1}
 		<div class="space-y-4">
-			<h2 class="text-xl font-semibold">Welcome to Laya</h2>
+			<h2 class="text-xl font-semibold">Welcome to Laya — Model access</h2>
 			<p class="text-sm text-surface-400">
-				Let's get you set up. First, add an API key for your LLM provider.
+				Laya's own processing (sorting, drafting, summaries) runs on what you already have: subscription logins of
+				coding agents, API keys, or a self-hosted model.
 			</p>
+
+			<SetupModelAccess apiKeys={savedKeys} bind:useAutomatic />
+
+			<div class="pt-2 text-sm font-medium">API keys (optional with a subscription login)</div>
 
 			<!-- Saved keys -->
 			{#if savedKeys.length > 0}
@@ -897,21 +893,6 @@
 				{/each}
 			</div>
 
-			<label class="flex cursor-pointer items-start gap-3 rounded-md border border-surface-600 p-3">
-				<input type="checkbox" class="mt-0.5 accent-laya-orange" bind:checked={useClaudeSubscription} />
-				<div>
-					<div class="text-sm font-medium">Also run Laya's models on your coding agent subscription</div>
-					<div class="text-xs text-surface-400">
-						Router and Omni use Haiku; the Stager, chat and Coherence use Sonnet, through Claude Code.
-						No API key needed for them.
-					</div>
-					{#if claudeCliFound === false}
-						<div class="mt-1 text-xs text-amber-300">
-							The Claude Code CLI was not found. Install it and sign in (`claude`), or these models cannot run.
-						</div>
-					{/if}
-				</div>
-			</label>
 
 			<div class="space-y-3 pt-2">
 				<p class="text-sm font-medium">Repositories (optional)</p>
