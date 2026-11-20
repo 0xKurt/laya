@@ -5,6 +5,7 @@
 	import { engineApi } from '$lib/api/engine';
 	import { glassTheme } from '$lib/stores/glassTheme';
 	import { CODING_AGENTS, DEFAULT_AGENT_PATHS, AGENT_BINARY_NAMES } from '$lib/config';
+	import AssistantSettings from './AssistantSettings.svelte';
 
 	let selected = $state('claude_code');
 	let agentPaths = $state<Record<string, string>>({ ...DEFAULT_AGENT_PATHS });
@@ -162,3 +163,5 @@
 	</div>
 
 {/if}
+
+<AssistantSettings />

@@ -57,14 +57,38 @@ _LINEAR_PRIORITY = ["none", "urgent", "high", "medium", "low"]
 _ISSUE_GROUPS = (("started", "in_progress"), ("unstarted", "todo"), ("backlog", "backlog"), ("triage", "triage"))
 
 
+# The working rules the assistant follows when the user has not written their own
+# (settings ``assistant.rules``, edited in Settings → Agent).
+DEFAULT_RULES = """\
+- Links: every item you name (card, PR, issue, thread, mail, page) gets its URL inline, in every answer (`link` / `source_url` / `url`).
+- Laya is a snapshot. Before calling something open or unanswered, check it live with the user's tools; otherwise mark it "not re-checked". A session's "merged" or "green" is a lead until the source confirms it.
+- Drafts only. Never send, post, comment, create or change anything without the user's explicit OK in this conversation; show the full draft and where it would go first.
+- Work scope only; leave out personal matters unless the user asks.
+- Calm and short. Actions first: verb + what, link, effort.
+- Two lanes: what the user does (decide, review, reply, meet: `you ~X`) and what a coding agent session can do (code, tests, PR follow-ups, write-ups: `agent ~Y`)."""
+
+
+def rules() -> str:
+    """The assistant's working rules: settings ``assistant.rules``, else ``DEFAULT_RULES``."""
+    from laya.config import load_settings
+
+    configured = (load_settings().get("assistant") or {}).get("rules")
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    return DEFAULT_RULES
+
+
 def server_instructions() -> str | None:
-    """The MCP server instructions, or None when the file is missing or empty."""
+    """The MCP server instructions (what Laya is, which tool, then the working
+    rules), or None when the file is missing or empty."""
     try:
         text = INSTRUCTIONS_FILE.read_text(encoding="utf-8").strip()
     except OSError as e:
         log.warning("assistant_instructions_unreadable", error=str(e))
         return None
-    return text or None
+    if not text:
+        return None
+    return f"{text}\n\nWorking rules:\n{rules()}"
 
 
 # ── helpers ──────────────────────────────────────────────────────────────

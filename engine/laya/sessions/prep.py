@@ -12,7 +12,7 @@ The worktree command has the form
 ``git -C <checkout> fetch origin && git -C <checkout> worktree add ../<repo>-<topic> -b <topic> origin/<default>``.
 The checkout is a repos.json entry for the repository, else
 ``<root>/<repo>`` for the first configured checkout root that has it
-(settings ``sessions.checkout_roots``, default ``~/git/somnia``); without
+(settings ``sessions.checkout_roots``, default the home folder); without
 one a clone command comes first.
 """
 
@@ -35,7 +35,9 @@ from laya.models.card import CardResponse
 
 log = structlog.get_logger()
 
-DEFAULT_CHECKOUT_ROOTS = ("~/git/somnia",)
+# Where checkouts are looked for while settings ``sessions.checkout_roots`` is empty
+# (Settings → Agent asks for the folder).
+DEFAULT_CHECKOUT_ROOTS = ("~",)
 GIT_TIMEOUT_SECONDS = 15
 _TOPIC_MAX_CHARS = 40
 

@@ -33,14 +33,35 @@ def test_instructions_are_short_and_name_the_rules_and_tools():
     assert text
     assert len(text.split()) <= 380
     for needle in ("today", "search_cards", "get_entity", "search_events", "search_documents",
-                   "URL inline", "live", "Meetings are fixed", "Drafts only",
-                   "somnia-chain", "somnia-lend", "agent ~"):
+                   "URL inline", "live", "Drafts only", "agent ~", "Working rules:"):
         assert needle in text, needle
+    # Neutral by default: no person or company in the shipped text.
+    for word in ("Kurt", "somnia", "Somnia"):
+        assert word not in text, word
     # Every tool the instructions name exists in the read scope.
     for name in ("today", "search_cards", "get_card", "search_entities", "get_entity",
                  "get_cards_by_entity", "search_events", "semantic_search", "search_documents",
                  "read_document", "get_recent_activity", "get_daily_summary", "get_omni_summary"):
         assert name in read_tool_names(), name
+
+
+def test_instructions_use_the_users_rules(monkeypatch):
+    monkeypatch.setattr("laya.config.load_settings", lambda: {"assistant": {"rules": "- Scope: org acme only."}})
+    text = assistant.server_instructions()
+    assert text.endswith("Working rules:\n- Scope: org acme only.")
+    monkeypatch.setattr("laya.config.load_settings", lambda: {"assistant": {"rules": "  "}})
+    assert assistant.rules() == assistant.DEFAULT_RULES
+
+
+def test_checkout_roots_default_to_home(monkeypatch):
+    from pathlib import Path
+
+    from laya.sessions import prep
+
+    monkeypatch.setattr(prep, "load_settings", lambda: {"sessions": {}})
+    assert prep.checkout_roots() == [Path("~").expanduser()]
+    monkeypatch.setattr(prep, "load_settings", lambda: {"sessions": {"checkout_roots": ["~/code"]}})
+    assert prep.checkout_roots() == [Path("~/code").expanduser()]
 
 
 def test_instructions_missing_file_gives_none(monkeypatch, tmp_path):

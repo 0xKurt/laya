@@ -134,6 +134,18 @@ async def get_accounts(refresh: bool = False) -> dict[str, Any]:
     return await accounts.overview(refresh=refresh)
 
 
+@router.get("/assistant/rules")
+async def assistant_rules() -> dict[str, Any]:
+    """The assistant's working rules, the neutral default, and whether the user wrote
+    their own (set with ``PUT /settings {"assistant": {"rules": "…"}}``; empty = default)."""
+    from laya.claude_code import assistant
+    from laya.config import load_settings
+
+    custom = (load_settings().get("assistant") or {}).get("rules")
+    return {"rules": assistant.rules(), "default": assistant.DEFAULT_RULES,
+            "custom": bool(isinstance(custom, str) and custom.strip())}
+
+
 @router.get("/auto")
 async def auto_routing() -> dict[str, Any]:
     """What each role set to Automatic (``agent/auto``) runs on right now."""
