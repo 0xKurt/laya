@@ -563,3 +563,16 @@ def mock_document_vectors():
          patch("laya.documents.ingest.get_embedding_info", return_value={"backend": "mpnet"}), \
          patch("laya.documents.search.memory_search", new_callable=AsyncMock, return_value=[]):
         yield {"embed_batch": eb, "delete_where": dw, "embed_document": ed}
+
+
+@pytest.fixture(autouse=True)
+def _no_real_codex_cli_login(monkeypatch):
+    """Tests never start the real `codex app-server` for the Codex CLI login;
+    a test that needs one sets ``codex_accounts._default_status`` itself."""
+    import time as _time
+
+    from laya.claude_code import codex_accounts
+
+    monkeypatch.setattr(codex_accounts, "_default_status", (_time.monotonic() + 10**6, {
+        "logged_in": False, "email": None, "plan": None, "account_id": None, "auth": None,
+        "error": "Codex CLI not found"}))

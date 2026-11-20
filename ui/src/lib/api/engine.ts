@@ -1419,10 +1419,11 @@ export const engineApi = {
 			method: 'POST',
 			body: JSON.stringify({ text })
 		}),
-	// Claude accounts (Settings → Claude accounts).
+	// Logins per coding agent (Settings → Models → Access).
 	getClaudeAccounts: (refresh = false) =>
 		request<ClaudeAccountsOverview>(`/claude-code/accounts?refresh=${refresh}`, { signal: AbortSignal.timeout(120_000) }),
-	addClaudeAccount: () => request<ClaudeAccountLogin>('/claude-code/accounts', { method: 'POST' }),
+	addClaudeAccount: (agent = 'claude_code') =>
+		request<ClaudeAccountLogin>('/claude-code/accounts', { method: 'POST', body: JSON.stringify({ agent }) }),
 	signInClaudeAccount: (id: string) =>
 		request<ClaudeAccountLogin>(`/claude-code/accounts/${encodeURIComponent(id)}/login`, { method: 'POST' }),
 	submitClaudeAccountCode: (id: string, code: string) =>

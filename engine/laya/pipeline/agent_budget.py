@@ -395,12 +395,13 @@ async def evaluate_agent_budget() -> None:
         thresholds = cfg.get("pause_at_utilization", DEFAULT_PAUSE_AT_UTILIZATION)
 
         # Native signal first — when the CLI itself reports we're no longer allowed.
-        if agent_id == "claude_code":
-            # Claude Code spreads its turns over the user's Claude accounts
-            # (claude_code/accounts.py); it is blocked only when all of them are.
-            from laya.claude_code import accounts
+        from laya.claude_code import accounts
 
-            blocked, until, why = await accounts.native_block(thresholds)
+        logins = accounts.login_module(agent_id)
+        if logins is not None:
+            # Agents with logins (Claude Code accounts, Codex logins) spread their
+            # turns over them; such an agent is blocked only when all of them are.
+            blocked, until, why = await logins.native_block(thresholds)
             if blocked:
                 recovery_times.append(until or _ts_in_hours(window_hours))
                 reasons.append(why)

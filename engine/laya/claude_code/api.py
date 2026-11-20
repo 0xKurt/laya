@@ -14,7 +14,7 @@ from fastapi import APIRouter, Body, HTTPException, WebSocket, WebSocketDisconne
 from laya.claude_code import connect as connect_mod
 from laya.claude_code import egress as _egress  # noqa: F401  registers the send connection hooks
 from laya.claude_code import discover as discover_mod
-from laya.claude_code import accounts, my_work, service, store, terminal, work_actions
+from laya.claude_code import accounts, codex_accounts, my_work, service, store, terminal, work_actions
 from laya.claude_code.discover import SEND_ROLES, Discovery, PlatformDiscovery
 from laya.security.engine_auth import WS_SUBPROTOCOL, offered_subprotocols
 
@@ -141,9 +141,15 @@ async def current_login() -> dict[str, Any]:
 
 
 @router.post("/accounts")
-async def add_account() -> dict[str, Any]:
-    """Start signing in a new account; returns the sign-in (poll its status)."""
+async def add_account(body: dict[str, Any] | None = Body(None)) -> dict[str, Any]:
+    """Start signing in a new login of ``agent`` (default claude_code); returns the
+    sign-in (poll its status)."""
+    agent = str((body or {}).get("agent") or accounts.AGENT_ID)
     try:
+        if agent == codex_accounts.AGENT_ID:
+            return await codex_accounts.start_login()
+        if agent != accounts.AGENT_ID:
+            raise accounts.AccountError(f"Logins of '{agent}' cannot be added")
         return await accounts.start_login()
     except accounts.AccountError as e:
         raise _account_error(e) from e
@@ -152,6 +158,8 @@ async def add_account() -> dict[str, Any]:
 @router.post("/accounts/{account_id}/login")
 async def login_account(account_id: str) -> dict[str, Any]:
     try:
+        if await accounts.agent_of(account_id) == codex_accounts.AGENT_ID:
+            return await codex_accounts.start_login(account_id)
         return await accounts.start_login(account_id)
     except accounts.AccountError as e:
         raise _account_error(e) from e
@@ -182,7 +190,10 @@ async def cancel_account_login(account_id: str) -> dict[str, Any]:
 @router.delete("/accounts/{account_id}")
 async def remove_account(account_id: str) -> dict[str, Any]:
     try:
-        await accounts.remove(account_id)
+        if await accounts.agent_of(account_id) == codex_accounts.AGENT_ID:
+            await codex_accounts.remove(account_id)
+        else:
+            await accounts.remove(account_id)
     except accounts.AccountError as e:
         raise _account_error(e) from e
     return {"status": "removed", "id": account_id}

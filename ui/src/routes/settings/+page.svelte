@@ -16,8 +16,7 @@
 	import BriefingConfig from '$lib/components/settings/BriefingConfig.svelte';
 	import MCPConfig from '$lib/components/settings/MCPConfig.svelte';
 	import AboutConfig from '$lib/components/settings/AboutConfig.svelte';
-	import ClaudeAccountsConfig from '$lib/components/settings/ClaudeAccountsConfig.svelte';
-	import { page } from '$app/state';
+		import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import { glassTheme } from '$lib/stores/glassTheme';
 	import { portal } from '$lib/actions/portal';
@@ -26,15 +25,17 @@
 	import { hasIntegrationErrors } from '$lib/stores/integrationErrors';
 	import { fade } from 'svelte/transition';
 
-	type TabId = 'team' | 'rules' | 'models' | 'repos' | 'agent' | 'claude-accounts' | 'integrations' | 'spaces' | 'scheduling' | 'mcp' | 'audit' | 'appearance' | 'keybindings' | 'data' | 'about';
-	const validTabs = new Set<string>(['team', 'rules', 'models', 'repos', 'agent', 'claude-accounts', 'integrations', 'spaces', 'scheduling', 'mcp', 'audit', 'appearance', 'keybindings', 'data', 'about']);
+	type TabId = 'team' | 'rules' | 'models' | 'repos' | 'agent' | 'integrations' | 'spaces' | 'scheduling' | 'mcp' | 'audit' | 'appearance' | 'keybindings' | 'data' | 'about';
+	const validTabs = new Set<string>(['team', 'rules', 'models', 'repos', 'agent', 'integrations', 'spaces', 'scheduling', 'mcp', 'audit', 'appearance', 'keybindings', 'data', 'about']);
 	const SETTINGS_TAB_KEY = 'laya-settings-tab';
 	let activeTab = $state<TabId>('team');
 
 	// React to URL query params (works for both initial load and client-side navigation)
 	$effect(() => {
-		const tab = page.url.searchParams.get('tab');
-		const section = page.url.searchParams.get('section');
+		// Logins moved into Models (section "Access"); old links still land there.
+		const rawTab = page.url.searchParams.get('tab');
+		const tab = rawTab === 'claude-accounts' ? 'models' : rawTab;
+		const section = page.url.searchParams.get('section') ?? (rawTab === 'claude-accounts' ? 'model-access' : null);
 
 		if (tab && validTabs.has(tab)) {
 			activeTab = tab as TabId;
@@ -69,7 +70,6 @@
 		{ id: 'models',  label: 'Models' },
 		{ id: 'repos',   label: 'Repos' },
 		{ id: 'agent',   label: 'Agent' },
-		{ id: 'claude-accounts', label: 'Logins' },
 		{ id: 'integrations', label: 'Integrations' },
 		{ id: 'spaces',       label: 'Spaces' },
 		{ id: 'scheduling',   label: 'Features' },
@@ -259,8 +259,6 @@
 		<RepoConfig />
 	{:else if activeTab === 'agent'}
 		<AgentConfig />
-	{:else if activeTab === 'claude-accounts'}
-		<ClaudeAccountsConfig />
 	{:else if activeTab === 'integrations'}
 		<IntegrationsConfig />
 	{:else if activeTab === 'spaces'}

@@ -104,7 +104,8 @@ _TABLE = """CREATE TABLE IF NOT EXISTS claude_code_accounts (
     logged_in         INTEGER NOT NULL DEFAULT 0,
     status_checked_at TEXT,
     created_at        TEXT NOT NULL,
-    org_id            TEXT
+    org_id            TEXT,
+    agent_id          TEXT NOT NULL DEFAULT 'claude_code'
 )"""
 
 # Rows of agent_rate_limit_state that keyed the CLI login by slot rather than
@@ -138,6 +139,12 @@ async def _db():
         cols = {r[1] for r in await db.execute_fetchall("PRAGMA table_info(claude_code_accounts)")}
         if "org_id" not in cols:
             await db.execute("ALTER TABLE claude_code_accounts ADD COLUMN org_id TEXT")
+        # Logins of several coding agents share the table (codex_accounts.py
+        # keeps the codex_cli ones); rows from before the column are Claude's.
+        if "agent_id" not in cols:
+            await db.execute(
+                "ALTER TABLE claude_code_accounts ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'claude_code'"
+            )
         with contextlib.suppress(Exception):
             await db.execute(
                 f"DELETE FROM agent_rate_limit_state WHERE agent_id IN ({','.join('?' * len(_LEGACY_RATE_ROWS))})",
@@ -169,14 +176,31 @@ async def rate_row(account_id: str) -> str | None:
 
 async def list_rows() -> list[dict[str, Any]]:
     db = await _db()
-    rows = await db.execute_fetchall("SELECT * FROM claude_code_accounts ORDER BY created_at, id")
+    rows = await db.execute_fetchall(
+        "SELECT * FROM claude_code_accounts WHERE agent_id = ? ORDER BY created_at, id", (AGENT_ID,)
+    )
     return [dict(r) for r in rows]
 
 
 async def get_row(account_id: str) -> dict[str, Any] | None:
     db = await _db()
-    rows = await db.execute_fetchall("SELECT * FROM claude_code_accounts WHERE id = ?", (account_id,))
+    rows = await db.execute_fetchall(
+        "SELECT * FROM claude_code_accounts WHERE id = ? AND agent_id = ?", (account_id, AGENT_ID)
+    )
     return dict(rows[0]) if rows else None
+
+
+async def agent_of(login_id: str) -> str | None:
+    """The coding agent a login belongs to (``claude_code`` / ``codex_cli``), or None."""
+    from laya.claude_code import codex_accounts
+
+    if login_id == DEFAULT_ID:
+        return AGENT_ID
+    if login_id == codex_accounts.DEFAULT_ID:
+        return codex_accounts.AGENT_ID
+    db = await _db()
+    rows = await db.execute_fetchall("SELECT agent_id FROM claude_code_accounts WHERE id = ?", (login_id,))
+    return rows[0]["agent_id"] if rows else None
 
 
 async def _update_row(account_id: str, **fields: Any) -> None:
@@ -1044,7 +1068,9 @@ async def poll_all_usage() -> None:
         except Exception as e:
             log.warning("claude_account_usage_poll_failed", account=account_id, error=str(e))
 
-    await asyncio.gather(*(one(a) for a in targets))
+    from laya.claude_code import codex_accounts
+
+    await asyncio.gather(*(one(a) for a in targets), codex_accounts.poll_all_usage())
 
 
 # ── PTY sign-in ──────────────────────────────────────────────────────────
@@ -1166,6 +1192,8 @@ class LoginFlow:
     kind: str  # "account" | "connector"
     account_id: str
     new_account: bool
+    # The coding agent signing in (claude_code: paste a code; codex_cli: device code).
+    agent_id: str = AGENT_ID
     server: str | None = None
     platform: str | None = None
     state: str = "starting"  # starting | waiting_code | verifying | done | failed | cancelled | timed_out
@@ -1177,6 +1205,8 @@ class LoginFlow:
     task: asyncio.Task | None = None
     # The pasted code, kept only to remove it from CLI output that is shown.
     secret: str | None = None
+    # The one-time code a device sign-in (Codex) shows for the user to enter.
+    user_code: str | None = None
 
     @property
     def active(self) -> bool:
@@ -1198,7 +1228,7 @@ class LoginFlow:
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id, "kind": self.kind, "account_id": self.account_id,
-            "new_account": self.new_account,
+            "new_account": self.new_account, "agent_id": self.agent_id, "user_code": self.user_code,
             "server": self.server, "platform": self.platform, "state": self.state,
             "url": self.url, "error": self.error, "started_at": self.started_at,
             "expires_at": self.expires_at,
@@ -1321,8 +1351,13 @@ async def _drive(flow: LoginFlow) -> None:
                 url = parse_login_url(text)
                 if url:
                     flow.url = url
-                    if flow.state == "starting":
-                        flow.state = "waiting_code"
+            if flow.agent_id != AGENT_ID and flow.user_code is None:
+                from laya.claude_code import codex_accounts
+
+                flow.user_code = codex_accounts.parse_device_code(text)
+            ready = flow.url is not None and (flow.agent_id == AGENT_ID or flow.user_code is not None)
+            if ready and flow.state == "starting":
+                flow.state = "waiting_code"
             if flow.proc.returncode is not None:
                 await _finish(flow, flow.proc.returncode, text)
                 return
@@ -1342,6 +1377,11 @@ async def _finish(flow: LoginFlow, code: int, text: str) -> None:
                 await check_connectors(flow.account_id)
         else:
             await _end(flow, "failed", flow.redact(_last_line(text)) or "The connector sign-in failed.")
+        return
+    if flow.agent_id != AGENT_ID:
+        from laya.claude_code import codex_accounts
+
+        await codex_accounts.finish_login(flow, code, text)
         return
 
     row = await get_row(flow.account_id)
@@ -1391,9 +1431,16 @@ async def _end(flow: LoginFlow, state: str, error: str | None) -> None:
     if flow.task is not None and flow.task is not asyncio.current_task() and not flow.task.done():
         flow.task.cancel()
     if flow.kind == "account" and flow.new_account and state != "done":
-        row = await get_row(flow.account_id)
-        if row and not row["logged_in"]:
-            await _forget_account(flow.account_id, row["config_dir"])
+        if flow.agent_id != AGENT_ID:
+            from laya.claude_code import codex_accounts
+
+            crow = await codex_accounts.get_row(flow.account_id)
+            if crow and not crow["logged_in"]:
+                await codex_accounts.forget(flow.account_id, crow["config_dir"])
+        else:
+            row = await get_row(flow.account_id)
+            if row and not row["logged_in"]:
+                await _forget_account(flow.account_id, row["config_dir"])
     log.info("claude_login_ended", kind=flow.kind, account=flow.account_id, state=state)
 
 
@@ -1645,6 +1692,31 @@ async def _usage(account_id: str) -> dict[str, Any]:
     }
 
 
+# Coding agents whose subscription logins Laya manages (Settings → Models → Access).
+LOGIN_AGENTS: dict[str, str] = {"claude_code": "Claude Code", "codex_cli": "Codex"}
+
+
+def login_module(agent_id: str) -> Any:
+    """The module that keeps an agent's logins (pick / failover / windows_of /
+    eligible_ids / native_block), or None for agents without logins."""
+    if agent_id == AGENT_ID:
+        import laya.claude_code.accounts as mod
+
+        return mod
+    if agent_id == "codex_cli":
+        from laya.claude_code import codex_accounts
+
+        return codex_accounts
+    return None
+
+
+async def agents_overview() -> list[dict[str, Any]]:
+    from laya.config import detect_agent_paths
+
+    paths = detect_agent_paths()
+    return [{"agent_id": a, "label": label, "available": bool(paths.get(a))} for a, label in LOGIN_AGENTS.items()]
+
+
 async def overview(refresh: bool = False) -> dict[str, Any]:
     """Everything the Settings tab shows."""
     if refresh:
@@ -1652,8 +1724,10 @@ async def overview(refresh: bool = False) -> dict[str, Any]:
     default = await default_status(force=refresh)
     rows = await list_rows()
     own = has_own_accounts(rows)
+    current = await current_account()
     accounts = [{
-        "id": DEFAULT_ID, "default": True, "email": default["email"], "plan": default["plan"],
+        "id": DEFAULT_ID, "agent_id": AGENT_ID, "default": True, "email": default["email"], "plan": default["plan"],
+        "current": current == DEFAULT_ID,
         "logged_in": default["logged_in"],
         "in_use": not own,
         "problem": None if default["logged_in"] else
@@ -1676,16 +1750,21 @@ async def overview(refresh: bool = False) -> dict[str, Any]:
         elif row["id"] not in eligible:
             problem = "The same account as another entry; Laya does not use it."
         accounts.append({
-            "id": row["id"], "default": False, "email": row.get("email"), "plan": row.get("plan"),
+            "id": row["id"], "agent_id": AGENT_ID, "default": False, "email": row.get("email"),
+            "plan": row.get("plan"), "current": current == row["id"],
             "logged_in": bool(row["logged_in"]), "in_use": row["id"] in eligible,
             "pending": pending,
             "problem": problem,
             "usage": await _usage(row["id"]),
             "connectors": await stored_connectors(row["id"]),
         })
+    from laya.claude_code import codex_accounts
+
+    accounts += await codex_accounts.overview_entries()
     return {
         "accounts": accounts,
-        "current": await current_account(),
+        "current": current,
+        "agents": await agents_overview(),
         "thresholds": _thresholds(),
         "login": login_state(),
         "connectors_url": CONNECTORS_URL,

@@ -103,6 +103,7 @@ export function loginStateText(login: ClaudeAccountLogin): string {
 		case 'starting':
 			return 'Starting the sign-in…';
 		case 'waiting_code':
+			if (login.user_code) return 'Waiting for you to enter the code on the sign-in page…';
 			return login.kind === 'connector'
 				? `Waiting for you to finish signing in to ${what} in the browser…`
 				: 'Sign in on the page in your browser with the account you want to add, then paste the code it shows.';

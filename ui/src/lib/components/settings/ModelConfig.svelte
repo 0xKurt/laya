@@ -13,6 +13,7 @@
 	import { portal } from '$lib/actions/portal';
 	import { CODING_AGENTS } from '$lib/config';
 	import ModelSelect from './ModelSelect.svelte';
+	import AccessConfig from './AccessConfig.svelte';
 
 	let guideTooltip = $state<{ text: string; top: number; left: number } | null>(null);
 
@@ -1032,6 +1033,9 @@
 				{/each}
 			</div>
 		</div>
+
+		<!-- Access: the subscription logins of each coding agent -->
+		<AccessConfig />
 
 		<!-- Agent Usage Limits (shown when an installed agent is the inference backend) -->
 		{#if agentMode}

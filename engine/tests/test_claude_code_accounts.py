@@ -765,7 +765,7 @@ async def test_accounts_api(db, monkeypatch):
     monkeypatch.setattr(accounts, "refresh_status", AsyncMock())
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         data = (await client.get("/claude-code/accounts")).json()
-        assert [a["id"] for a in data["accounts"]] == ["default", "acct2"]
+        assert [a["id"] for a in data["accounts"] if a["agent_id"] == "claude_code"] == ["default", "acct2"]
         assert data["accounts"][0]["email"] == "kurt@example.com"
         assert data["accounts"][0]["in_use"] is False and data["accounts"][1]["in_use"] is True
         usage = data["accounts"][1]["usage"]

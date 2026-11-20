@@ -2069,6 +2069,10 @@ export interface ClaudeAccountConnectors {
 
 export interface ClaudeAccount {
 	id: string;
+	/** The coding agent of the login: claude_code | codex_cli. */
+	agent_id?: string;
+	/** Whether this login of its agent is the one processing uses now. */
+	current?: boolean;
 	/** The Claude Code CLI's own login; Laya uses it only while no account is added. */
 	default: boolean;
 	email: string | null;
@@ -2102,12 +2106,17 @@ export interface ClaudeAccountLogin {
 	started_at: string;
 	/** When the engine gives up waiting (ISO). */
 	expires_at?: string;
+	/** The coding agent signing in; a device sign-in (Codex) shows `user_code`. */
+	agent_id?: string;
+	user_code?: string | null;
 }
 
 export interface ClaudeAccountsOverview {
 	accounts: ClaudeAccount[];
 	/** The account Laya's processing uses now; null when none can be used. */
 	current: string | null;
+	/** The coding agents whose logins Laya manages, and whether each CLI is installed. */
+	agents?: { agent_id: string; label: string; available: boolean }[];
 	thresholds: Record<string, number>;
 	login: ClaudeAccountLogin | null;
 	connectors_url: string;

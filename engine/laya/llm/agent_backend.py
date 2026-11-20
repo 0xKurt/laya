@@ -657,26 +657,23 @@ class AgentRateLimited(RuntimeError):
 
 
 async def _run_agent_routed(agent_id: str, *args: Any) -> dict[str, Any]:
-    """``_run_agent`` on the Claude account routing picks (claude_code only).
+    """``_run_agent`` on the login routing picks, for agents with logins
+    (Claude Code accounts, Codex logins; see ``accounts.login_module``).
 
-    A rejection by that account's usage limit is retried once on the next
-    account with room. The result carries the account in ``account_id``.
+    A rejection by that login's usage limit is retried once on the next login
+    of the same agent with room. The result carries the login in ``account_id``.
     """
-    if agent_id == "codex_cli":
-        from laya.claude_code import codex_accounts
-
-        result = await _run_agent(agent_id, *args, account_id=codex_accounts.DEFAULT_ID)
-        result["account_id"] = codex_accounts.DEFAULT_ID
-        return result
-    if agent_id != "claude_code":
-        return await _run_agent(agent_id, *args)
     from laya.claude_code import accounts
 
-    account_id, env = await accounts.pick("inference")
+    logins = accounts.login_module(agent_id)
+    if logins is None:
+        return await _run_agent(agent_id, *args)
+
+    account_id, env = await logins.pick("inference")
     try:
         result = await _run_agent(agent_id, *args, account_id=account_id, account_env=env)
     except AgentRateLimited:
-        nxt = await accounts.failover(account_id)
+        nxt = await logins.failover(account_id)
         if nxt is None:
             raise
         account_id, env = nxt

@@ -178,3 +178,27 @@ describe('account badges and reset texts', () => {
 		expect(bars[1]).toMatchObject({ percent: 100, over: true, rejected: false, resets: 'resets Nov 25 at 4am' });
 	});
 });
+
+describe('device sign-in (Codex)', () => {
+	it('asks for the code on the page instead of a paste', () => {
+		const l = {
+			id: 'f',
+			kind: 'account',
+			account_id: 'c1',
+			agent_id: 'codex_cli',
+			user_code: 'ABCD-12EFG',
+			server: null,
+			platform: null,
+			state: 'waiting_code',
+			url: 'https://auth.openai.com/codex/device',
+			error: null,
+			started_at: ''
+		} as const;
+		expect(loginStateText(l)).toMatch(/enter the code/);
+	});
+	it('marks the login processing uses now per agent', () => {
+		const a = { id: 'c1', default: false, logged_in: true, in_use: true, pending: false };
+		expect(accountBadge(a, 'c1')?.label).toBe('Processing now');
+		expect(accountBadge(a, 'other')).toBeNull();
+	});
+});

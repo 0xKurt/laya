@@ -1,10 +1,12 @@
 <!-- Copyright 2026 Aayush Chawla -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!--
-	Settings → logins: the user's coding agent subscriptions Laya spreads
-	its processing over (engine/laya/claude_code/accounts.py). Lists each
-	account with plan, usage windows and connectors; adds an account through
-	the CLI's own sign-in (open the page, paste the code); removes one.
+	Settings → Models → Access: the subscription logins Laya spreads its
+	processing over, per coding agent (engine/laya/claude_code/accounts.py for
+	Claude Code, codex_accounts.py for Codex). Lists each login with plan, usage
+	windows and connectors; adds one through the CLI's own sign-in (Claude Code:
+	open the page, paste the code; Codex: open the page, enter the device code);
+	removes one.
 -->
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
@@ -55,8 +57,15 @@
 	);
 	const loginActive = $derived(isLoginActive(login));
 	const placement = $derived(loginPlacement(login, overview?.accounts ?? [], dismissed));
-	const ownAccounts = $derived((overview?.accounts ?? []).filter((a) => !a.default));
-	const cliLogin = $derived((overview?.accounts ?? []).find((a) => a.default) ?? null);
+	const agents = $derived(
+		overview?.agents ?? [{ agent_id: 'claude_code', label: 'Claude Code', available: true }]
+	);
+	const agentOf = (a: { agent_id?: string }) => a.agent_id ?? 'claude_code';
+	const ownLogins = (agentId: string) =>
+		(overview?.accounts ?? []).filter((a) => !a.default && agentOf(a) === agentId);
+	const cliLoginOf = (agentId: string) =>
+		(overview?.accounts ?? []).find((a) => a.default && agentOf(a) === agentId) ?? null;
+	const agentLabel = (agentId: string) => agents.find((g) => g.agent_id === agentId)?.label ?? agentId;
 
 	let loginTimer: ReturnType<typeof setInterval> | null = null;
 	let listTimer: ReturnType<typeof setInterval> | null = null;
@@ -126,8 +135,8 @@
 		await load();
 	}
 
-	async function addAccount() {
-		await startedLogin(await run('add', 'top', () => engineApi.addClaudeAccount()));
+	async function addAccount(agentId: string) {
+		await startedLogin(await run(`add:${agentId}`, `top:${agentId}`, () => engineApi.addClaudeAccount(agentId)));
 	}
 
 	async function signInAgain(id: string) {
@@ -189,7 +198,7 @@
 		}
 	}
 
-	async function copyUrl(url: string | null) {
+	async function copyUrl(url: string | null | undefined) {
 		if (!url) return;
 		try {
 			await navigator.clipboard.writeText(url);
@@ -236,7 +245,19 @@
 				<span class="shrink-0 font-mono text-laya-micro text-surface-400">{left}</span>
 			{/if}
 		</div>
-		{#if l.state === 'waiting_code' && l.url}
+		{#if l.state === 'waiting_code' && l.url && l.user_code}
+			<div class="flex flex-wrap items-center gap-3">
+				<span class="rounded-md border border-surface-600 bg-surface-800 px-3 py-1.5 font-mono text-laya-heading tracking-widest text-surface-50">
+					{l.user_code}
+				</span>
+				<button class={smallButton} onclick={() => copyUrl(l.user_code)}>{copied ? 'Copied' : 'Copy code'}</button>
+				<button class={primaryButton} onclick={() => l.url && openExternal(l.url)}>Open sign-in page</button>
+			</div>
+			<p class="text-laya-secondary text-surface-400">
+				Open {l.url}, sign in with the account you want to add and enter this code. Laya finishes by itself once
+				you approve. To add another account than the one your browser is logged in to, use a private window.
+			</p>
+		{:else if l.state === 'waiting_code' && l.url}
 			<div class="flex flex-wrap gap-2">
 				<button class={primaryButton} onclick={() => l.url && openExternal(l.url)}>
 					{l.kind === 'connector' ? 'Open the page again' : 'Open login page'}
@@ -307,11 +328,11 @@
 {/snippet}
 
 {#snippet accountCard(account: ClaudeAccount)}
-	{@const badge = accountBadge(account, overview?.current ?? null)}
-	<div class="{sectionClass} p-6 {account.default && !account.in_use ? 'opacity-80' : ''}">
+	{@const badge = accountBadge(account, account.current ? account.id : (overview?.current ?? null))}
+	<div class="rounded-lg border border-surface-700 bg-surface-900/40 p-5 {account.default && !account.in_use ? 'opacity-80' : ''}">
 		{#if account.default}
 			<div class="mb-1 text-laya-micro uppercase tracking-wider text-surface-400">
-				Claude Code · CLI login (used only while no login is added)
+				CLI login (used only while no {agentLabel(agentOf(account))} login is added)
 			</div>
 		{/if}
 		<div class="flex flex-wrap items-center gap-2">
@@ -388,7 +409,7 @@
 			<div class="mt-2 text-laya-micro text-surface-500">Usage {asOf(account.usage.as_of)}</div>
 		{/if}
 
-		{#if !account.pending}
+		{#if !account.pending && agentOf(account) === 'claude_code'}
 			<div class="mt-5">
 				<div class="mb-2 flex items-center justify-between">
 					<span class="text-laya-micro uppercase tracking-wider text-surface-400">Connectors</span>
@@ -446,44 +467,66 @@
 	</div>
 {/snippet}
 
-<div class="space-y-6">
-	<div class="{sectionClass} p-6">
-		<div class="flex items-start justify-between gap-4">
-			<div>
-				<h3 class="mb-1 text-laya-heading font-semibold text-surface-50">Logins</h3>
-				<p class="text-laya-base text-surface-400">
-					Laya runs on the accounts you add here, independently of the account the Claude Code CLI is logged in to.
-					It moves to the account with most headroom when one nears its limits. Collecting, My work and actions on a
-					platform run only on an account where that platform's connector is connected.
-				</p>
-			</div>
-			<div class="flex shrink-0 gap-2">
-				<button class={smallButton} onclick={() => load(true)} disabled={loading || refreshing}>
-					{refreshing ? 'Refreshing…' : 'Refresh'}
-				</button>
-				<button class={primaryButton} onclick={addAccount} disabled={loginActive || busy === 'add'}>Add account</button>
-			</div>
+<div id="model-access" class="{sectionClass} space-y-5 p-5">
+	<div class="flex items-start justify-between gap-4">
+		<div>
+			<h3 class="mb-1 text-laya-heading font-medium text-surface-50">Access</h3>
+			<p class="text-laya-secondary text-surface-400">
+				The subscription logins Laya runs on, per coding agent, independently of the login each CLI uses itself.
+				Laya moves to the login with most headroom when one nears its limits. Collecting, My work and actions on
+				a platform run only on a login where that platform's connector is connected.
+			</p>
 		</div>
-		{@render cardError('top')}
+		<button class="{smallButton} shrink-0" onclick={() => load(true)} disabled={loading || refreshing}>
+			{refreshing ? 'Refreshing…' : 'Refresh'}
+		</button>
 	</div>
 
 	{#if loading}
-		<div class="{sectionClass} p-6 text-laya-base text-surface-400">Loading accounts…</div>
+		<div class="text-laya-base text-surface-400">Loading logins…</div>
 	{:else if loadError}
-		<div class="{sectionClass} p-6 text-laya-base text-error-400">{loadError}</div>
+		<div class="text-laya-base text-error-400">{loadError}</div>
 	{:else if overview}
-		{#if placement === 'new' && login}
-			<div class="{sectionClass} p-6">
-				<span class="text-laya-base font-semibold text-surface-50">New account</span>
-				{@render loginPanel(login)}
-				{@render cardError('new')}
-			</div>
-		{/if}
-		{#each ownAccounts as account (account.id)}
-			{@render accountCard(account)}
+		{#each agents as group (group.agent_id)}
+			{@const own = ownLogins(group.agent_id)}
+			{@const cli = cliLoginOf(group.agent_id)}
+			<section class="space-y-3" data-agent={group.agent_id}>
+				<div class="flex items-center justify-between gap-3">
+					<div class="flex items-center gap-2">
+						<span class="text-laya-base font-semibold text-surface-100">{group.label}</span>
+						{#if !group.available}
+							<span class="rounded bg-surface-700 px-1.5 py-0.5 text-laya-micro text-surface-400">not installed</span>
+						{/if}
+					</div>
+					<button
+						class={primaryButton}
+						onclick={() => addAccount(group.agent_id)}
+						disabled={!group.available || loginActive || busy === `add:${group.agent_id}`}
+					>
+						Add login
+					</button>
+				</div>
+				{@render cardError(`top:${group.agent_id}`)}
+				{#if own.length === 0 && group.available}
+					<p class="rounded-lg border border-dashed border-surface-600 p-3 text-laya-secondary text-surface-400">
+						Add every subscription login you want Laya to use. A CLI holds only one login at a time; Laya uses all
+						logins added here.
+					</p>
+				{/if}
+				{#if placement === 'new' && login && (login.agent_id ?? 'claude_code') === group.agent_id}
+					<div class="rounded-lg border border-surface-700 bg-surface-900/40 p-5">
+						<span class="text-laya-base font-semibold text-surface-50">New login</span>
+						{@render loginPanel(login)}
+						{@render cardError('new')}
+					</div>
+				{/if}
+				{#each own as account (account.id)}
+					{@render accountCard(account)}
+				{/each}
+				{#if cli && group.available}
+					{@render accountCard(cli)}
+				{/if}
+			</section>
 		{/each}
-		{#if cliLogin}
-			{@render accountCard(cliLogin)}
-		{/if}
 	{/if}
 </div>

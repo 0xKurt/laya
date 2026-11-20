@@ -30,6 +30,14 @@ SCHEMA = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _cli_login(monkeypatch):
+    """The Codex CLI login, logged in, without starting `codex app-server`."""
+    monkeypatch.setattr(codex_accounts, "_default_status", (time.monotonic(), {
+        "logged_in": True, "email": "me@example.com", "plan": "pro", "account_id": "acct-1", "auth": "chatgpt"}))
+    monkeypatch.setattr(codex_accounts, "_route", codex_accounts._Route())
+
+
 def _lines(name: str) -> list[str]:
     return (FIXTURES / name).read_text().splitlines()
 

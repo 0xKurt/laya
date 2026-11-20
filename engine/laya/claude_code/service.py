@@ -27,7 +27,8 @@ ids are stable, so duplicates are dropped), runs the optional enrich step,
 posts them through the same code path as `POST /events`, then re-checks old
 open cards (recheck.py).
 
-The loop also polls each Claude account's usage (`accounts.poll_due_usage`).
+The loop also polls the usage of each login (`accounts.poll_due_usage`,
+`codex_accounts.poll_due_usage`).
 
 A second loop keeps "My work" fresh (`my_work.run_due_refreshes`): every
 minute it starts the background refresh of each connected section whose
@@ -229,6 +230,9 @@ async def _loop() -> None:
             log.error("claude_code_loop_error", error=str(e))
         try:
             await accounts.poll_due_usage()
+            from laya.claude_code import codex_accounts
+
+            await codex_accounts.poll_due_usage()
         except asyncio.CancelledError:
             raise
         except Exception as e:
