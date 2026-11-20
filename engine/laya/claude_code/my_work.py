@@ -25,6 +25,8 @@
   starts one when the section is stale, `refresh=True` always. While the
   agent budget is paused the Linear turn does not run and the view gets a
   note.
+- After each refresh and each row action, the board cards about the same
+  pull requests and issues follow the change (related.py).
 """
 
 from __future__ import annotations
@@ -464,8 +466,10 @@ async def refresh_section(section: str) -> None:
         error = describe_error(section, e)
         log.warning("claude_code_my_work_failed", section=section, error=error)
     updates = _row_updates.pop(section, {})
+    previous: list[dict[str, Any]] | None = None
     async with _lock(section):
         cache = await _cached(section) or {}
+        previous = cache.get("items") if cache else None
         if items is None:
             record = {**cache, "items": cache.get("items") or [], "error": error, "attempted_at": started}
         else:
@@ -474,6 +478,11 @@ async def refresh_section(section: str) -> None:
             record = {"items": items, "fetched_at": store.now_iso(), "attempted_at": started, "error": None}
         await store.set_state(STATE_PLATFORM, section, json.dumps(record))
     await _broadcast(section)
+    if items is not None:
+        # Cards about the same pull requests / issues follow the new state.
+        from laya.claude_code import related
+
+        related.schedule(related.after_refresh(section, previous, items))
 
 
 async def _broadcast(section: str) -> None:
@@ -575,7 +584,8 @@ def _put_row(section: str, rows: list[dict[str, Any]], key: str,
     return rows
 
 
-async def replace_cached_item(section: str, key: str, item: dict[str, Any] | None) -> None:
+async def replace_cached_item(section: str, key: str, item: dict[str, Any] | None,
+                              final: dict[str, Any] | None = None) -> None:
     """Put one row's fresh data into the section's cache, or drop the row.
 
     An action changes one issue or PR; work_actions reads that row back and
@@ -583,16 +593,24 @@ async def replace_cached_item(section: str, key: str, item: dict[str, Any] | Non
     refresh. `item=None` removes the row (a merged PR, a completed issue).
     A refresh running at the same time gets the row too, so its older data
     does not overwrite it. Nothing is written when the section has no cache yet.
+    `final` is the item's last state when it is dropped (a Linear issue moved
+    to Done), so the cards about it can be closed without another read.
+    The cards about the item follow the change (related.py).
     """
+    from laya.claude_code import related
+
     if section in _row_updates:
         _row_updates[section][key] = item
+    previous: dict[str, Any] | None = None
     async with _lock(section):
         cache = await _cached(section)
-        if not cache:
-            return
-        cache["items"] = _put_row(section, cache.get("items") or [], key, item)
-        await store.set_state(STATE_PLATFORM, section, json.dumps(cache))
-    await _broadcast(section)
+        if cache:
+            previous = next((r for r in cache.get("items") or [] if item_key(section, r) == key), None)
+            cache["items"] = _put_row(section, cache.get("items") or [], key, item)
+            await store.set_state(STATE_PLATFORM, section, json.dumps(cache))
+    related.schedule(related.after_row_action(section, key, previous, item, final))
+    if cache:
+        await _broadcast(section)
 
 
 async def get_my_work(refresh: bool = False) -> dict[str, Any]:
