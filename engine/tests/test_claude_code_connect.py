@@ -571,3 +571,94 @@ async def test_service_start_switches_models_when_sources_exist(db, files):
         await service.start_service()
         await service.stop_service()
     assert files.settings["models"]["router"] == "agent/auto"
+
+
+# ── "Sync now" of every enabled source ───────────────────────────────────
+
+
+def test_next_sweep_at_follows_interval_and_active_hours():
+    monday_10 = datetime(2026, 2, 23, 10, 0, tzinfo=timezone.utc)
+    # Never swept: the loop sweeps it right away.
+    assert service.next_sweep_at(_src(), monday_10) == monday_10
+    # Swept 20 min ago with a 60 min interval: due in 40 min.
+    last = (monday_10 - timedelta(minutes=20)).isoformat()
+    assert service.next_sweep_at(_src(last), monday_10) == monday_10 + timedelta(minutes=40)
+    # Overdue: the next loop tick.
+    assert service.next_sweep_at(_src((monday_10 - timedelta(hours=3)).isoformat()), monday_10) == monday_10
+    # Due after the active hours end (19:00): next working day at 08:00.
+    friday_1830 = datetime(2026, 2, 27, 18, 30, tzinfo=timezone.utc)
+    assert service.next_sweep_at(_src(friday_1830.isoformat()), friday_1830) == datetime(
+        2026, 3, 2, 8, 0, tzinfo=timezone.utc
+    )
+    # Before the window opens: that day's start.
+    early = datetime(2026, 2, 24, 6, 0, tzinfo=timezone.utc)
+    assert service.next_sweep_at(_src((early - timedelta(hours=2)).isoformat()), early) == early.replace(hour=8)
+
+
+@pytest.fixture
+def _reset_sync_all():
+    service._sync_all.update(running=False, started_at=None, finished_at=None, results={})
+    yield
+    service._sync_all.update(running=False, started_at=None, finished_at=None, results={})
+
+
+@pytest.mark.asyncio
+async def test_sync_all_sweeps_enabled_sources_in_background(db, files, _reset_sync_all):
+    import asyncio
+
+    await connect.connect("slack")
+    await connect.connect("github")
+    await store.upsert_source("github", enabled=False)
+    gate = asyncio.Event()
+    calls = []
+
+    async def fake_sweep(platform, recheck_after_hours=None):
+        calls.append((platform, recheck_after_hours))
+        await gate.wait()
+        return {"events": 2, "error": None}
+
+    with patch.object(service, "sweep", side_effect=fake_sweep):
+        async with await _client() as client:
+            resp = await client.post("/claude-code/sync-all")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["running"] is True and data["platforms"] == ["slack"]
+            # A second click while it runs does not start another sync.
+            assert (await client.post("/claude-code/sync-all")).json()["running"] is True
+            gate.set()
+            await service._sync_all_task
+            data = (await client.get("/claude-code/sync-all")).json()
+
+    assert calls == [("slack", service.SYNC_NOW_RECHECK_HOURS)]
+    assert data["running"] is False and data["finished_at"]
+    assert data["results"] == {"slack": {"events": 2, "error": None}}
+    assert data["next_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_all_reports_errors_and_respects_the_budget(db, files, _reset_sync_all):
+    async with await _client() as client:
+        resp = await client.post("/claude-code/sync-all")
+        assert resp.status_code == 409 and "No source" in resp.json()["detail"]
+
+        await connect.connect("slack")
+        with patch("laya.pipeline.agent_budget.is_agent_budget_paused", new_callable=AsyncMock, return_value=True):
+            resp = await client.post("/claude-code/sync-all")
+            assert resp.status_code == 409 and "budget" in resp.json()["detail"]
+
+        with patch.dict(service.COLLECTORS, {"slack": AsyncMock(side_effect=RuntimeError("MCP down"))}):
+            assert (await client.post("/claude-code/sync-all")).status_code == 200
+            await service._sync_all_task
+        data = (await client.get("/claude-code/sync-all")).json()
+    assert data["results"]["slack"] == {"events": 0, "error": "MCP down"}
+
+
+@pytest.mark.asyncio
+async def test_manual_sync_rechecks_sooner(db, files):
+    await connect.connect("slack")
+    with patch.dict(service.COLLECTORS, {"slack": AsyncMock(return_value=[])}), \
+         patch.object(recheck, "recheck", new_callable=AsyncMock, return_value=[]) as rc:
+        await service.sweep("slack", recheck_after_hours=1.0)
+        await service.sweep("slack")
+    assert rc.await_args_list[0].kwargs["after_hours"] == 1.0
+    assert rc.await_args_list[1].kwargs["after_hours"] is None

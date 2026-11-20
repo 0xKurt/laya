@@ -30,6 +30,13 @@ open cards (recheck.py).
 The loop also polls the usage of each login (`accounts.poll_due_usage`,
 `codex_accounts.poll_due_usage`).
 
+"Sync now" (`start_sync_all`, POST /claude-code/sync-all) sweeps every
+enabled platform at once in the background, outside the schedule and the
+active hours like each source's own "Sync now", and re-checks open cards
+not checked in the last SYNC_NOW_RECHECK_HOURS. The budget and space pauses
+still apply (each sweep checks them). `sync_status` reports its progress and
+when the scheduled sweeps last succeeded and run next.
+
 A second loop keeps "My work" fresh (`my_work.run_due_refreshes`): every
 minute it starts the background refresh of each connected section whose
 last refresh is older than its interval (GitHub 10 min, Linear 30 min),
@@ -40,7 +47,7 @@ long sweep never delays it, and it never waits for a refresh.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
 import structlog
@@ -143,8 +150,10 @@ async def _assign_account(platform: str) -> dict[str, Any] | None:
     return assignment.source_fields() if assignment else None
 
 
-async def sweep(platform: str) -> dict[str, Any]:
-    """Collect one platform once and post its events. Returns {events, error}."""
+async def sweep(platform: str, recheck_after_hours: float | None = None) -> dict[str, Any]:
+    """Collect one platform once and post its events. Returns {events, error}.
+
+    `recheck_after_hours` overrides the source's re-check age (manual sync)."""
     from laya.api.events import receive_event
     from laya.claude_code.recheck import recheck
 
@@ -183,7 +192,7 @@ async def sweep(platform: str) -> dict[str, Any]:
             events = await COLLECTORS[platform](source, since)
             events = await enrich(events, source)
             try:
-                events += await recheck(platform, source)
+                events += await recheck(platform, source, after_hours=recheck_after_hours)
             except Exception as e:  # a failed re-check must not cost the sweep its events
                 log.warning("claude_code_recheck_failed", platform=platform, error=str(e))
             for event in events:
@@ -216,6 +225,105 @@ async def run_due_sweeps(now: datetime | None = None) -> list[str]:
         await sweep(platform)
         swept.append(platform)
     return swept
+
+
+def next_sweep_at(source: dict[str, Any], now: datetime) -> datetime:
+    """When the loop sweeps the source next: once due (cursor + interval),
+    at the first minute inside its active hours."""
+    interval = timedelta(minutes=max(MIN_INTERVAL_MINUTES, int(source["config"].get("interval_minutes", 60))))
+    due = now
+    if source.get("cursor"):
+        try:
+            due = max(now, parse_ts(source["cursor"]) + interval)
+        except ValueError:
+            pass
+    config = source["config"]
+    if not source.get("cursor") or within_active_hours(config, due):
+        return due
+    hours = config.get("active_hours") or {}
+    days = hours.get("days") or []
+    try:
+        start = time.fromisoformat(hours.get("start") or "00:00")
+    except ValueError:
+        start = time(0, 0)
+    tz = local_tz(config)
+    local = due.astimezone(tz)
+    for offset in range(8):
+        day = local.date() + timedelta(days=offset)
+        if day.weekday() not in days:
+            continue
+        candidate = datetime.combine(day, start, tzinfo=tz)
+        if candidate >= local:
+            return candidate.astimezone(timezone.utc)
+    return due
+
+
+# Manual "Sync now" of every enabled platform: re-checks open cards not
+# checked in the last hour instead of the source's usual re-check age.
+SYNC_NOW_RECHECK_HOURS = 1.0
+_sync_all: dict[str, Any] = {"running": False, "started_at": None, "finished_at": None, "results": {}}
+_sync_all_task: asyncio.Task | None = None
+
+
+async def _enabled_platforms() -> list[dict[str, Any]]:
+    return [s for s in await store.list_sources() if s["platform"] in COLLECTORS and s["enabled"]]
+
+
+async def sync_status(now: datetime | None = None) -> dict[str, Any]:
+    """Progress of the manual sync plus the schedule of the enabled platforms."""
+    from laya.pipeline.agent_budget import is_agent_budget_paused
+
+    now = now or datetime.now(timezone.utc)
+    sources = await _enabled_platforms()
+    last_ok = [s["last_ok_at"] for s in sources if s.get("last_ok_at")]
+    nexts = [next_sweep_at(s, now) for s in sources]
+    return {
+        **_sync_all,
+        "results": dict(_sync_all["results"]),
+        "platforms": [s["platform"] for s in sources],
+        "last_ok_at": max(last_ok, key=parse_ts) if last_ok else None,
+        "next_at": min(nexts).isoformat() if nexts else None,
+        "budget_paused": await is_agent_budget_paused(),
+    }
+
+
+async def _run_sync_all(platforms: list[str]) -> None:
+    try:
+        for platform in platforms:
+            try:
+                result = await sweep(platform, recheck_after_hours=SYNC_NOW_RECHECK_HOURS)
+            except Exception as e:  # one platform's failure must not stop the others
+                result = {"events": 0, "error": str(e)[:500] or type(e).__name__}
+            _sync_all["results"][platform] = result
+    finally:
+        _sync_all["running"] = False
+        _sync_all["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+
+async def start_sync_all() -> dict[str, Any]:
+    """Start a sweep of every enabled platform in the background (one at a
+    time, like the loop); returns at once. A sync already running is not
+    started twice. Raises SyncBlocked when the agent budget is paused or
+    nothing is enabled."""
+    global _sync_all_task
+    from laya.pipeline.agent_budget import is_agent_budget_paused
+
+    if _sync_all["running"]:
+        return await sync_status()
+    platforms = [s["platform"] for s in await _enabled_platforms()]
+    if not platforms:
+        raise SyncBlocked("No source is connected and enabled.")
+    if await is_agent_budget_paused():
+        raise SyncBlocked("The agent budget is paused.")
+    _sync_all.update(
+        running=True, started_at=datetime.now(timezone.utc).isoformat(), finished_at=None, results={}
+    )
+    _sync_all_task = asyncio.create_task(_run_sync_all(platforms))
+    return await sync_status()
+
+
+class SyncBlocked(Exception):
+    """A manual sync cannot start now."""
 
 
 async def _loop() -> None:

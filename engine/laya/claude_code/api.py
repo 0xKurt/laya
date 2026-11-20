@@ -371,6 +371,21 @@ async def put_enabled(platform: str, body: dict[str, Any] = Body(...)) -> dict[s
     return platform_status(platform, discover_mod.cached(), await store.get_source(platform))
 
 
+@router.get("/sync-all")
+async def get_sync_all() -> dict[str, Any]:
+    """Progress of "Sync now" and when the enabled sources last synced and sync next."""
+    return await service.sync_status()
+
+
+@router.post("/sync-all")
+async def post_sync_all() -> dict[str, Any]:
+    """Sweep every enabled source and re-check open cards, in the background."""
+    try:
+        return await service.start_sync_all()
+    except service.SyncBlocked as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+
 @router.post("/{platform}/sync")
 async def sync_platform(platform: str) -> dict[str, Any]:
     _check_platform(platform)

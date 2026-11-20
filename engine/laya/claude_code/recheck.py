@@ -296,12 +296,19 @@ async def _check_mcp(platform: str, source: dict[str, Any], entities: list[dict[
     return events
 
 
-async def recheck(platform: str, source: dict[str, Any]) -> list[LayaEvent]:
-    """Re-check the due open cards of a platform; returns the closing events."""
+async def recheck(
+    platform: str, source: dict[str, Any], after_hours: float | None = None
+) -> list[LayaEvent]:
+    """Re-check the due open cards of a platform; returns the closing events.
+
+    `after_hours` overrides the source's `recheck_after_hours` (a manual sync
+    re-checks cards sooner)."""
     if platform not in _RECHECKABLE:
         return []
     config = source.get("config") or {}
-    entities = await due_entities(platform, float(config.get("recheck_after_hours", 6)))
+    if after_hours is None:
+        after_hours = float(config.get("recheck_after_hours", 6))
+    entities = await due_entities(platform, after_hours)
     if not entities:
         return []
     if platform == "github":

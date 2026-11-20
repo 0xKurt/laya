@@ -1371,6 +1371,10 @@ export const engineApi = {
 			method: 'POST',
 			signal: AbortSignal.timeout(900_000)
 		}),
+	/** Progress of the Board's "Sync now" and when the enabled sources sync next. */
+	getSyncAll: () => request<import('$lib/board/sync').SyncAllStatus>('/claude-code/sync-all'),
+	/** Sweep every enabled source and re-check open cards in the background; returns at once. */
+	startSyncAll: () => request<import('$lib/board/sync').SyncAllStatus>('/claude-code/sync-all', { method: 'POST' }),
 	// Returns the stored sections at once; stale ones (or all, with refresh)
 	// are refreshed in the background (`refreshing`, then a `my_work_updated` WS message).
 	getMyWork: (refresh = false) =>
