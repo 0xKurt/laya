@@ -86,6 +86,21 @@ export function addChips(
 	return { list: next, error, rest: bad.join(' ') };
 }
 
+const GITHUB_REVIEWER = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})|[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+)$/;
+
+/** "@octocat" → "octocat". */
+export function normalizeReviewer(input: string): string {
+	return input.trim().replace(/^@/, '');
+}
+
+/** Why `value` is not a GitHub login or org/team, or null. */
+export function reviewerError(value: string, existing: string[]): string | null {
+	if (!value) return 'Enter a GitHub login or org/team.';
+	if (!GITHUB_REVIEWER.test(value)) return `"${value}" is not a GitHub login or org/team.`;
+	if (existing.map((e) => e.toLowerCase()).includes(value.toLowerCase())) return `${value} is already in the list.`;
+	return null;
+}
+
 export interface ChipSuggestion {
 	value: string;
 	label?: string;

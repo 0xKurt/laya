@@ -102,16 +102,6 @@ export function prQuickAction(pr: WorkPr): 'ready' | 'merge' | null {
 	return null;
 }
 
-/** Reviewer logins from free text: comma or space separated, a leading @ dropped, duplicates removed. */
-export function parseReviewers(text: string): string[] {
-	const out: string[] = [];
-	for (const raw of text.split(/[\s,]+/)) {
-		const login = raw.trim().replace(/^@/, '');
-		if (login && !out.includes(login)) out.push(login);
-	}
-	return out;
-}
-
 /** The loaded data with one issue replaced (or dropped when it is no longer open). */
 export function applyIssueResult(data: MyWork, identifier: string, res: LinearActionResult): MyWork {
 	const issues = data.linear.issues;

@@ -15,6 +15,8 @@
 
 	const isGmail = $derived((card.entity_id ?? '').startsWith('gmail:'));
 	const sender = $derived(normalizeEmail(card.actor_email ?? ''));
+	// Meeting notes are switched with the Gmail source's "Meeting notes" option instead.
+	const MEETING_NOTES_SENDER = 'gemini-notes@google.com';
 
 	let connected = $state(false);
 	let skipped = $state(false);
@@ -53,7 +55,7 @@
 	}
 </script>
 
-{#if isGmail && sender && connected}
+{#if isGmail && sender && sender !== MEETING_NOTES_SENDER && connected}
 	<div class="mt-1 flex flex-wrap items-center gap-2 text-laya-micro" data-testid="skip-sender">
 		{#if !skipped}
 			<button

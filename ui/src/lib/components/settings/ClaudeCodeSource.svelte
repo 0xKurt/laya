@@ -153,6 +153,14 @@
 		}
 	}
 
+	// Unsaved edits: the form differs from the stored config (same mapping both ways).
+	const dirty = $derived.by(() => {
+		if (!form || !status) return false;
+		const now = formToConfig(platform, form);
+		const stored = formToConfig(platform, configToForm(status.config));
+		return JSON.stringify(now.config) !== JSON.stringify(stored.config) || now.error !== stored.error;
+	});
+
 	function toggleDay(d: number) {
 		if (!form) return;
 		form.days = form.days.includes(d) ? form.days.filter((x) => x !== d) : [...form.days, d].sort((a, b) => a - b);
@@ -421,8 +429,8 @@
 					{:else if platform === 'gmail'}
 						<div>
 							<label for="cc-gmail-exclude" class={labelClass}>Skip mail from</label>
+							<p class="{helpClass} !mt-0 mb-1.5">Mail from these senders is not read, e.g. notifications Laya already gets from the tools themselves.</p>
 							<SenderChips id="cc-gmail-exclude" bind:values={form.exclude_senders} />
-							<p class={helpClass}>Mail from these senders is not read, e.g. notifications Laya already gets from the tools themselves.</p>
 						</div>
 						<label class="flex items-start gap-2 text-integ-body text-integ-t2">
 							<input type="checkbox" bind:checked={form.meeting_notes} class="mt-0.5 h-4 w-4 rounded accent-laya-orange" />
@@ -454,7 +462,9 @@
 							{busy === 'save' ? 'Saving…' : 'Save settings'}
 						</button>
 						{#if saved}
-							<span class="text-integ-small" style:color={STATUS_STYLE.connected.fg}>Saved</span>
+							<span class="text-integ-small" style:color={STATUS_STYLE.connected.fg} role="status">Saved</span>
+						{:else if dirty}
+							<span class="text-integ-small text-integ-t3">Unsaved changes</span>
 						{/if}
 					</div>
 				</div>

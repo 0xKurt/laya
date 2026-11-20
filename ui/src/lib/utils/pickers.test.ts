@@ -10,6 +10,8 @@ import {
 	durationOptions,
 	filterTimezones,
 	normalizeEmail,
+	normalizeReviewer,
+	reviewerError,
 	presetFor,
 	removeChip,
 	selectAll,
@@ -60,6 +62,16 @@ describe('sender chips', () => {
 		expect(r.rest).toBe('nope A@x.io');
 		expect(addChips([], '   ').error).toMatch(/Enter/);
 		expect(removeChip(['a', 'b'], 'a')).toEqual(['b']);
+	});
+});
+
+describe('reviewer chips', () => {
+	it('accepts logins and org/team, drops @, rejects duplicates and junk', () => {
+		const r = addChips(['octocat'], ' @octocat, acme/core  byron\nbad!', normalizeReviewer, reviewerError);
+		expect(r.list).toEqual(['octocat', 'acme/core', 'byron']);
+		expect(r.error).toMatch(/already/);
+		expect(reviewerError('valid!', [])).toMatch(/not a GitHub login/);
+		expect(reviewerError('', [])).toMatch(/Enter/);
 	});
 });
 

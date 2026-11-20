@@ -11,13 +11,15 @@
 	import { portal } from '$lib/actions/portal';
 	import { engineApi } from '$lib/api/engine';
 	import RowPanel from './RowPanel.svelte';
+	import ChipInput from '$lib/components/pickers/ChipInput.svelte';
+	import { getGithubReviewers } from '$lib/api/workScope';
+	import { normalizeReviewer, reviewerError, type ChipSuggestion } from '$lib/utils/pickers';
 	import { ciStatus, reviewState, type MergeMethod, type WorkPr } from '$lib/work/work';
 	import {
 		MERGE_METHOD_LABELS,
 		defaultMergeMethod,
 		mergeAvailability,
 		mergeStateLabel,
-		parseReviewers,
 		prDoneMessage,
 		prQuickAction,
 		shortSha,
@@ -39,7 +41,25 @@
 	let done = $state<string | null>(null);
 	let error = $state<string | null>(null);
 	let comment = $state('');
-	let reviewers = $state('');
+	let reviewers = $state<string[]>([]);
+	let reviewerSuggestions = $state<ChipSuggestion[]>([]);
+	let reviewerNote = $state<string | null>(null);
+
+	async function openReviewers() {
+		panel = 'reviewers';
+		reviewerNote = null;
+		try {
+			const r = await getGithubReviewers(pr.repo);
+			reviewerSuggestions = [
+				// GitHub does not let the author review their own pull request.
+				...r.users.filter((u) => u.toLowerCase() !== (pr.author ?? '').toLowerCase()).map((u) => ({ value: u })),
+				...r.teams.map((t) => ({ value: t, hint: `Request the team ${t}` }))
+			];
+			if (r.error) reviewerNote = 'Suggestions unavailable; type a login.';
+		} catch {
+			reviewerNote = 'Suggestions unavailable; type a login.';
+		}
+	}
 	let menuBtn = $state<HTMLButtonElement | null>(null);
 	let doneTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -70,7 +90,7 @@
 			const res = await engineApi.runPrAction({ repo: pr.repo, number: pr.number, action, ...extra });
 			done = res.note ?? prDoneMessage(action, res);
 			if (action === 'comment') comment = '';
-			if (action === 'reviewers') reviewers = '';
+			if (action === 'reviewers') reviewers = [];
 			merging = null;
 			// A merged PR leaves the list; keep the confirmation visible first.
 			if (res.removed) setTimeout(() => onresult(res), 1500);
@@ -157,7 +177,7 @@
 			{:else}
 				<button type="button" role="menuitem" class={item} onclick={() => run('draft')}>Convert to draft</button>
 			{/if}
-			<button type="button" role="menuitem" class={item} onclick={() => (panel = 'reviewers')}>Request reviewers…</button>
+			<button type="button" role="menuitem" class={item} onclick={openReviewers}>Request reviewers…</button>
 			<button type="button" role="menuitem" class={item} onclick={() => (panel = 'comment')}>Comment…</button>
 			<button type="button" role="menuitem" class={item} onclick={() => run('update_branch')}>
 				<span class="flex-1">Update branch</span>
@@ -175,22 +195,27 @@
 			class="p-1.5"
 			onsubmit={(e) => {
 				e.preventDefault();
-				const list = parseReviewers(reviewers);
-				if (list.length) run('reviewers', { reviewers: list });
+				if (reviewers.length) run('reviewers', { reviewers: [...reviewers] });
 			}}
 		>
-			<label class="mb-1 block text-laya-micro text-surface-400" for="rev-{pr.number}">GitHub logins or org/team, comma separated</label>
-			<!-- svelte-ignore a11y_autofocus -->
-			<input
+			<label class="mb-1 block text-laya-micro text-surface-400" for="rev-{pr.number}">Reviewers</label>
+			<ChipInput
 				id="rev-{pr.number}"
-				bind:value={reviewers}
+				label="Add a reviewer"
+				placeholder="Type a login or pick below"
+				bind:values={reviewers}
+				normalize={normalizeReviewer}
+				validate={reviewerError}
+				suggestions={reviewerSuggestions}
+				suggestionsLabel="People and teams of {pr.repo}"
+				emptyText=""
+				maxSuggestions={8}
 				autofocus
-				placeholder="octocat, acme/core"
-				class="w-full rounded border border-surface-700 bg-surface-950 px-2 py-1 text-laya-secondary text-surface-100 focus:border-surface-500 focus:outline-none"
 			/>
+			{#if reviewerNote}<p class="mt-1 text-laya-micro text-surface-500">{reviewerNote}</p>{/if}
 			<div class="mt-1.5 flex justify-end gap-2">
 				<button type="button" class="rounded px-2 py-0.5 text-laya-micro text-surface-400 hover:text-surface-100" onclick={() => (panel = null)}>Cancel</button>
-				<button type="submit" class="rounded bg-laya-orange/90 px-2.5 py-0.5 text-laya-micro font-medium text-surface-950 hover:bg-laya-orange disabled:opacity-40" disabled={!parseReviewers(reviewers).length}>Request</button>
+				<button type="submit" class="rounded bg-laya-orange/90 px-2.5 py-0.5 text-laya-micro font-medium text-surface-950 hover:bg-laya-orange disabled:opacity-40" disabled={!reviewers.length}>Request</button>
 			</div>
 		</form>
 	</RowPanel>

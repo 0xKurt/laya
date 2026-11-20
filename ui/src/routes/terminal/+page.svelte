@@ -9,6 +9,7 @@
 	import { activeTerminalId } from '$lib/stores/claudeTerminal';
 	import { sidePanel } from '$lib/stores/sidePanel';
 	import { timeAgo } from '$lib/utils/datetime';
+	import { isTauri } from '$lib/utils/fileDrop';
 
 	// Sessions run in the engine; this page lists them and attaches a view to each.
 	let sessions = $state<ClaudeTerminalSession[]>([]);
@@ -80,6 +81,18 @@
 			return null;
 		} finally {
 			starting = false;
+		}
+	}
+
+	const desktop = isTauri();
+
+	async function chooseCwd() {
+		try {
+			const { invoke } = await import('@tauri-apps/api/core');
+			const path = await invoke<string>('pick_folder', { title: 'Folder for the new session' });
+			if (path) newCwd = path;
+		} catch {
+			// cancelled
 		}
 	}
 
@@ -290,16 +303,36 @@
 					}}
 				>
 					<label class="block text-laya-micro font-medium text-surface-400" for="terminal-cwd">Folder</label>
-					<input
-						id="terminal-cwd"
-						list="terminal-cwds"
-						class="mt-1 w-full rounded-md border border-surface-700 bg-surface-950 px-2 py-1 font-mono text-laya-micro text-surface-100 outline-none focus:border-laya-orange/60"
-						bind:value={newCwd}
-						placeholder={defaultCwd}
-					/>
-					<datalist id="terminal-cwds">
-						{#each recentCwds as cwd (cwd)}<option value={cwd}></option>{/each}
-					</datalist>
+					<div class="mt-1 flex gap-1.5">
+						<input
+							id="terminal-cwd"
+							class="min-w-0 flex-1 rounded-md border border-surface-700 bg-surface-950 px-2 py-1 font-mono text-laya-micro text-surface-100 outline-none focus:border-laya-orange/60"
+							bind:value={newCwd}
+							placeholder={defaultCwd}
+						/>
+						{#if desktop}
+							<button
+								type="button"
+								class="shrink-0 rounded-md border border-surface-700 px-2 py-1 text-laya-micro text-surface-300 hover:border-laya-orange/60 hover:text-laya-orange"
+								onclick={chooseCwd}>Choose…</button
+							>
+						{/if}
+					</div>
+					{#if recentCwds.length > 0}
+						<div class="mt-1.5 flex flex-wrap gap-1" role="group" aria-label="Recent folders">
+							{#each recentCwds as cwd (cwd)}
+								<button
+									type="button"
+									aria-pressed={newCwd === cwd}
+									title={cwd}
+									class="max-w-full truncate rounded-full px-2 py-0.5 font-mono text-laya-micro {newCwd === cwd
+										? 'bg-laya-orange/20 text-laya-orange'
+										: 'bg-surface-800 text-surface-300 hover:text-surface-100'}"
+									onclick={() => (newCwd = cwd)}>{cwd.replace(/^\/Users\/[^/]+/, '~')}</button
+								>
+							{/each}
+						</div>
+					{/if}
 					<label class="mt-2 block text-laya-micro font-medium text-surface-400" for="terminal-agent">Agent</label>
 					<select
 						id="terminal-agent"

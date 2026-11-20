@@ -106,3 +106,16 @@ export interface FolderCheck {
 export function checkFolder(path: string): Promise<FolderCheck> {
 	return json<FolderCheck>(`/claude-code/folders/check?path=${encodeURIComponent(path)}`);
 }
+
+// ── GitHub reviewers ──────────────────────────────────────────────────────
+
+export interface GithubReviewers {
+	users: string[];
+	teams: string[];
+	error: string | null;
+}
+
+/** Assignable users and teams of a repository, as reviewer suggestions. */
+export function getGithubReviewers(repo: string): Promise<GithubReviewers> {
+	return json<GithubReviewers>(`/claude-code/my-work/github/reviewers?repo=${encodeURIComponent(repo)}`);
+}

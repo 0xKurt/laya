@@ -17,6 +17,8 @@
 		suggestions = [],
 		suggestionsLabel = 'Suggestions',
 		emptyText = 'Nothing added yet.',
+		maxSuggestions = 12,
+		autofocus = false,
 		onchange
 	}: {
 		values?: string[];
@@ -28,13 +30,22 @@
 		suggestions?: ChipSuggestion[];
 		suggestionsLabel?: string;
 		emptyText?: string;
+		/** At most this many suggestions show; typing filters them. */
+		maxSuggestions?: number;
+		autofocus?: boolean;
 		onchange?: (values: string[]) => void;
 	} = $props();
 
 	let input = $state('');
 	let error = $state<string | null>(null);
 
-	const offered = $derived(suggestions.filter((s) => !values.includes(s.value)));
+	const offered = $derived.by(() => {
+		const q = input.trim().toLowerCase().replace(/^@/, '');
+		return suggestions
+			.filter((s) => !values.includes(s.value))
+			.filter((s) => !q || s.value.toLowerCase().includes(q) || (s.label ?? '').toLowerCase().includes(q))
+			.slice(0, maxSuggestions);
+	});
 
 	function set(next: string[]) {
 		values = next;
@@ -78,8 +89,10 @@
 				>
 			</span>
 		{/each}
+		<!-- svelte-ignore a11y_autofocus -->
 		<input
 			{id}
+			{autofocus}
 			aria-label={label}
 			bind:value={input}
 			{onkeydown}
@@ -95,7 +108,7 @@
 			class="min-w-[12rem] flex-1 bg-transparent px-1 py-0.5 text-sm text-surface-100 outline-none placeholder:text-surface-500"
 		/>
 	</div>
-	{#if values.length === 0}
+	{#if values.length === 0 && emptyText}
 		<p class="text-xs text-surface-500">{emptyText}</p>
 	{/if}
 	{#if error}<p class="text-xs text-red-400" role="alert">{error}</p>{/if}
@@ -108,10 +121,15 @@
 						type="button"
 						class="inline-flex items-center gap-1 rounded-full border border-dashed border-surface-600 px-2.5 py-0.5 text-xs text-surface-300 hover:border-laya-orange/60 hover:text-laya-orange"
 						title={s.hint ?? `Add ${s.value}`}
-						onclick={() => set([...values, s.value])}
+						onmousedown={(e) => e.preventDefault()}
+						onclick={() => {
+							set([...values, s.value]);
+							input = '';
+							error = null;
+						}}
 					>
 						<span aria-hidden="true">+</span>
-						{s.label ?? s.value}
+						<span class="max-w-[16rem] truncate">{s.label ?? s.value}</span>
 					</button>
 				{/each}
 			</div>

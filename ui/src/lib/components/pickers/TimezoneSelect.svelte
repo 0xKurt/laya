@@ -91,7 +91,8 @@
 		</svg>
 	</button>
 	{#if open}
-		<div class="absolute z-30 mt-1 w-full overflow-hidden rounded-lg border border-surface-600 bg-surface-800 shadow-xl">
+		<div class="absolute z-30 mt-1 w-full overflow-hidden rounded-lg border border-surface-600 shadow-xl"
+			style:background="var(--color-surface-900)">
 			<input
 				bind:this={searchEl}
 				bind:value={query}

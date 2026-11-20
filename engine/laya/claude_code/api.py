@@ -158,6 +158,17 @@ async def gmail_senders(days: int = 30, limit: int = 20) -> dict[str, Any]:
     return await pickers.gmail_senders(days=days, limit=limit)
 
 
+@router.get("/my-work/github/reviewers")
+async def github_reviewers(repo: str) -> dict[str, Any]:
+    """Assignable users and teams of ``repo`` (suggestions for "Request reviewers"). Read-only."""
+    from laya.claude_code import pickers
+
+    try:
+        return await pickers.github_reviewers(repo)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
 @router.get("/folders/check")
 async def check_folder(path: str = "") -> dict[str, Any]:
     """Whether ``path`` is an existing folder (the browser build's checkout folder input)."""

@@ -26,8 +26,8 @@
 	const suggestions = $derived<ChipSuggestion[]>(
 		seen.map((s) => ({
 			value: s.email,
-			label: `${s.name || s.email} · ${s.count}`,
-			hint: `Skip ${s.email} (${s.count} mail${s.count === 1 ? '' : 's'} in the last 30 days)`
+			label: `${s.email} · ${s.count}`,
+			hint: `Skip ${s.name ? `${s.name} <${s.email}>` : s.email} (${s.count} mail${s.count === 1 ? '' : 's'} in the last 30 days)`
 		}))
 	);
 </script>

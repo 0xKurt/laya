@@ -123,5 +123,5 @@
 			onchange={saveRoots}
 		/>
 	</div>
-	{#if error}<p class="text-laya-secondary text-error-400">{error}</p>{/if}
+	{#if error}<p class="text-laya-secondary text-red-400">{error}</p>{/if}
 </div>

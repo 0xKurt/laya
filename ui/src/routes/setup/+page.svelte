@@ -1068,7 +1068,7 @@
 				onclick={handleNext}
 				disabled={step === 2 && !step2CanProceed()}
 			>
-				{#if step === 1 && savedKeys.length === 0 && !useSelfHosted}
+				{#if step === 1 && savedKeys.length === 0 && !useSelfHosted && !useAutomatic}
 					Skip
 				{:else if step === 2 && settingDefaults}
 					Saving...

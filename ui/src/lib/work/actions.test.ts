@@ -8,7 +8,6 @@ import {
 	defaultMergeMethod,
 	mergeAvailability,
 	mergeStateLabel,
-	parseReviewers,
 	prDoneMessage,
 	prQuickAction,
 	readyToMerge,
@@ -109,11 +108,6 @@ describe('pull request actions', () => {
 		const res = { ok: true, pr: null, removed: true, state: 'MERGED' };
 		expect(prDoneMessage('merge', res)).toBe('Merged');
 		expect(prDoneMessage('merge', { ...res, state: 'OPEN', removed: false })).toMatch(/not merged/);
-	});
-
-	it('parses reviewer lists', () => {
-		expect(parseReviewers(' @octocat, acme/core  octocat\nbyron ')).toEqual(['octocat', 'acme/core', 'byron']);
-		expect(parseReviewers('  ,  ')).toEqual([]);
 	});
 
 	it('replaces or drops a PR row', () => {

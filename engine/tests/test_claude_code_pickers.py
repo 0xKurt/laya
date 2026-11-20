@@ -45,15 +45,17 @@ async def test_senders_counted_without_skipped_self_old_and_other_platforms(db):
     await _event(db, 6, "old@corp.io", days_ago=90)
     await _event(db, 7, "slack@corp.io", platform="slack")
     await _event(db, 8, "")
+    await _event(db, 9, "gemini-notes@google.com", "Meeting notes")
+    await _event(db, 10, "bob@corp.io", "Bob Builder", days_ago=0)
     await db.commit()
 
     data = await _get("/claude-code/gmail/senders")
-    assert [(s["email"], s["count"]) for s in data["senders"]] == [("ann@corp.io", 2), ("bob@corp.io", 1)]
-    assert data["senders"][0]["name"] == "Ann"
+    assert [(s["email"], s["count"]) for s in data["senders"]] == [("bob@corp.io", 2), ("ann@corp.io", 2)]
+    assert data["senders"][0]["name"] == "Bob Builder" and data["senders"][1]["name"] == "Ann"
     assert data["skipped"] == ["skip@x.io"] and data["connected"] is True
 
     limited = await _get("/claude-code/gmail/senders?limit=1&days=365")
-    assert [s["email"] for s in limited["senders"]] == ["ann@corp.io"]
+    assert [s["email"] for s in limited["senders"]] == ["bob@corp.io"]
 
 
 @pytest.mark.asyncio
@@ -91,3 +93,37 @@ def test_folder_check_expands_home(monkeypatch, tmp_path):
 
     monkeypatch.setenv("HOME", str(tmp_path))
     assert check_folder("~") == {"path": str(tmp_path), "exists": True, "error": None}
+
+
+@pytest.mark.asyncio
+async def test_github_reviewers_users_and_teams(db):
+    from unittest.mock import AsyncMock, patch
+
+    from laya.claude_code import cli
+
+    async def fake(*args, **kw):
+        if args[1].startswith("repos/acme/core/assignees"):
+            return [{"login": "zed"}, {"login": "Ann"}]
+        if args[1].startswith("orgs/acme/teams"):
+            return [{"slug": "core"}]
+        raise AssertionError(args)
+
+    with patch.object(cli, "run_gh", AsyncMock(side_effect=fake)):
+        data = await _get("/claude-code/my-work/github/reviewers?repo=acme/core")
+    assert data == {"users": ["Ann", "zed"], "teams": ["acme/core"], "error": None}
+
+
+@pytest.mark.asyncio
+async def test_github_reviewers_failures(db):
+    from unittest.mock import AsyncMock, patch
+
+    from laya.claude_code import cli
+    from laya.main import app
+
+    with patch.object(cli, "run_gh", AsyncMock(side_effect=cli.ClaudeCodeError("gh is not installed"))):
+        data = await _get("/claude-code/my-work/github/reviewers?repo=me/tool")
+    assert data == {"users": [], "teams": [], "error": "gh is not installed"}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/claude-code/my-work/github/reviewers?repo=not a repo")
+    assert resp.status_code == 422

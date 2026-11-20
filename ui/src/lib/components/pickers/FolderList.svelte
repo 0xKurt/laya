@@ -133,5 +133,5 @@
 			>
 		</div>
 	{/if}
-	{#if error}<p class="text-laya-secondary text-error-400" role="alert">{error}</p>{/if}
+	{#if error}<p class="text-laya-secondary text-red-400" role="alert">{error}</p>{/if}
 </div>
