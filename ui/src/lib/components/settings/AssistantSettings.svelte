@@ -10,11 +10,12 @@
 	import { onMount } from 'svelte';
 	import { engineApi, engineFetch } from '$lib/api/engine';
 	import { glassTheme } from '$lib/stores/glassTheme';
+	import FolderList from '$lib/components/pickers/FolderList.svelte';
 
 	let rules = $state('');
 	let defaultRules = $state('');
 	let custom = $state(false);
-	let roots = $state('');
+	let roots = $state<string[]>([]);
 	let loading = $state(true);
 	let saved = $state<string | null>(null);
 	let error = $state<string | null>(null);
@@ -34,7 +35,7 @@
 			custom = !!resp.custom;
 			const configured = (settings as unknown as { sessions?: { checkout_roots?: string[] } }).sessions
 				?.checkout_roots;
-			roots = Array.isArray(configured) ? configured.join('\n') : '';
+			roots = Array.isArray(configured) ? configured.filter((r) => typeof r === 'string' && r.trim()) : [];
 		} catch {
 			error = 'Could not load the assistant settings';
 		} finally {
@@ -60,12 +61,8 @@
 		}
 	}
 
-	async function saveRoots() {
+	async function saveRoots(list: string[]) {
 		error = null;
-		const list = roots
-			.split(/[\n,]/)
-			.map((r) => r.trim())
-			.filter(Boolean);
 		try {
 			await engineApi.updateSettings({ sessions: { checkout_roots: list } } as never);
 			flash('roots');
@@ -109,27 +106,22 @@
 	</div>
 
 	<div>
-		<label for="checkout-roots" class="mb-1 block text-laya-base font-medium text-surface-200">
-			Repository checkout folders
-		</label>
+		<div class="mb-1 flex items-center justify-between">
+			<label for="checkout-roots" class="text-laya-base font-medium text-surface-200">Repository checkout folders</label>
+			{#if saved === 'roots'}<span class="text-laya-micro text-green-400/80">Saved</span>{/if}
+		</div>
 		<p class="mb-2 text-laya-secondary text-surface-400">
-			{#if roots.trim()}
-				"Prepare session" looks for a card's repository in these folders (one per line).
-			{:else}
-				Not set: "Prepare session" looks in your home folder. Enter the folder(s) where your repositories are checked
-				out, one per line.
-			{/if}
+			"Prepare session" looks for a card's repository in these folders. Add the folders where your repositories are
+			checked out.
 		</p>
-		<textarea
+		<FolderList
 			id="checkout-roots"
-			rows="2"
-			placeholder="~/code"
-			class="w-full rounded-md border border-surface-600 bg-surface-900 px-3 py-2 font-mono text-laya-secondary text-surface-200 focus:border-laya-orange focus:outline-none"
-			bind:value={roots}
-			onchange={saveRoots}
+			bind:folders={roots}
+			dialogTitle="Choose a folder with repository checkouts"
+			emptyText="No folder added: Prepare session looks in your home folder."
 			disabled={loading}
-		></textarea>
-		{#if saved === 'roots'}<p class="mt-1 text-laya-micro text-green-400/80">Saved</p>{/if}
+			onchange={saveRoots}
+		/>
 	</div>
 	{#if error}<p class="text-laya-secondary text-error-400">{error}</p>{/if}
 </div>

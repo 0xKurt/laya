@@ -14,6 +14,7 @@
 	import ClassificationDialog from './ClassificationDialog.svelte';
 	import SessionPanel from './SessionPanel.svelte';
 	import SessionClaims from './SessionClaims.svelte';
+	import SkipSender from './SkipSender.svelte';
 	import OriginalContentModal from './OriginalContentModal.svelte';
 	import PlatformBadge from '$lib/components/PlatformBadge.svelte';
 	import { glassTheme } from '$lib/stores/glassTheme';
@@ -831,6 +832,7 @@
 							{/if}
 						</span>
 					</div>
+					<SkipSender {card} />
 				{/if}
 			</div>
 		{/if}

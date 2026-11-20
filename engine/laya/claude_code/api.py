@@ -149,6 +149,23 @@ async def github_orgs() -> dict[str, Any]:
     return {"orgs": orgs, "selected": selected, "connected": source is not None, "error": error}
 
 
+@router.get("/gmail/senders")
+async def gmail_senders(days: int = 30, limit: int = 20) -> dict[str, Any]:
+    """Senders seen in recent Gmail events and not skipped yet (suggestions for the
+    "Skip mail from" list). Read-only."""
+    from laya.claude_code import pickers
+
+    return await pickers.gmail_senders(days=days, limit=limit)
+
+
+@router.get("/folders/check")
+async def check_folder(path: str = "") -> dict[str, Any]:
+    """Whether ``path`` is an existing folder (the browser build's checkout folder input)."""
+    from laya.claude_code import pickers
+
+    return pickers.check_folder(path)
+
+
 @router.get("/assistant/rules")
 async def assistant_rules() -> dict[str, Any]:
     """The assistant's working rules, the neutral default, and whether the user wrote

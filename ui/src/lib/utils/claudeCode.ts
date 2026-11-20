@@ -116,7 +116,7 @@ export function eventsLabel(n: number | null | undefined): string {
 
 // ── config form ──────────────────────────────────────────────────────────
 
-/** The editable form of a platform's config: every field, lists as text. */
+/** The editable form of a platform's config: every field. */
 export interface ClaudeCodeForm {
 	interval_minutes: number;
 	start: string;
@@ -129,11 +129,9 @@ export interface ClaudeCodeForm {
 	context_messages: number;
 	thread_memory_days: number;
 	only_relevant: boolean;
-	/** One address per line. */
-	exclude_senders: string;
+	exclude_senders: string[];
 	meeting_notes: boolean;
-	/** Comma or space separated. */
-	orgs: string;
+	orgs: string[];
 	others_prs_only_on_mention: boolean;
 }
 
@@ -167,17 +165,17 @@ export function configToForm(c: ClaudeCodeConfig): ClaudeCodeForm {
 		context_messages: c.context_messages ?? 8,
 		thread_memory_days: c.thread_memory_days ?? 14,
 		only_relevant: c.only_relevant ?? true,
-		exclude_senders: (c.exclude_senders ?? []).join('\n'),
+		exclude_senders: [...(c.exclude_senders ?? [])],
 		meeting_notes: c.meeting_notes ?? true,
-		orgs: (c.orgs ?? []).join(', '),
+		orgs: [...(c.orgs ?? [])],
 		others_prs_only_on_mention: c.others_prs_only_on_mention ?? true
 	};
 }
 
-function splitList(text: string, lower: boolean): string[] {
+function uniqueList(items: string[], lower: boolean): string[] {
 	const seen = new Set<string>();
 	const out: string[] = [];
-	for (const raw of text.split(/[\s,;]+/)) {
+	for (const raw of items) {
 		const v = lower ? raw.trim().toLowerCase() : raw.trim();
 		if (v && !seen.has(v.toLowerCase())) {
 			seen.add(v.toLowerCase());
@@ -233,10 +231,10 @@ export function formToConfig(
 		config.thread_memory_days = parsed.thread_memory_days;
 		config.only_relevant = f.only_relevant;
 	} else if (platform === 'gmail') {
-		config.exclude_senders = splitList(f.exclude_senders, true);
+		config.exclude_senders = uniqueList(f.exclude_senders, true);
 		config.meeting_notes = f.meeting_notes;
 	} else if (platform === 'github') {
-		config.orgs = splitList(f.orgs, false);
+		config.orgs = uniqueList(f.orgs, false);
 		config.others_prs_only_on_mention = f.others_prs_only_on_mention;
 	}
 	return { config, error: null };

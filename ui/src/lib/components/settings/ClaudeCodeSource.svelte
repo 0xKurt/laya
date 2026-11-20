@@ -25,6 +25,10 @@
 		type ClaudeCodeForm
 	} from '$lib/utils/claudeCode';
 	import type { ClaudeCodePlatform, ClaudeCodePlatformStatus, ClaudeCodeStatus } from '$lib/api/types';
+	import OrgPicker from '$lib/components/pickers/OrgPicker.svelte';
+	import SenderChips from '$lib/components/pickers/SenderChips.svelte';
+	import TimezoneSelect from '$lib/components/pickers/TimezoneSelect.svelte';
+	import DurationSelect from '$lib/components/pickers/DurationSelect.svelte';
 
 	let {
 		platform,
@@ -80,14 +84,6 @@
 			formError = null;
 		});
 	});
-
-	const timezones: string[] = (() => {
-		try {
-			return (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.('timeZone') ?? [];
-		} catch {
-			return [];
-		}
-	})();
 
 	async function run<T>(kind: NonNullable<typeof busy>, fn: () => Promise<T>): Promise<T | undefined> {
 		busy = kind;
@@ -349,8 +345,8 @@
 				<div transition:slide={{ duration: $reducedMotion ? 0 : 180 }} class="flex flex-col gap-4">
 					<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
 						<div>
-							<label for="cc-{platform}-interval" class={labelClass}>Check every (minutes)</label>
-							<input id="cc-{platform}-interval" type="number" min="1" bind:value={form.interval_minutes} class={inputClass} />
+							<label for="cc-{platform}-interval" class={labelClass}>Check every</label>
+							<DurationSelect id="cc-{platform}-interval" unit="minutes" presets={[15, 30, 60, 120, 240]} bind:value={form.interval_minutes} class={inputClass} />
 						</div>
 						<div>
 							<label for="cc-{platform}-model" class={labelClass}>Model</label>
@@ -385,29 +381,19 @@
 
 					<div>
 						<label for="cc-{platform}-tz" class={labelClass}>Time zone</label>
-						<input
-							id="cc-{platform}-tz"
-							list="cc-timezones"
-							bind:value={form.timezone}
-							placeholder="This computer's time zone"
-							class={inputClass}
-						/>
-						<datalist id="cc-timezones">
-							{#each timezones as tz (tz)}
-								<option value={tz}></option>
-							{/each}
-						</datalist>
+						<TimezoneSelect id="cc-{platform}-tz" bind:value={form.timezone} />
+						<p class={helpClass}>Active hours are read in this time zone.</p>
 					</div>
 
 					<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
 						<div>
-							<label for="cc-{platform}-lookback" class={labelClass}>First look-back (hours)</label>
-							<input id="cc-{platform}-lookback" type="number" min="0" bind:value={form.initial_lookback_hours} class={inputClass} />
+							<label for="cc-{platform}-lookback" class={labelClass}>First look-back</label>
+							<DurationSelect id="cc-{platform}-lookback" unit="hours" presets={[4, 12, 24, 48, 72, 168]} bind:value={form.initial_lookback_hours} class={inputClass} />
 							<p class={helpClass}>How far back the first sync reads.</p>
 						</div>
 						<div>
-							<label for="cc-{platform}-recheck" class={labelClass}>Re-check open cards after (hours)</label>
-							<input id="cc-{platform}-recheck" type="number" min="0" bind:value={form.recheck_after_hours} class={inputClass} />
+							<label for="cc-{platform}-recheck" class={labelClass}>Re-check open cards after</label>
+							<DurationSelect id="cc-{platform}-recheck" unit="hours" presets={[1, 3, 6, 12, 24, 48]} bind:value={form.recheck_after_hours} class={inputClass} />
 							<p class={helpClass}>Closes cards that were answered or resolved in {label}.</p>
 						</div>
 					</div>
@@ -420,8 +406,8 @@
 								<p class={helpClass}>Context included with each new message.</p>
 							</div>
 							<div>
-								<label for="cc-slack-memory" class={labelClass}>Remember threads for (days)</label>
-								<input id="cc-slack-memory" type="number" min="0" bind:value={form.thread_memory_days} class={inputClass} />
+								<label for="cc-slack-memory" class={labelClass}>Remember threads for</label>
+								<DurationSelect id="cc-slack-memory" unit="days" presets={[3, 7, 14, 30, 60]} bind:value={form.thread_memory_days} class={inputClass} />
 								<p class={helpClass}>Threads you wrote in keep being followed this long.</p>
 							</div>
 						</div>
@@ -435,8 +421,8 @@
 					{:else if platform === 'gmail'}
 						<div>
 							<label for="cc-gmail-exclude" class={labelClass}>Skip mail from</label>
-							<textarea id="cc-gmail-exclude" rows="4" bind:value={form.exclude_senders} class="{inputClass} font-mono"></textarea>
-							<p class={helpClass}>One address per line. Notifications Laya already gets from the tools themselves.</p>
+							<SenderChips id="cc-gmail-exclude" bind:values={form.exclude_senders} />
+							<p class={helpClass}>Mail from these senders is not read, e.g. notifications Laya already gets from the tools themselves.</p>
 						</div>
 						<label class="flex items-start gap-2 text-integ-body text-integ-t2">
 							<input type="checkbox" bind:checked={form.meeting_notes} class="mt-0.5 h-4 w-4 rounded accent-laya-orange" />
@@ -447,9 +433,9 @@
 						</label>
 					{:else if platform === 'github'}
 						<div>
-							<label for="cc-github-orgs" class={labelClass}>Organizations</label>
-							<input id="cc-github-orgs" bind:value={form.orgs} placeholder="All organizations" class={inputClass} />
-							<p class={helpClass}>Comma separated. Empty means every organization you belong to.</p>
+							<span class={labelClass}>Organizations</span>
+							<OrgPicker bind:selected={form.orgs} />
+							<p class={helpClass}>Pull requests, issues and My work are read from the checked organizations.</p>
 						</div>
 						<label class="flex items-start gap-2 text-integ-body text-integ-t2">
 							<input type="checkbox" bind:checked={form.others_prs_only_on_mention} class="mt-0.5 h-4 w-4 rounded accent-laya-orange" />

@@ -8,6 +8,7 @@
 	import { untrack } from 'svelte';
 	import { engineApi } from '$lib/api/engine';
 	import { effortOf, formatEffort, formatMinutes, parseDuration } from '$lib/sessions/session';
+	import { EFFORT_PRESETS, presetFor } from '$lib/utils/pickers';
 
 	let { card, prepOpen = $bindable(false) }: { card: ActionCard; prepOpen?: boolean } = $props();
 
@@ -15,8 +16,11 @@
 	let override = $state<Effort | null>(null);
 	const effort = $derived(override ?? effortOf(card));
 	let editing = $state(false);
-	let youInput = $state('');
-	let agentInput = $state('');
+	type Lane = 'you' | 'agent';
+	// Chosen minutes per lane; null = not picked yet. `custom` shows the typed fallback.
+	let picked = $state<Record<Lane, number | null>>({ you: null, agent: null });
+	let custom = $state<Record<Lane, boolean>>({ you: false, agent: false });
+	let customText = $state<Record<Lane, string>>({ you: '', agent: '' });
 	let saving = $state(false);
 	let effortError = $state<string | null>(null);
 
@@ -40,17 +44,34 @@
 	});
 
 	function startEdit() {
-		youInput = effort ? formatMinutes(effort.you_minutes) : '';
-		agentInput = effort ? formatMinutes(effort.agent_minutes) : '';
+		for (const lane of ['you', 'agent'] as Lane[]) {
+			const minutes = effort ? (lane === 'you' ? effort.you_minutes : effort.agent_minutes) : null;
+			picked[lane] = minutes;
+			custom[lane] = minutes !== null && presetFor(minutes) === null;
+			customText[lane] = custom[lane] && minutes !== null ? formatMinutes(minutes) : '';
+		}
 		effortError = null;
 		editing = true;
 	}
 
+	function pick(lane: Lane, minutes: number) {
+		picked[lane] = minutes;
+		custom[lane] = false;
+		effortError = null;
+	}
+
+	function minutesOf(lane: Lane): number | null {
+		return custom[lane] ? parseDuration(customText[lane]) : picked[lane];
+	}
+
 	async function saveEffort() {
-		const you = parseDuration(youInput);
-		const agent = parseDuration(agentInput);
+		const you = minutesOf('you');
+		const agent = minutesOf('agent');
 		if (you === null || agent === null) {
-			effortError = 'Use minutes or hours, e.g. 30m, 2h, 1h30m';
+			effortError =
+				(custom.you && you === null) || (custom.agent && agent === null)
+					? 'Custom: use minutes or hours, e.g. 45m, 3h, 1h30m'
+					: `Pick ${you === null ? 'your' : "the agent's"} time`;
 			return;
 		}
 		saving = true;
@@ -99,18 +120,47 @@
 <div class="mb-5 flex flex-col gap-2">
 	<div class="flex flex-wrap items-center gap-2 text-laya-secondary">
 		{#if editing}
-			<label class="flex items-center gap-1 text-surface-400">
-				you
-				<input bind:value={youInput} class="w-16 rounded border border-surface-700 bg-surface-900/60 px-1.5 py-0.5 text-surface-100" />
-			</label>
-			<label class="flex items-center gap-1 text-surface-400">
-				agent
-				<input bind:value={agentInput} class="w-16 rounded border border-surface-700 bg-surface-900/60 px-1.5 py-0.5 text-surface-100" />
-			</label>
-			<button type="button" onclick={saveEffort} disabled={saving} class="rounded-md bg-laya-orange/15 px-2 py-0.5 text-laya-orange hover:bg-laya-orange/25 disabled:opacity-50">
-				{saving ? 'Saving…' : 'Save'}
-			</button>
-			<button type="button" onclick={() => (editing = false)} class="text-surface-500 hover:text-surface-200">Cancel</button>
+			<div class="flex w-full flex-col gap-1.5" data-testid="effort-editor">
+				{#each [['you', 'Your time'], ['agent', 'Agent time']] as [lane, title] (lane)}
+					{@const l = lane as Lane}
+					<div class="flex flex-wrap items-center gap-1" role="group" aria-label={title}>
+						<span class="w-20 shrink-0 text-surface-400">{title}</span>
+						{#each EFFORT_PRESETS as p (p.minutes)}
+							<button
+								type="button"
+								aria-pressed={!custom[l] && picked[l] === p.minutes}
+								onclick={() => pick(l, p.minutes)}
+								class="rounded-full px-2 py-0.5 text-laya-micro transition-colors {!custom[l] && picked[l] === p.minutes
+									? 'bg-laya-orange/20 text-laya-orange'
+									: 'bg-surface-800 text-surface-300 hover:text-surface-100'}">{p.label}</button
+							>
+						{/each}
+						{#if custom[l]}
+							<!-- svelte-ignore a11y_autofocus -->
+							<input
+								bind:value={customText[l]}
+								autofocus
+								placeholder="e.g. 45m"
+								aria-label="{title}, custom"
+								onkeydown={(e) => e.key === 'Enter' && saveEffort()}
+								class="w-20 rounded border border-surface-700 bg-surface-900/60 px-1.5 py-0.5 text-laya-micro text-surface-100"
+							/>
+						{:else}
+							<button
+								type="button"
+								onclick={() => (custom[l] = true)}
+								class="rounded-full px-2 py-0.5 text-laya-micro text-surface-500 hover:text-surface-200">Custom…</button
+							>
+						{/if}
+					</div>
+				{/each}
+				<div class="flex items-center gap-2">
+					<button type="button" onclick={saveEffort} disabled={saving} class="rounded-md bg-laya-orange/15 px-2 py-0.5 text-laya-orange hover:bg-laya-orange/25 disabled:opacity-50">
+						{saving ? 'Saving…' : 'Save'}
+					</button>
+					<button type="button" onclick={() => (editing = false)} class="text-surface-500 hover:text-surface-200">Cancel</button>
+				</div>
+			</div>
 		{:else}
 			<span class="text-surface-300" title={effort?.basis ?? ''}>
 				{effort ? formatEffort(effort) : 'No effort estimate'}

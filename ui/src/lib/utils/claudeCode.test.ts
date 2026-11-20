@@ -140,8 +140,8 @@ describe('config form', () => {
 		expect(Object.keys(formToConfig('notion', form).config!)).toEqual(Object.keys(COMMON));
 	});
 
-	it('cleans list text', () => {
-		const form = { ...configToForm(COMMON), exclude_senders: ' A@x.io\n\na@x.io, b@y.io ', orgs: 'acme,  beta acme' };
+	it('cleans the lists', () => {
+		const form = { ...configToForm(COMMON), exclude_senders: [' A@x.io', '', 'a@x.io', 'b@y.io '], orgs: ['acme', ' beta', 'acme'] };
 		expect(formToConfig('gmail', form).config!.exclude_senders).toEqual(['a@x.io', 'b@y.io']);
 		expect(formToConfig('github', form).config!.orgs).toEqual(['acme', 'beta']);
 	});
