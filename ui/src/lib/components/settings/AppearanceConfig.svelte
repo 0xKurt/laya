@@ -11,7 +11,7 @@
 	import { fontScale, type FontScale } from '$lib/stores/fontScale';
 	import { systemFont } from '$lib/stores/systemFont';
 	import { onMount } from 'svelte';
-	import { VIEWS, canHide, type ViewId } from '$lib/views/views';
+	import { PANELS, VIEWS, canHide, type HideableId } from '$lib/views/views';
 	import { hiddenViews, loadHiddenViews, saveViewVisible } from '$lib/views/store';
 
 	const fontSteps: FontScale[] = [12, 13, 14, 15];
@@ -31,7 +31,7 @@
 		loadHiddenViews();
 	});
 
-	async function toggleView(id: ViewId, visible: boolean) {
+	async function toggleView(id: HideableId, visible: boolean) {
 		viewsError = '';
 		try {
 			await saveViewVisible(id, visible);
@@ -348,6 +348,23 @@
 		</div>
 
 		<p class="mt-3 text-laya-secondary text-surface-500">Omni's background summaries are turned off while Omni is hidden. Coherence and Corpus only cost something when used.</p>
+
+		<div class="mt-4 space-y-2">
+			{#each PANELS as panel (panel.id)}
+				<label class="flex cursor-pointer items-start gap-2 rounded-lg border border-surface-700 bg-surface-900/50 px-3 py-2 text-laya-base text-surface-200">
+					<input
+						type="checkbox"
+						class="mt-1 accent-laya-orange"
+						checked={!$hiddenViews.includes(panel.id)}
+						onchange={(e) => toggleView(panel.id, e.currentTarget.checked)}
+					/>
+					<span>
+						{panel.label}
+						<span class="block text-laya-secondary text-surface-500">{panel.hint}</span>
+					</span>
+				</label>
+			{/each}
+		</div>
 		{#if viewsError}
 			<p class="mt-2 text-laya-secondary text-red-400">{viewsError}</p>
 		{/if}

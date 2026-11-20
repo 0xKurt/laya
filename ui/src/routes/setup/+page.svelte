@@ -129,8 +129,18 @@
 	// Step 3 via Claude Code: the identities its discovery found (prefill step 5).
 	let toolsVia = $state<'n8n' | 'claude_code'>('n8n');
 	let claudeCodeIdentities = $state<Partial<Record<ClaudeCodePlatform, ClaudeCodeIdentity>>>({});
-	// Step 4: run Laya's stages on the Claude subscription too.
+	// Step 4: run Laya's stages on the Claude subscription too. This concerns
+	// Claude Code, not the coding agent, so it is offered whatever agent is picked.
 	let useClaudeSubscription = $state(true);
+	// Whether the Claude Code CLI was found (null until step 4 has checked).
+	let claudeCliFound = $state<boolean | null>(null);
+	$effect(() => {
+		if (step !== 4 || claudeCliFound !== null) return;
+		engineApi
+			.detectAgentPaths()
+			.then((r) => (claudeCliFound = !!r.agent_paths?.claude_code))
+			.catch(() => (claudeCliFound = null));
+	});
 
 	// Step 5: Team
 	let members = $state<Array<{ name: string; email: string; role: 'self' | 'manager' | 'teammate' | 'external' | 'bot'; accounts?: string[]; aliases?: string[] }>>([
@@ -412,7 +422,7 @@
 	async function finish() {
 		// Step 4: Save agent + repos
 		await engineApi.updateSettings({ coding_agent: codingAgent });
-		if (codingAgent === 'claude_code' && useClaudeSubscription) {
+		if (useClaudeSubscription) {
 			await engineApi.updateSettings({ models: CLAUDE_SUBSCRIPTION_MODELS } as any);
 		}
 		const allRepos = [...savedRepos];
@@ -865,7 +875,10 @@
 	{:else if step === 4}
 		<div class="space-y-4">
 			<h2 class="text-xl font-semibold">Coding Agent (optional)</h2>
-			<p class="text-sm text-surface-400">Choose a coding agent for automated code tasks, or skip if you don't need one.</p>
+			<p class="text-sm text-surface-400">
+				The coding agent runs 'Run Agent' tasks on cards. Laya's collecting, the Claude view, the assistant and
+				Claude accounts always use Claude Code.
+			</p>
 
 			<div class="space-y-2">
 				{#each CODING_AGENTS as option}
@@ -884,18 +897,21 @@
 				{/each}
 			</div>
 
-			{#if codingAgent === 'claude_code'}
-				<label class="flex cursor-pointer items-start gap-3 rounded-md border border-surface-600 p-3">
-					<input type="checkbox" class="mt-0.5 accent-laya-orange" bind:checked={useClaudeSubscription} />
-					<div>
-						<div class="text-sm font-medium">Also run Laya's models on your Claude subscription</div>
-						<div class="text-xs text-surface-400">
-							Router and Omni use Haiku; the Stager, chat and Coherence use Sonnet, through Claude Code.
-							No API key needed for them.
-						</div>
+			<label class="flex cursor-pointer items-start gap-3 rounded-md border border-surface-600 p-3">
+				<input type="checkbox" class="mt-0.5 accent-laya-orange" bind:checked={useClaudeSubscription} />
+				<div>
+					<div class="text-sm font-medium">Also run Laya's models on your Claude subscription</div>
+					<div class="text-xs text-surface-400">
+						Router and Omni use Haiku; the Stager, chat and Coherence use Sonnet, through Claude Code.
+						No API key needed for them.
 					</div>
-				</label>
-			{/if}
+					{#if claudeCliFound === false}
+						<div class="mt-1 text-xs text-amber-300">
+							The Claude Code CLI was not found. Install it and sign in (`claude`), or these models cannot run.
+						</div>
+					{/if}
+				</div>
+			</label>
 
 			<div class="space-y-3 pt-2">
 				<p class="text-sm font-medium">Repositories (optional)</p>

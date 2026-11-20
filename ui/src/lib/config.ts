@@ -6,6 +6,11 @@
  *
  * All modules that need to reach the engine should import from here
  * instead of hardcoding 127.0.0.1:8420.
+ *
+ * For development and testing against a second engine (started with
+ * LAYA_ENGINE_PORT), set VITE_LAYA_ENGINE_URL (e.g. http://127.0.0.1:8431)
+ * or just VITE_LAYA_ENGINE_PORT (e.g. 8431) in the Vite environment.
+ * Without either the engine is http://127.0.0.1:8420.
  */
 
 const DEFAULT_ENGINE_HOST = '127.0.0.1';
@@ -13,9 +18,18 @@ const DEFAULT_ENGINE_PORT = '8420';
 
 let _engineUrl: string | null = null;
 
+/** The engine URL from the Vite variables, or the default. Pure, for tests. */
+export function resolveEngineUrl(env: { VITE_LAYA_ENGINE_URL?: string; VITE_LAYA_ENGINE_PORT?: string } | undefined): string {
+	const url = env?.VITE_LAYA_ENGINE_URL?.trim();
+	if (url) return url.replace(/\/+$/, '');
+	const port = env?.VITE_LAYA_ENGINE_PORT?.trim();
+	if (port && /^\d{1,5}$/.test(port)) return `http://${DEFAULT_ENGINE_HOST}:${port}`;
+	return `http://${DEFAULT_ENGINE_HOST}:${DEFAULT_ENGINE_PORT}`;
+}
+
 export function getEngineUrl(): string {
 	if (_engineUrl) return _engineUrl;
-	_engineUrl = `http://${DEFAULT_ENGINE_HOST}:${DEFAULT_ENGINE_PORT}`;
+	_engineUrl = resolveEngineUrl(import.meta.env as Record<string, string | undefined> | undefined);
 	return _engineUrl;
 }
 

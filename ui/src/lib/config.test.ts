@@ -4,6 +4,7 @@
 import { describe, it, expect } from 'vitest';
 import {
 	getEngineUrl,
+	resolveEngineUrl,
 	getEngineWsUrl,
 	getEngineToken,
 	setEngineToken,
@@ -15,6 +16,16 @@ import {
 } from './config';
 
 describe('engine URL helpers', () => {
+	it('reads VITE_LAYA_ENGINE_URL, then VITE_LAYA_ENGINE_PORT, else 8420', () => {
+		expect(resolveEngineUrl(undefined)).toBe('http://127.0.0.1:8420');
+		expect(resolveEngineUrl({})).toBe('http://127.0.0.1:8420');
+		expect(resolveEngineUrl({ VITE_LAYA_ENGINE_PORT: '8431' })).toBe('http://127.0.0.1:8431');
+		expect(resolveEngineUrl({ VITE_LAYA_ENGINE_PORT: 'abc' })).toBe('http://127.0.0.1:8420');
+		expect(resolveEngineUrl({ VITE_LAYA_ENGINE_URL: 'http://localhost:9000/', VITE_LAYA_ENGINE_PORT: '8431' })).toBe(
+			'http://localhost:9000'
+		);
+	});
+
 	it('builds the default engine URL', () => {
 		expect(getEngineUrl()).toBe('http://127.0.0.1:8420');
 	});

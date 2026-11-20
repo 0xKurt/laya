@@ -70,7 +70,7 @@ function issue(identifier: string, over: Partial<WorkIssue> = {}): WorkIssue {
 }
 
 function work(issues: WorkIssue[], prs: WorkPr[]): MyWork {
-	const section = { connected: true, error: null, note: null, fetched_at: null, cached: false };
+	const section = { connected: true, error: null, note: null, fetched_at: null, attempted_at: null, cached: false, refreshing: false };
 	return { github: { ...section, prs }, linear: { ...section, issues } };
 }
 

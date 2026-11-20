@@ -66,7 +66,10 @@ async def get_status() -> dict[str, Any]:
 
 @router.get("/my-work")
 async def get_my_work(refresh: bool = False) -> dict[str, Any]:
-    """The user's open Linear issues and own open GitHub pull requests."""
+    """The user's open Linear issues and own open GitHub pull requests, as
+    stored; returns at once. A stale section, or every section with
+    `refresh=true`, is refreshed in the background (`refreshing` per section;
+    a `my_work_updated` websocket message when a refresh has stored its result)."""
     return await my_work.get_my_work(refresh=refresh)
 
 

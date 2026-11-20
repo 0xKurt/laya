@@ -49,7 +49,7 @@
 	import Titlebar from '$lib/components/Titlebar.svelte';
 	import { startPeriodicCheck, stopPeriodicCheck } from '$lib/stores/updater';
 	import { onMount } from 'svelte';
-	import { visibleViews, isHrefHidden } from '$lib/views/views';
+	import { visibleViews, isHrefHidden, isPanelHidden } from '$lib/views/views';
 	import { hiddenViews, loadHiddenViews } from '$lib/views/store';
 
 	function formatDateLabel(dateStr: string): string {
@@ -419,10 +419,12 @@
 		}
 		document.addEventListener('keydown', handleSummaryShortcut);
 
-		// Keyboard shortcut: press 'l' (not in input/textarea) to toggle chat panel
+		// Keyboard shortcut: press 'l' (not in input/textarea) to toggle chat panel,
+		// unless Chat is hidden in Settings → Appearance.
 		function handleChatShortcut(e: KeyboardEvent) {
 			if (e.key === 'l' && !e.metaKey && !e.ctrlKey && !e.altKey) {
 				if (shortcutBlocked(e)) return;
+				if (isPanelHidden($hiddenViews, 'chat')) return;
 				e.preventDefault();
 				e.stopImmediatePropagation();
 				let current = false;
@@ -758,6 +760,7 @@
 		{/if}
 	{/snippet}
 	{#snippet right()}
+		{#if !isPanelHidden($hiddenViews, 'chat')}
 		<div class="group/tip relative">
 			<button
 				onclick={() => {
@@ -780,6 +783,7 @@
 			</button>
 			<span class="pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md border border-transparent glass-tooltip px-2 py-1 text-[10px] font-medium opacity-0 transition-opacity duration-75 group-hover/tip:opacity-100">Chat</span>
 		</div>
+		{/if}
 
 		<!-- Settings -->
 		<div class="group/tip relative">

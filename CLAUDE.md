@@ -34,6 +34,8 @@ cd engine && source .venv/bin/activate && pytest tests/test_cards_api.py::test_f
 # Frontend dev only (no Tauri shell)
 cd ui && npm run dev
 
+# Second engine for testing: the engine port comes from LAYA_ENGINE_PORT (default 8420, `config.ENGINE_PORT`), the UI's from VITE_LAYA_ENGINE_URL or VITE_LAYA_ENGINE_PORT (`ui/src/lib/config.ts`); the engine only accepts browser origins on Vite port 5173
+
 # Type check frontend
 cd ui && npx svelte-check
 

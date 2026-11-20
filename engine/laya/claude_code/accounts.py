@@ -753,6 +753,59 @@ async def pick_for_platform(platform: str, roles: tuple[str, ...] = ()) -> Assig
     return ready[candidates[0]]
 
 
+async def account_label(account_id: str) -> str:
+    """How an account is named in a message: its email, else what it is."""
+    if account_id == DEFAULT_ID:
+        return "the Claude Code login"
+    row = await get_row(account_id)
+    return (row or {}).get("email") or f"account {account_id}"
+
+
+async def platform_unavailable_reason(platform: str, roles: tuple[str, ...] = ()) -> str:
+    """Why :func:`pick_for_platform` found no account for ``platform``, per account."""
+    label = store.LABELS.get(platform, platform)
+    order = await eligible_ids()
+    if not order:
+        return (f"No Claude account is eligible to read {label}: every added account is signed out "
+                "or a duplicate. Sign in again in Settings → Claude accounts.")
+    reasons: list[str] = []
+    for account_id in order:
+        try:
+            _, reason = await platform_assignment(account_id, platform, roles)
+        except Exception as e:
+            reason = str(e)
+        if reason:
+            reasons.append(f"{await account_label(account_id)}: {reason}")
+    detail = f" ({'; '.join(reasons)})" if reasons else ""
+    return (f"No Claude account has {label} connected{detail}. "
+            "Check the connectors in Settings → Claude accounts.")
+
+
+_WINDOW_NAMES = {"five_hour": "5-hour", "seven_day": "Weekly"}
+
+
+async def limit_reached(account_id: str) -> str | None:
+    """A readable reason when one of the account's usage windows is used up
+    (rejected, or at 100 %), else None. Never raises."""
+    try:
+        windows = await windows_of(account_id)
+    except Exception as e:  # unknown usage never blocks a turn
+        log.debug("claude_account_windows_failed", account=account_id, error=str(e))
+        return None
+    for name, w in windows.items():
+        util = w.get("utilization")
+        if w.get("status") != "rejected" and not (util is not None and float(util) >= 1.0):
+            continue
+        what = _WINDOW_NAMES.get(name) or ("Weekly" if name.startswith("seven_day") else "Usage")
+        reset = w.get("resets_text")
+        if not reset and w.get("resets_at"):
+            with contextlib.suppress(TypeError, ValueError, OSError, OverflowError):
+                reset = time.strftime("%a %H:%M", time.localtime(float(w["resets_at"])))
+        tail = f"; resets {reset}" if reset else ""
+        return f"{what} limit reached on {await account_label(account_id)}{tail}."
+    return None
+
+
 _REJECTION_RE = re.compile(
     r"usage limit|hit your (?:usage )?limit|rate[ _-]?limit(?:ed)? (?:reached|exceeded)|limit reached",
     re.IGNORECASE,

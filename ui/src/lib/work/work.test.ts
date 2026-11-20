@@ -8,13 +8,17 @@ import {
 	groupIssues,
 	groupPrs,
 	isOverdue,
+	isRefreshing,
 	linearUrlForKey,
+	oldestFetch,
 	otherAssignee,
 	parseIssueFilter,
 	prGroup,
 	reviewState,
+	type MyWork,
 	type WorkIssue,
-	type WorkPr
+	type WorkPr,
+	type WorkSection
 } from './work';
 
 function pr(over: Partial<WorkPr> = {}): WorkPr {
@@ -148,5 +152,31 @@ describe('Linear issues', () => {
 		expect(linearUrlForKey('A', issues)).toBe('https://linear.app/acme/issue/T-1/issue');
 		expect(linearUrlForKey('TRAD-9', issues)).toBe('https://linear.app/acme/issue/TRAD-9');
 		expect(linearUrlForKey('TRAD-9', [])).toBeNull();
+	});
+});
+
+describe('stored sections', () => {
+	function section(over: Partial<WorkSection> = {}): WorkSection {
+		return { connected: true, error: null, note: null, fetched_at: null, attempted_at: null, cached: false, refreshing: false, ...over };
+	}
+	function work(github: Partial<WorkSection>, linear: Partial<WorkSection>): MyWork {
+		return { github: { ...section(github), prs: [] }, linear: { ...section(linear), issues: [] } };
+	}
+
+	it('is refreshing while any connected section refreshes', () => {
+		expect(isRefreshing(null)).toBe(false);
+		expect(isRefreshing(work({}, {}))).toBe(false);
+		expect(isRefreshing(work({}, { refreshing: true }))).toBe(true);
+		expect(isRefreshing(work({ connected: false, refreshing: true }, {}))).toBe(false);
+	});
+
+	it('reports the older successful fetch of the connected sections', () => {
+		expect(oldestFetch(null)).toBeNull();
+		expect(oldestFetch(work({ fetched_at: '2026-11-20T08:00:00+00:00' }, { fetched_at: '2026-11-20T07:00:00+00:00' }))).toBe(
+			'2026-11-20T07:00:00+00:00'
+		);
+		expect(oldestFetch(work({ fetched_at: '2026-11-20T08:00:00+00:00' }, { connected: false, fetched_at: '2026-01-01T00:00:00+00:00' }))).toBe(
+			'2026-11-20T08:00:00+00:00'
+		);
 	});
 });

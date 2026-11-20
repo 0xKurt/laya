@@ -60,17 +60,39 @@ export interface WorkIssue {
 	created_by_me: boolean;
 }
 
-interface WorkSection {
+export interface WorkSection {
 	connected: boolean;
+	/** The last refresh's failure (None after a success), with the reason. */
 	error: string | null;
 	note: string | null;
+	/** Last successful refresh. */
 	fetched_at: string | null;
+	/** Last refresh attempt, successful or not. */
+	attempted_at: string | null;
+	/** Whether stored data exists. */
 	cached: boolean;
+	/** A background refresh of this section is running. */
+	refreshing: boolean;
 }
 
 export interface MyWork {
 	github: WorkSection & { prs: WorkPr[] };
 	linear: WorkSection & { issues: WorkIssue[] };
+}
+
+/** Whether a background refresh of any connected section is running. */
+export function isRefreshing(data: MyWork | null): boolean {
+	if (!data) return false;
+	return (data.github.connected && !!data.github.refreshing) || (data.linear.connected && !!data.linear.refreshing);
+}
+
+/** The older of the sections' last successful refreshes (connected sections only). */
+export function oldestFetch(data: MyWork | null): string | null {
+	if (!data) return null;
+	const times = [data.github, data.linear]
+		.filter((s) => s.connected && s.fetched_at)
+		.map((s) => s.fetched_at as string);
+	return times.length ? times.sort()[0] : null;
 }
 
 // ── GitHub ──────────────────────────────────────────────────────────────

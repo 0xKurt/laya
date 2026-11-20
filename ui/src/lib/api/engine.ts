@@ -1371,9 +1371,10 @@ export const engineApi = {
 			method: 'POST',
 			signal: AbortSignal.timeout(900_000)
 		}),
-	// The Linear half runs a `claude -p` turn when its cache is stale.
+	// Returns the stored sections at once; stale ones (or all, with refresh)
+	// are refreshed in the background (`refreshing`, then a `my_work_updated` WS message).
 	getMyWork: (refresh = false) =>
-		request<MyWork>(`/claude-code/my-work?refresh=${refresh}`, { signal: AbortSignal.timeout(600_000) }),
+		request<MyWork>(`/claude-code/my-work?refresh=${refresh}`, { signal: AbortSignal.timeout(30_000) }),
 	// My work actions: each call is one user click; the engine never retries them.
 	getLinearStates: (team: string, refresh = false) =>
 		request<{ team: string; states: import('$lib/work/actions').LinearState[] }>(

@@ -20,6 +20,7 @@ holding that account's `CLAUDE_CONFIG_DIR`; see claude_code/accounts.py).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -99,6 +100,11 @@ async def _run_process(args: list[str], timeout: float, env: dict[str, str] | No
         except asyncio.TimeoutError:
             await proc.terminate()
             raise ClaudeCodeError(f"claude timed out after {int(timeout)}s")
+        except asyncio.CancelledError:
+            # A caller's own timeout (e.g. a My work section's) cancels the
+            # turn; the process must end with it, not keep running orphaned.
+            await asyncio.shield(proc.terminate())
+            raise
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -307,7 +313,13 @@ async def run_gh(*args: str, timeout: float = 120.0) -> Any:
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             env={**os.environ, "PATH": _augmented_path(), "GH_PROMPT_DISABLED": "1"},
         )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            # A timed-out or cancelled call must not leave `gh` running.
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            raise
     except FileNotFoundError as e:
         raise ClaudeCodeError("gh is not installed") from e
     except asyncio.TimeoutError as e:

@@ -4,15 +4,15 @@
 import { writable, get } from 'svelte/store';
 import { engineApi } from '$lib/api/engine';
 import type { Settings } from '$lib/api/types';
-import { normalizeHidden, setVisible, type ViewId } from './views';
+import { normalizeHidden, setVisible, type HideableId } from './views';
 
-/** Hidden views, loaded from engine settings (`views.hidden`). */
-export const hiddenViews = writable<ViewId[]>([]);
+/** Hidden views and panels, loaded from engine settings (`views.hidden`). */
+export const hiddenViews = writable<HideableId[]>([]);
 
-let loading: Promise<ViewId[]> | null = null;
+let loading: Promise<HideableId[]> | null = null;
 
 /** Load the hidden list from engine settings. Concurrent callers share one request. */
-export function loadHiddenViews(): Promise<ViewId[]> {
+export function loadHiddenViews(): Promise<HideableId[]> {
 	loading ??= engineApi
 		.getSettings()
 		.then((s) => {
@@ -28,10 +28,10 @@ export function loadHiddenViews(): Promise<ViewId[]> {
 }
 
 /**
- * Show or hide one view and save it. Omni's visibility also drives
+ * Show or hide one view or panel and save it. Omni's visibility also drives
  * `omni.enabled`, so its background synthesis stops while Omni is hidden.
  */
-export async function saveViewVisible(id: ViewId, visible: boolean): Promise<void> {
+export async function saveViewVisible(id: HideableId, visible: boolean): Promise<void> {
 	const previous = get(hiddenViews);
 	const next = setVisible(previous, id, visible);
 	if (next.length === previous.length && next.every((v, i) => v === previous[i])) return;

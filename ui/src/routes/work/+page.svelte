@@ -3,6 +3,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { engineApi } from '$lib/api/engine';
+	import { lastMessage } from '$lib/stores/websocket';
 	import PlatformIcon from '$lib/components/settings/PlatformIcon.svelte';
 	import { timeAgo } from '$lib/utils/datetime';
 	import LinearRowActions from '$lib/components/work/LinearRowActions.svelte';
@@ -18,19 +19,24 @@
 		groupIssues,
 		groupPrs,
 		isOverdue,
+		isRefreshing,
 		linearUrlForKey,
+		oldestFetch,
 		otherAssignee,
 		parseIssueFilter,
 		priorityName,
 		reviewState,
 		type IssueFilter,
-		type MyWork
+		type MyWork,
+		type WorkSection
 	} from '$lib/work/work';
 
 	let data = $state<MyWork | null>(null);
 	let loading = $state(true);
-	let refreshing = $state(false);
+	// A click on Refresh until the engine reports the refresh as running.
+	let requested = $state(false);
 	let error = $state<string | null>(null);
+	const refreshing = $derived(requested || isRefreshing(data));
 
 	// ── Linear filter (remembered per device) ──
 	const FILTER_KEY = 'laya.work.linearFilter';
@@ -59,10 +65,7 @@
 	const filterCounts = $derived(
 		Object.fromEntries(ISSUE_FILTERS.map((f) => [f.id, filterIssues(allIssues, f.id).length])) as Record<IssueFilter, number>
 	);
-	const lastFetched = $derived.by(() => {
-		const times = [data?.github.fetched_at, data?.linear.fetched_at].filter(Boolean) as string[];
-		return times.length ? times.sort()[0] : null;
-	});
+	const lastFetched = $derived(oldestFetch(data));
 
 	// timeAgo labels go stale while the page stays open; a minute tick re-renders them.
 	let tick = $state(0);
@@ -71,8 +74,14 @@
 		return timeAgo(iso, { weeks: true });
 	}
 
+	// The engine returns the stored sections at once and refreshes stale ones
+	// in the background; while a refresh runs the page re-reads every few
+	// seconds, and a `my_work_updated` message re-reads at once.
+	const POLL_MS = 4_000;
+	let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
 	async function load(refresh = false) {
-		if (refresh) refreshing = true;
+		if (refresh) requested = true;
 		try {
 			data = await engineApi.getMyWork(refresh);
 			error = null;
@@ -80,14 +89,27 @@
 			error = e?.message ?? 'Could not load your work';
 		} finally {
 			loading = false;
-			refreshing = false;
+			requested = false;
+			schedulePoll();
 		}
+	}
+
+	function schedulePoll() {
+		if (pollTimer) clearTimeout(pollTimer);
+		pollTimer = isRefreshing(data) ? setTimeout(() => load(), POLL_MS) : null;
 	}
 
 	onMount(() => {
 		load();
 		const timer = setInterval(() => (tick += 1), 60_000);
-		return () => clearInterval(timer);
+		const unsubscribe = lastMessage.subscribe((msg) => {
+			if (msg?.type === 'my_work_updated' && !loading) load();
+		});
+		return () => {
+			clearInterval(timer);
+			unsubscribe();
+			if (pollTimer) clearTimeout(pollTimer);
+		};
 	});
 
 	const CI_DOT: Record<string, string> = {
@@ -127,7 +149,22 @@
 	</span>
 {/snippet}
 
-{#snippet sectionState(section: { connected: boolean; error: string | null; note: string | null }, label: string, empty: string, count: number)}
+{#snippet sectionMeta(section: WorkSection)}
+	{#if section.connected}
+		{#if section.refreshing}
+			<span class="flex items-center gap-1 text-laya-micro text-surface-500" title="Refreshing in the background">
+				<svg class="h-3 w-3 animate-spin" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+				</svg>
+				Refreshing…
+			</span>
+		{:else if section.fetched_at}
+			<span class="text-laya-micro text-surface-600" title={section.fetched_at}>Updated {ago(section.fetched_at)}</span>
+		{/if}
+	{/if}
+{/snippet}
+
+{#snippet sectionState(section: WorkSection, label: string, empty: string, count: number, waiting: string)}
 	{#if !section.connected}
 		<div class="px-4 py-10 text-center">
 			<p class="text-laya-secondary text-surface-300">{label} is not connected.</p>
@@ -137,14 +174,20 @@
 		</div>
 	{:else}
 		{#if section.error}
-			<p class="mx-3 mb-2 rounded-md bg-rose-500/10 px-2.5 py-1.5 text-laya-micro text-rose-300" title={section.error}>
+			<p class="mx-3 mb-2 rounded-md bg-rose-500/10 px-2.5 py-1.5 text-laya-micro text-rose-300" title={section.attempted_at ? `Last try ${section.attempted_at}` : ''}>
 				Could not refresh {label}: {section.error}
+				{#if section.fetched_at}<span class="text-rose-300/70"> Showing data from {ago(section.fetched_at)}.</span>{/if}
 			</p>
 		{/if}
 		{#if section.note}
 			<p class="mx-3 mb-2 rounded-md bg-amber-500/10 px-2.5 py-1.5 text-laya-micro text-amber-300">{section.note}</p>
 		{/if}
-		{#if count === 0 && !section.error}
+		{#if count === 0 && !section.cached && section.refreshing}
+			<p class="px-4 pb-2 text-laya-micro text-surface-500">{waiting}</p>
+			{#each [0, 1, 2] as i (i)}
+				<div class="mx-3 my-1 h-7 animate-pulse rounded-md bg-surface-800/40"></div>
+			{/each}
+		{:else if count === 0 && !section.error}
 			<p class="px-4 py-10 text-center text-laya-secondary text-surface-500">{empty}</p>
 		{/if}
 	{/if}
@@ -167,6 +210,7 @@
 			type="button"
 			onclick={() => load(true)}
 			disabled={refreshing || loading}
+			title="Refresh both sections in the background"
 			class="flex items-center gap-1.5 rounded-md border border-surface-700 px-2.5 py-1 text-laya-micro font-medium text-surface-300 transition-colors hover:border-surface-600 hover:bg-surface-800 hover:text-surface-100 disabled:opacity-50"
 		>
 			<svg class="h-3 w-3 {refreshing ? 'animate-spin' : ''}" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -187,6 +231,7 @@
 				<span class="text-surface-400"><PlatformIcon platform="linear" size={14} /></span>
 				<h2 class="text-laya-secondary font-semibold text-surface-200">Linear</h2>
 				<span class="text-laya-micro text-surface-500">{shownIssues.length}</span>
+				{#if data}{@render sectionMeta(data.linear)}{/if}
 				<span class="flex-1"></span>
 				<div class="flex rounded-md bg-surface-800/60 p-0.5" role="group" aria-label="Which issues">
 					{#each ISSUE_FILTERS as f (f.id)}
@@ -203,7 +248,6 @@
 
 			<div class="min-h-0 flex-1 overflow-y-auto pb-2">
 				{#if loading}
-					<p class="px-4 pb-2 text-laya-micro text-surface-500">Reading Linear through Claude Code; this can take a minute.</p>
 					{#each [0, 1, 2, 3, 4] as i (i)}
 						<div class="mx-3 my-1 h-7 animate-pulse rounded-md bg-surface-800/40"></div>
 					{/each}
@@ -212,7 +256,8 @@
 						data.linear,
 						'Linear',
 						issueFilter === 'created' ? 'No open issues created by you.' : 'No open issues. Nice.',
-						shownIssues.length
+						shownIssues.length,
+						'Reading Linear through Claude Code; this can take a minute.'
 					)}
 					{#each issueGroups as group (group.id)}
 						<h3 class="sticky top-0 z-10 flex items-baseline gap-2 bg-surface-900/95 px-4 pb-1 pt-3 text-laya-micro font-semibold uppercase tracking-wide text-surface-500 backdrop-blur">
@@ -264,6 +309,7 @@
 				<span class="text-surface-400"><PlatformIcon platform="github" size={14} /></span>
 				<h2 class="text-laya-secondary font-semibold text-surface-200">Your pull requests</h2>
 				<span class="text-laya-micro text-surface-500">{prs.length}</span>
+				{#if data}{@render sectionMeta(data.github)}{/if}
 			</div>
 
 			<div class="min-h-0 flex-1 overflow-y-auto pb-2">
@@ -272,7 +318,7 @@
 						<div class="mx-3 my-1 h-10 animate-pulse rounded-md bg-surface-800/40"></div>
 					{/each}
 				{:else if data}
-					{@render sectionState(data.github, 'GitHub', 'No open pull requests authored by you.', prs.length)}
+					{@render sectionState(data.github, 'GitHub', 'No open pull requests authored by you.', prs.length, 'Reading your pull requests from GitHub…')}
 					{#each prGroups as group (group.id)}
 						<h3 class="sticky top-0 z-10 flex items-baseline gap-2 bg-surface-900/95 px-4 pb-1 pt-3 text-laya-micro font-semibold uppercase tracking-wide backdrop-blur
 							{group.id === 'action' ? 'text-laya-orange/90' : group.id === 'ready' ? 'text-emerald-300/80' : 'text-surface-500'}">

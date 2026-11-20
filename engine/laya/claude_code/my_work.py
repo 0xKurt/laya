@@ -15,11 +15,16 @@
   issues assigned to the user and the issues the user created, in every open
   state type (triage, backlog, unstarted, started); the code merges both lists
   into one row per issue with the flags `assigned_to_me` / `created_by_me`.
-- Each section is cached in `claude_code_state` (platform `my_work`) for
-  `CACHE_SECONDS`; `refresh=True` skips the cache. While the agent budget is
-  paused the Linear turn does not run: the cached section is returned with a
-  note. A failing section reports its error next to its last cached data, so
-  the endpoint never fails as a whole.
+- Each section is stored in `claude_code_state` (platform `my_work`) with
+  `fetched_at` (last success), `attempted_at` (last try) and `error` (the
+  last try's failure, None after a success). Reads return the stored
+  sections at once and never wait for a fetch: a refresh always runs in the
+  background (`start_refresh`), under `SECTION_TIMEOUT`, and announces its
+  result with a `my_work_updated` websocket message. The service loop
+  (service.py) starts due refreshes during the source's active hours; a read
+  starts one when the section is stale, `refresh=True` always. While the
+  agent budget is paused the Linear turn does not run and the view gets a
+  note.
 """
 
 from __future__ import annotations
@@ -37,7 +42,10 @@ from laya.claude_code import cli, store
 log = structlog.get_logger()
 
 STATE_PLATFORM = "my_work"
-CACHE_SECONDS = 600
+
+# How old a section's last refresh may get before it is refreshed again:
+# GitHub costs one `gh` call, Linear a model turn.
+REFRESH_SECONDS = {"github": 600, "linear": 1800}
 
 # GitHub search pages: 25 pull requests per page, at most 4 pages.
 PAGE_SIZE = 25
@@ -48,7 +56,17 @@ LINEAR_LIMIT = 100
 LINEAR_OPEN_STATE_TYPES = ("started", "unstarted", "backlog", "triage")
 LINEAR_TIMEOUT = 300.0
 
+# Upper bound of one section refresh, including picking the Claude account
+# and its tool listing, so a hung `gh` or `claude` can never keep a section
+# refreshing.
+SECTION_TIMEOUT = {"github": 180.0, "linear": LINEAR_TIMEOUT + 120.0}
+
+# Guards the read-modify-write of a stored section; never held during a fetch.
 _locks: dict[str, asyncio.Lock] = {}
+# The running background refresh per section.
+_tasks: dict[str, asyncio.Task] = {}
+# Rows an action replaced while the section's refresh runs: key -> row (None = dropped).
+_row_updates: dict[str, dict[str, dict[str, Any] | None]] = {}
 
 
 def _lock(section: str) -> asyncio.Lock:
@@ -316,9 +334,10 @@ async def fetch_linear(source: dict[str, Any]) -> list[dict[str, Any]]:
 
     assignment = await accounts.pick_for_platform("linear", ("list_issues",))
     if assignment is None:
-        raise cli.ClaudeCodeError(
-            "No Claude account has Linear connected. Check the connectors in Settings → Claude accounts."
-        )
+        raise cli.ClaudeCodeError(await accounts.platform_unavailable_reason("linear", ("list_issues",)))
+    limit = await accounts.limit_reached(assignment.account_id)
+    if limit:
+        raise cli.ClaudeCodeError(limit)
     tool = assignment.tools["list_issues"]
     out = await cli.run_collect(
         "linear_my_work", linear_prompt(tool), LINEAR_SCHEMA, [tool],
@@ -331,9 +350,10 @@ async def fetch_linear(source: dict[str, Any]) -> list[dict[str, Any]]:
     return merge_issues(out)
 
 
-# ── cache and entry point ────────────────────────────────────────────────
+# ── stored sections, background refresh and entry point ──────────────────
 
 _ITEMS_KEY = {"github": "prs", "linear": "issues"}
+SECTIONS = ("github", "linear")
 
 
 async def _cached(section: str) -> dict[str, Any] | None:
@@ -346,62 +366,190 @@ async def _cached(section: str) -> dict[str, Any] | None:
         return None
 
 
-def _age_seconds(fetched_at: str | None) -> float:
+def _age_seconds(stamp: str | None, now: datetime | None = None) -> float:
     try:
-        return (datetime.now(timezone.utc) - datetime.fromisoformat(fetched_at or "")).total_seconds()
+        return ((now or datetime.now(timezone.utc)) - datetime.fromisoformat(stamp or "")).total_seconds()
     except (TypeError, ValueError):
         return float("inf")
 
 
+def _last_attempt(cache: dict[str, Any] | None) -> str | None:
+    """When the section was last refreshed, successfully or not."""
+    cache = cache or {}
+    return cache.get("attempted_at") or cache.get("fetched_at")
+
+
+def is_stale(section: str, cache: dict[str, Any] | None, now: datetime | None = None) -> bool:
+    """Whether the section's last refresh attempt is older than its interval.
+
+    The attempt (not the last success) counts, so a failing section is
+    retried once per interval instead of on every read.
+    """
+    return _age_seconds(_last_attempt(cache), now) >= REFRESH_SECONDS[section]
+
+
+def is_refreshing(section: str) -> bool:
+    task = _tasks.get(section)
+    return task is not None and not task.done()
+
+
 def _section(section: str, items: list | None, *, connected: bool, fetched_at: str | None = None,
-             error: str | None = None, note: str | None = None, cached: bool = False) -> dict[str, Any]:
+             error: str | None = None, note: str | None = None, cached: bool = False,
+             refreshing: bool = False, attempted_at: str | None = None) -> dict[str, Any]:
     return {
         _ITEMS_KEY[section]: items or [],
         "connected": connected,
         "error": error,
         "note": note,
         "fetched_at": fetched_at,
+        "attempted_at": attempted_at,
         "cached": cached,
+        "refreshing": refreshing,
     }
 
 
-async def _load(section: str, refresh: bool) -> dict[str, Any]:
+async def _budget_paused() -> bool:
+    from laya.pipeline.agent_budget import is_agent_budget_paused
+
+    return await is_agent_budget_paused()
+
+
+def describe_error(section: str, e: BaseException) -> str:
+    """A section error as the view shows it: the reason, readable."""
+    from laya.claude_code import accounts
+
+    if isinstance(e, asyncio.TimeoutError):
+        return (f"Timed out after {int(SECTION_TIMEOUT[section])}s; "
+                "showing the last fetched data. Laya tries again at the next refresh.")
+    text = str(e)[:300] or type(e).__name__
+    if section == "linear" and accounts.is_rejection(None, text) and "limit reached" not in text.lower():
+        return f"Usage limit reached on the Claude account: {text}"
+    return text
+
+
+async def _fetch(section: str, source: dict[str, Any]) -> list[dict[str, Any]]:
+    if section == "github":
+        return await fetch_github(source.get("config") or {})
+    return await fetch_linear(source)
+
+
+async def refresh_section(section: str) -> None:
+    """Fetch one section and store it with its outcome. Never raises.
+
+    The fetch runs under `SECTION_TIMEOUT`, so a hung `gh` or `claude` turn
+    ends as a stored error. The section lock is held only to write the
+    result, never during the fetch, so reads and row updates after actions
+    never wait for a fetch. Rows an action replaced while the fetch ran are
+    put over the fetched list (they are newer).
+    """
+    _row_updates.setdefault(section, {})
+    source = await store.get_source(section)
+    if source is None:
+        _row_updates.pop(section, None)
+        return
+    if section == "linear" and await _budget_paused():
+        # The view shows the paused note; the stored issues stay as they are.
+        _row_updates.pop(section, None)
+        return
+    started = store.now_iso()
+    items: list[dict[str, Any]] | None = None
+    error: str | None = None
+    try:
+        items = await asyncio.wait_for(_fetch(section, source), timeout=SECTION_TIMEOUT[section])
+    except asyncio.CancelledError:
+        _row_updates.pop(section, None)
+        raise
+    except Exception as e:  # a section's failure is stored, never raised
+        error = describe_error(section, e)
+        log.warning("claude_code_my_work_failed", section=section, error=error)
+    updates = _row_updates.pop(section, {})
+    async with _lock(section):
+        cache = await _cached(section) or {}
+        if items is None:
+            record = {**cache, "items": cache.get("items") or [], "error": error, "attempted_at": started}
+        else:
+            for key, row in updates.items():
+                items = _put_row(section, items, key, row)
+            record = {"items": items, "fetched_at": store.now_iso(), "attempted_at": started, "error": None}
+        await store.set_state(STATE_PLATFORM, section, json.dumps(record))
+    await _broadcast(section)
+
+
+async def _broadcast(section: str) -> None:
+    """Tell open views that a section's stored data changed."""
+    try:
+        from laya.api.websocket import manager
+
+        await manager.broadcast({"type": "my_work_updated", "section": section})
+    except Exception as e:  # a closed socket must not fail the refresh
+        log.debug("claude_code_my_work_broadcast_failed", error=str(e))
+
+
+def start_refresh(section: str) -> bool:
+    """Start a background refresh of the section unless one is running.
+
+    Returns whether a refresh was started. The caller never waits for it.
+    """
+    if is_refreshing(section):
+        return False
+    # Collect action rows from now on, before the task first runs.
+    _row_updates[section] = {}
+
+    async def _run() -> None:
+        try:
+            await refresh_section(section)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # refresh_section already stores its errors
+            log.warning("claude_code_my_work_refresh_crashed", section=section, error=str(e))
+
+    _tasks[section] = asyncio.create_task(_run(), name=f"claude_code_my_work_{section}")
+    return True
+
+
+async def run_due_refreshes(now: datetime | None = None) -> list[str]:
+    """Start the background refresh of every section that is due now.
+
+    Due: the platform is connected, `now` is inside its source's active
+    hours, the last attempt is older than the section's interval, and for
+    Linear the agent budget is not paused. Returns the sections started.
+    """
+    from laya.claude_code.service import within_active_hours
+
+    now = now or datetime.now(timezone.utc)
+    started: list[str] = []
+    for section in SECTIONS:
+        source = await store.get_source(section)
+        if source is None or is_refreshing(section):
+            continue
+        if not within_active_hours(source.get("config") or {}, now):
+            continue
+        if not is_stale(section, await _cached(section), now):
+            continue
+        if section == "linear" and await _budget_paused():
+            continue
+        if start_refresh(section):
+            started.append(section)
+    return started
+
+
+async def _view(section: str, refresh: bool) -> dict[str, Any]:
     source = await store.get_source(section)
     if source is None:
         return _section(section, [], connected=False)
-
-    async with _lock(section):
-        cache = await _cached(section)
-        if cache and not refresh and _age_seconds(cache.get("fetched_at")) < CACHE_SECONDS:
-            return _section(section, cache.get("items"), connected=True,
-                            fetched_at=cache.get("fetched_at"), cached=True)
-
-        if section == "linear":
-            from laya.pipeline.agent_budget import is_agent_budget_paused
-
-            if await is_agent_budget_paused():
-                return _section(
-                    section, (cache or {}).get("items"), connected=True,
-                    fetched_at=(cache or {}).get("fetched_at"), cached=cache is not None,
-                    note="The agent usage budget is paused; showing the last fetched issues.",
-                )
-
-        try:
-            items = (
-                await fetch_github(source.get("config") or {})
-                if section == "github"
-                else await fetch_linear(source)
-            )
-        except Exception as e:  # a section's failure is reported, never raised
-            log.warning("claude_code_my_work_failed", section=section, error=str(e))
-            return _section(section, (cache or {}).get("items"), connected=True,
-                            fetched_at=(cache or {}).get("fetched_at"), cached=cache is not None,
-                            error=str(e)[:300] or type(e).__name__)
-
-        fetched_at = store.now_iso()
-        await store.set_state(STATE_PLATFORM, section,
-                              json.dumps({"items": items, "fetched_at": fetched_at}))
-        return _section(section, items, connected=True, fetched_at=fetched_at)
+    cache = await _cached(section)
+    if refresh or is_stale(section, cache):
+        start_refresh(section)
+    note = None
+    if section == "linear" and await _budget_paused():
+        note = "The agent usage budget is paused; showing the last fetched issues."
+    cache = cache or {}
+    return _section(
+        section, cache.get("items"), connected=True,
+        fetched_at=cache.get("fetched_at"), attempted_at=cache.get("attempted_at"),
+        error=cache.get("error"), note=note, cached=bool(cache),
+        refreshing=is_refreshing(section),
+    )
 
 
 def item_key(section: str, item: dict[str, Any]) -> str:
@@ -411,32 +559,57 @@ def item_key(section: str, item: dict[str, Any]) -> str:
     return str(item.get("identifier") or "")
 
 
+def _put_row(section: str, rows: list[dict[str, Any]], key: str,
+             item: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """`rows` with the row `key` replaced by `item`, appended, or dropped (`None`)."""
+    rows = list(rows)
+    index = next((i for i, r in enumerate(rows) if item_key(section, r) == key), None)
+    if item is None:
+        if index is not None:
+            rows.pop(index)
+    elif index is None:
+        rows.append(item)
+    else:
+        rows[index] = item
+    return rows
+
+
 async def replace_cached_item(section: str, key: str, item: dict[str, Any] | None) -> None:
     """Put one row's fresh data into the section's cache, or drop the row.
 
-    An action changes one issue or PR; replacing just that row keeps the rest
-    of the cache (and its age) while the view shows the row's new state at
-    once. `item=None` removes the row (a merged PR, a completed issue).
-    Nothing is written when the section has no cache yet.
+    An action changes one issue or PR; work_actions reads that row back and
+    calls this, so the view shows the row's new state at once without a full
+    refresh. `item=None` removes the row (a merged PR, a completed issue).
+    A refresh running at the same time gets the row too, so its older data
+    does not overwrite it. Nothing is written when the section has no cache yet.
     """
+    if section in _row_updates:
+        _row_updates[section][key] = item
     async with _lock(section):
         cache = await _cached(section)
         if not cache:
             return
-        rows = list(cache.get("items") or [])
-        index = next((i for i, r in enumerate(rows) if item_key(section, r) == key), None)
-        if item is None:
-            if index is None:
-                return
-            rows.pop(index)
-        elif index is None:
-            rows.append(item)
-        else:
-            rows[index] = item
-        cache["items"] = rows
+        cache["items"] = _put_row(section, cache.get("items") or [], key, item)
         await store.set_state(STATE_PLATFORM, section, json.dumps(cache))
+    await _broadcast(section)
 
 
 async def get_my_work(refresh: bool = False) -> dict[str, Any]:
-    github, linear = await asyncio.gather(_load("github", refresh), _load("linear", refresh))
+    """The stored sections, at once. Never waits for a fetch.
+
+    A stale section (or every section with `refresh=True`) gets a background
+    refresh; its `refreshing` flag is true until the refresh has stored its
+    result, which is also announced as a `my_work_updated` websocket message.
+    """
+    github, linear = await asyncio.gather(_view("github", refresh), _view("linear", refresh))
     return {"github": github, "linear": linear}
+
+
+def reset() -> None:
+    """Forget running refreshes and locks (tests; each test has its own loop)."""
+    for task in _tasks.values():
+        if not task.done():
+            task.cancel()
+    _tasks.clear()
+    _row_updates.clear()
+    _locks.clear()

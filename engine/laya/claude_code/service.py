@@ -28,6 +28,12 @@ posts them through the same code path as `POST /events`, then re-checks old
 open cards (recheck.py).
 
 The loop also polls each Claude account's usage (`accounts.poll_due_usage`).
+
+A second loop keeps "My work" fresh (`my_work.run_due_refreshes`): every
+minute it starts the background refresh of each connected section whose
+last refresh is older than its interval (GitHub 10 min, Linear 30 min),
+inside the source's active hours. It is separate from the sweep loop, so a
+long sweep never delays it, and it never waits for a refresh.
 """
 
 from __future__ import annotations
@@ -51,6 +57,7 @@ MIN_INTERVAL_MINUTES = 5
 OVERLAP = timedelta(minutes=5)
 
 _task: asyncio.Task | None = None
+_my_work_task: asyncio.Task | None = None
 _sweep_lock = asyncio.Lock()
 
 
@@ -229,8 +236,21 @@ async def _loop() -> None:
         await asyncio.sleep(LOOP_SECONDS)
 
 
+async def _my_work_loop() -> None:
+    from laya.claude_code import my_work
+
+    while True:
+        try:
+            await my_work.run_due_refreshes()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("claude_code_my_work_loop_error", error=str(e))
+        await asyncio.sleep(LOOP_SECONDS)
+
+
 async def start_service() -> None:
-    global _task
+    global _task, _my_work_task
     await store.ensure_tables()
     from laya.claude_code import terminal
 
@@ -244,14 +264,24 @@ async def start_service() -> None:
     if _task is None or _task.done():
         _task = asyncio.create_task(_loop(), name="claude_code_service")
         log.info("claude_code_service_started")
+    if _my_work_task is None or _my_work_task.done():
+        _my_work_task = asyncio.create_task(_my_work_loop(), name="claude_code_my_work")
 
 
 async def stop_service() -> None:
-    global _task
-    from laya.claude_code import accounts, terminal
+    global _task, _my_work_task
+    from laya.claude_code import accounts, my_work, terminal
 
     await terminal.shutdown_all()
     await accounts.shutdown()
+    if _my_work_task is not None:
+        _my_work_task.cancel()
+        try:
+            await _my_work_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _my_work_task = None
+    my_work.reset()
     if _task is not None:
         _task.cancel()
         try:
