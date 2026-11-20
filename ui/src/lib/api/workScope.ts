@@ -37,7 +37,7 @@ export async function setGithubOrgs(orgs: string[]): Promise<void> {
 	await json('/claude-code/github/config', { method: 'PUT', body: JSON.stringify(config) });
 }
 
-/** "somnia-chain, acme" or "all repositories" for the scope line. */
+/** "acme, globex" or "all repositories" for the scope line. */
 export function scopeLabel(orgs: string[] | null | undefined): string {
 	return orgs && orgs.length ? orgs.join(', ') : 'all repositories';
 }
